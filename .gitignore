@@ -1,0 +1,47 @@
+# EWR Specific
+models/*
+!models/*.txt
+!models/*.c
+!models/README.md
+
+# CMake Artifacts
+build/
+out/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Makefile
+cmake_install.cmake
+compile_commands.json
+install_manifest.txt
+
+# Visual Studio / MSVC (Windows)
+.vs/
+*.sln
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.pdb
+*.idb
+*.ilk
+*.obj
+*.lib
+*.exp
+
+# Linux / Arch Builds
+*.o
+*.so
+*.a
+
+# Executables
+*.exe
+ewr
+
+# Editor Settings
+.vscode/
+.idea/
+*.swp

@@ -134,36 +134,29 @@ namespace ewr {
         return totalRead;
     }
 
-    bool ExecutePayloadSequence(EwrDeviceHandle hPrinter, const std::vector<PayloadPair>& sequence)
-    {
-        std::cout << "\nExecuting native hardware state machine..." << std::endl;
-
+    bool ExecutePayloadSequence(EwrDeviceHandle hPrinter, const std::vector<std::vector<unsigned char>>& sequence) {
+        std::cout << "\nExecuting universal hardware state machine..." << std::endl;
         HANDLE winHandle = static_cast<HANDLE>(hPrinter);
 
-        for (size_t i = 0; i < sequence.size(); ++i)
-        {
-            const auto& pair = sequence[i];
+        for (size_t i = 0; i < sequence.size(); ++i) {
 
-            if (!AsyncWrite(winHandle, pair.command))
-            {
-                std::cerr << "Failed to send command on pair " << i + 1 << std::endl;
+            if (!AsyncWrite(winHandle, sequence[i])) {
+                std::cerr << "Failed to send packet " << i + 1 << std::endl;
                 return false;
             }
-
-            if (!AsyncWrite(winHandle, pair.query))
-            {
-                std::cerr << "Failed to send query on pair " << i + 1 << std::endl;
-                return false;
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-            DWORD totalBytesReturned = AsyncDrainBuffer(winHandle);
-
-            std::cout << "-> Pair " << i + 1 << " / " << sequence.size()
-                << " | Cleared " << totalBytesReturned << " bytes from pipe." << std::endl;
 
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+            DWORD bytesReturned = AsyncDrainBuffer(winHandle);
+
+            if (bytesReturned > 0) {
+                std::cout << "-> Packet " << i + 1 << " / " << sequence.size()
+                    << " | Triggered ACK: Cleared " << bytesReturned << " bytes." << std::endl;
+            }
+            else {
+                std::cout << "-> Packet " << i + 1 << " / " << sequence.size()
+                    << " | Sent. (No ACK)" << std::endl;
+            }
         }
         return true;
     }

@@ -7,6 +7,6 @@ namespace ewr {
     typedef void* EwrDeviceHandle;
 
     EwrDeviceHandle AutoConnectEpsonPrinter();
-    bool ExecutePayloadSequence(EwrDeviceHandle hPrinter, const std::vector<PayloadPair>& sequence);
+    bool ExecutePayloadSequence(EwrDeviceHandle hPrinter, const std::vector<std::vector<unsigned char>>& sequence);
     void DisconnectPrinter(EwrDeviceHandle hPrinter);
 }

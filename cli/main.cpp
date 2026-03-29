@@ -39,7 +39,7 @@ int main()
     ewr::PrinterModel selectedModel = models[choice - 1];
     std::cout << "\nParsing Wireshark dump for " << selectedModel.name << "..." << std::endl;
 
-    std::vector<ewr::PayloadPair> executionSequence = ewr::ParseWiresharkDump(selectedModel.filepath);
+    std::vector<std::vector<unsigned char>> executionSequence = ewr::ParseWiresharkDump(selectedModel.filepath);
 
     if (executionSequence.empty())
     {
@@ -48,7 +48,7 @@ int main()
         return 1;
     }
 
-    std::cout << "Successfully loaded " << executionSequence.size() << " operational pairs." << std::endl;
+    std::cout << "Successfully loaded " << executionSequence.size() << " raw operational packets." << std::endl;
 
     std::cout << "\nScanning USB ports for Epson device..." << std::endl;
     ewr::EwrDeviceHandle hPrinter = ewr::AutoConnectEpsonPrinter();

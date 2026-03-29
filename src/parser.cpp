@@ -38,9 +38,9 @@ namespace ewr {
         return availableModels;
     }
 
-    std::vector<PayloadPair> ParseWiresharkDump(const std::string& filepath)
+    std::vector<std::vector<unsigned char>> ParseWiresharkDump(const std::string& filepath)
     {
-        std::vector<PayloadPair> sequence;
+        std::vector<std::vector<unsigned char>> sequence;
         std::ifstream file(filepath);
 
         if (!file.is_open())
@@ -81,14 +81,6 @@ namespace ewr {
             }
         }
 
-        for (size_t i = 0; i < all_packets.size() - 1; i += 2)
-        {
-            PayloadPair pair;
-            pair.command = all_packets[i];
-            pair.query = all_packets[i + 1];
-            sequence.push_back(pair);
-        }
-
-        return sequence;
+        return all_packets;
     }
 }

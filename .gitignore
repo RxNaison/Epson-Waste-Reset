@@ -39,7 +39,7 @@ install_manifest.txt
 
 # Executables
 *.exe
-ewr
+Release
 
 # Editor Settings
 .vscode/

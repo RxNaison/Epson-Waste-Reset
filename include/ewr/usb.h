@@ -1,6 +1,8 @@
 #pragma once
 #include "ewr/payload.h"
+#ifdef _WIN32
 #include <windows.h>
+#endif
 #include <vector>
 
 namespace ewr {

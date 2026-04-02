@@ -9,18 +9,18 @@ namespace ewr {
 
     unsigned char EP_IN = 0;
     unsigned char EP_OUT = 0;
+    static libusb_context* g_ctx = nullptr;  // <-- store ctx globally
 
     EwrDeviceHandle AutoConnectEpsonPrinter()
     {
-        libusb_context* ctx = nullptr;
-        if (libusb_init(&ctx) < 0)
+        if (libusb_init(&g_ctx) < 0)
         {
             std::cerr << "Failed to initialize libusb." << std::endl;
             return nullptr;
         }
 
         libusb_device** devs;
-        ssize_t cnt = libusb_get_device_list(ctx, &devs);
+        ssize_t cnt = libusb_get_device_list(g_ctx, &devs);
         if (cnt < 0) return nullptr;
 
         libusb_device_handle* handle = nullptr;
@@ -75,7 +75,7 @@ namespace ewr {
         libusb_free_device_list(devs, 1);
 
         if (!handle)
-            libusb_exit(ctx);
+            libusb_exit(g_ctx);
 
         return static_cast<EwrDeviceHandle>(handle);
     }
@@ -90,9 +90,8 @@ namespace ewr {
         libusb_release_interface(handle, 0);
         libusb_attach_kernel_driver(handle, 0);
 
-        libusb_context* ctx = libusb_get_context(libusb_get_device(handle));
         libusb_close(handle);
-        libusb_exit(ctx);
+        libusb_exit(g_ctx);
     }
 
     bool ExecutePayloadSequence(EwrDeviceHandle hPrinter, const std::vector<std::vector<unsigned char>>& sequence) {

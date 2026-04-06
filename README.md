@@ -67,5 +67,7 @@ If your printer isn't in the `models/` folder yet, you can add support for it wi
 2. Run EWR. The Smart Parser will automatically strip the Wireshark metadata and execute the payload.
 3. If your waste counter successfully resets, open a Pull Request and upload your `.c` file to the repository so the rest of the world can use it!
 
+Video Guide: https://youtu.be/PQzxifFqMsA
+
 ## ⚠️ Disclaimer
 Manipulating hardware via raw USB packets carries inherent risks. EWR is provided "as is" without warranty of any kind. By using this software, you accept full responsibility for your hardware.

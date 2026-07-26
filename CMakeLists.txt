@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.15)
-project(EWR VERSION 1.1.0 LANGUAGES CXX)
+project(EWR VERSION 1.2.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(LIB_SOURCES src/parser.cpp src/generator.cpp)
+set(LIB_SOURCES src/parser.cpp src/generator.cpp src/executor.cpp)
 
 if(WIN32)
     list(APPEND LIB_SOURCES src/usb_windows.cpp)
@@ -34,3 +34,13 @@ endif()
 add_executable(ewr cli/main.cpp)
 target_link_libraries(ewr PRIVATE ewr_core)
 set_target_properties(ewr PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
+option(EWR_BUILD_TESTS "Build EWR unit tests" ON)
+if(EWR_BUILD_TESTS)
+    enable_testing()
+    add_executable(ewr_tests tests/main_test.cpp)
+    target_link_libraries(ewr_tests PRIVATE ewr_core)
+    # Tests read database.json and the models/ folder, so they must run
+    # from the repository root regardless of the build directory layout.
+    add_test(NAME UnitTests COMMAND ewr_tests WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+endif()

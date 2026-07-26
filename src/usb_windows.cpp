@@ -1,12 +1,11 @@
 #include "ewr/usb.h"
+#include "ewr/executor.h"
+#include "ewr/generator.h"
 #include <setupapi.h>
 #include <initguid.h>
 #include <iostream>
 #include <fstream>
-#include <sstream>
-#include <iomanip>
-#include <thread>
-#include <chrono>
+#include <string>
 #include <algorithm>
 
 #pragma comment(lib, "setupapi.lib")
@@ -14,35 +13,6 @@
 DEFINE_GUID(GUID_DEVINTERFACE_USBPRINT, 0x28d78fad, 0x5a12, 0x11d1, 0xae, 0x5b, 0x00, 0x00, 0xf8, 0x03, 0xa8, 0xc2);
 
 namespace ewr {
-
-    std::string HexDump(const unsigned char* data, size_t size) 
-    {
-        if (size == 0)
-            return "    (Empty)\n";
-
-        std::ostringstream oss;
-        for (size_t i = 0; i < size; ++i)
-        {
-            oss << std::hex << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
-            if ((i + 1) % 16 == 0 || i == size - 1)
-            {
-                if (i == size - 1 && (i + 1) % 16 != 0)
-                {
-                    for (size_t p = 0; p < 16 - ((i + 1) % 16); ++p)
-                        oss << "   ";
-                }
-
-                oss << " | ";
-                size_t start = (i / 16) * 16;
-
-                for (size_t j = start; j <= i; ++j)
-                    oss << (char)((data[j] >= 32 && data[j] <= 126) ? data[j] : '.');
-
-                oss << "\n";
-            }
-        }
-        return oss.str();
-    }
 
     void LogToTrace(const std::string& message)
     {
@@ -82,7 +52,7 @@ namespace ewr {
         }
     }
 
-    HANDLE AutoConnectEpsonPrinter()
+    EwrDeviceHandle AutoConnectEpsonPrinter()
     {
         HANDLE hPrinter = INVALID_HANDLE_VALUE;
         {
@@ -294,190 +264,186 @@ namespace ewr {
             }
         }
 
-        return hPrinter == INVALID_HANDLE_VALUE ? nullptr : hPrinter;
+        return hPrinter == INVALID_HANDLE_VALUE ? nullptr : static_cast<EwrDeviceHandle>(hPrinter);
     }
 
-    bool AsyncWrite(HANDLE hPrinter, const std::vector<unsigned char>& data)
-    {
-        DWORD bytesWritten = 0;
-        OVERLAPPED osWrite = { 0 };
-        osWrite.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    namespace {
 
-        if (!osWrite.hEvent)
+        bool AsyncWrite(HANDLE hPrinter, const std::vector<unsigned char>& data)
         {
-            DWORD err = GetLastError();
-            LogToTrace("[!] AsyncWrite: CreateEvent failed. " + GetWindowsErrorString(err));
-            return false;
-        }
+            DWORD bytesWritten = 0;
+            OVERLAPPED osWrite = { 0 };
+            osWrite.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 
-        bool success = WriteFile(hPrinter, data.data(), data.size(), &bytesWritten, &osWrite);
-        if (!success)
-        {
-            DWORD err = GetLastError();
-            if (err == ERROR_IO_PENDING)
-            {
-                DWORD waitResult = WaitForSingleObject(osWrite.hEvent, 2000);
-                if (waitResult == WAIT_OBJECT_0)
-                {
-                    success = GetOverlappedResult(hPrinter, &osWrite, &bytesWritten, FALSE);
-                    if (!success) 
-                    {
-                        DWORD overlapErr = GetLastError();
-                        LogToTrace("[!] AsyncWrite: GetOverlappedResult failed after completion. " + GetWindowsErrorString(overlapErr));
-                    }
-                }
-                else if (waitResult == WAIT_TIMEOUT)
-                {
-                    LogToTrace("[!] AsyncWrite: WaitForSingleObject timed out (2000ms limit reached). Cancelling I/O...");
-                    CancelIo(hPrinter);
-                    success = false;
-                } 
-                else 
-                {
-                    DWORD waitErr = GetLastError();
-                    LogToTrace("[!] AsyncWrite: WaitForSingleObject failed with error: " + std::to_string(waitResult) + ". " + GetWindowsErrorString(waitErr));
-                    CancelIo(hPrinter);
-                    success = false;
-                }
-            }
-            else 
-            {
-                LogToTrace("[!] AsyncWrite: WriteFile failed immediately. " + GetWindowsErrorString(err));
-            }
-        }
-
-        CloseHandle(osWrite.hEvent);
-
-        if (success && bytesWritten != data.size()) 
-        {
-            LogToTrace("[!] AsyncWrite: Write reported success but bytesWritten (" + std::to_string(bytesWritten) + ") != expected size (" + std::to_string(data.size()) + ").");
-            return false;
-        }
-
-        return success;
-    }
-
-    std::vector<unsigned char> AsyncDrainBuffer(HANDLE hPrinter)
-    {
-        std::vector<unsigned char> totalData;
-        BYTE buffer[256];
-
-        while (true)
-        {
-            DWORD bytesRead = 0;
-            OVERLAPPED osRead = { 0 };
-            osRead.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-
-            if (!osRead.hEvent)
+            if (!osWrite.hEvent)
             {
                 DWORD err = GetLastError();
-                LogToTrace("[!] AsyncDrainBuffer: CreateEvent failed. " + GetWindowsErrorString(err));
-                break;
+                LogToTrace("[!] AsyncWrite: CreateEvent failed. " + GetWindowsErrorString(err));
+                return false;
             }
 
-            bool success = ReadFile(hPrinter, buffer, sizeof(buffer), &bytesRead, &osRead);
+            bool success = WriteFile(hPrinter, data.data(), data.size(), &bytesWritten, &osWrite);
             if (!success)
             {
                 DWORD err = GetLastError();
                 if (err == ERROR_IO_PENDING)
                 {
-                    DWORD waitResult = WaitForSingleObject(osRead.hEvent, 250);
+                    DWORD waitResult = WaitForSingleObject(osWrite.hEvent, 2000);
                     if (waitResult == WAIT_OBJECT_0)
                     {
-                        success = GetOverlappedResult(hPrinter, &osRead, &bytesRead, FALSE);
-                        if (!success)
+                        success = GetOverlappedResult(hPrinter, &osWrite, &bytesWritten, FALSE);
+                        if (!success) 
                         {
                             DWORD overlapErr = GetLastError();
-                            LogToTrace("[!] AsyncDrainBuffer: GetOverlappedResult failed after completion. " + GetWindowsErrorString(overlapErr));
+                            LogToTrace("[!] AsyncWrite: GetOverlappedResult failed after completion. " + GetWindowsErrorString(overlapErr));
                         }
-                    } 
+                    }
                     else if (waitResult == WAIT_TIMEOUT)
                     {
+                        LogToTrace("[!] AsyncWrite: WaitForSingleObject timed out (2000ms limit reached). Cancelling I/O...");
                         CancelIo(hPrinter);
-                        GetOverlappedResult(hPrinter, &osRead, &bytesRead, FALSE);
-                    }
+                        GetOverlappedResult(hPrinter, &osWrite, &bytesWritten, TRUE);
+                        success = false;
+                    } 
                     else 
                     {
                         DWORD waitErr = GetLastError();
-                        LogToTrace("[!] AsyncDrainBuffer: WaitForSingleObject failed. " + GetWindowsErrorString(waitErr));
+                        LogToTrace("[!] AsyncWrite: WaitForSingleObject failed with error: " + std::to_string(waitResult) + ". " + GetWindowsErrorString(waitErr));
                         CancelIo(hPrinter);
+                        GetOverlappedResult(hPrinter, &osWrite, &bytesWritten, TRUE);
+                        success = false;
                     }
                 }
-                else
+                else 
                 {
-                    LogToTrace("[!] AsyncDrainBuffer: ReadFile failed immediately. " + GetWindowsErrorString(err));
+                    LogToTrace("[!] AsyncWrite: WriteFile failed immediately. " + GetWindowsErrorString(err));
                 }
             }
 
-            CloseHandle(osRead.hEvent);
+            CloseHandle(osWrite.hEvent);
 
-            if (bytesRead == 0)
-                break;
+            if (success && bytesWritten != data.size()) 
+            {
+                LogToTrace("[!] AsyncWrite: Write reported success but bytesWritten (" + std::to_string(bytesWritten) + ") != expected size (" + std::to_string(data.size()) + ").");
+                return false;
+            }
 
-            totalData.insert(totalData.end(), buffer, buffer + bytesRead);
+            return success;
         }
-        return totalData;
-    }
+
+        std::vector<unsigned char> AsyncDrainBuffer(HANDLE hPrinter)
+        {
+            std::vector<unsigned char> totalData;
+            BYTE buffer[256];
+
+            while (true)
+            {
+                DWORD bytesRead = 0;
+                OVERLAPPED osRead = { 0 };
+                osRead.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+
+                if (!osRead.hEvent)
+                {
+                    DWORD err = GetLastError();
+                    LogToTrace("[!] AsyncDrainBuffer: CreateEvent failed. " + GetWindowsErrorString(err));
+                    break;
+                }
+
+                bool success = ReadFile(hPrinter, buffer, sizeof(buffer), &bytesRead, &osRead);
+                if (!success)
+                {
+                    DWORD err = GetLastError();
+                    if (err == ERROR_IO_PENDING)
+                    {
+                        DWORD waitResult = WaitForSingleObject(osRead.hEvent, 250);
+                        if (waitResult == WAIT_OBJECT_0)
+                        {
+                            success = GetOverlappedResult(hPrinter, &osRead, &bytesRead, FALSE);
+                            if (!success)
+                            {
+                                DWORD overlapErr = GetLastError();
+                                LogToTrace("[!] AsyncDrainBuffer: GetOverlappedResult failed after completion. " + GetWindowsErrorString(overlapErr));
+                            }
+                        } 
+                        else if (waitResult == WAIT_TIMEOUT)
+                        {
+                            CancelIo(hPrinter);
+                            GetOverlappedResult(hPrinter, &osRead, &bytesRead, TRUE);
+                        }
+                        else 
+                        {
+                            DWORD waitErr = GetLastError();
+                            LogToTrace("[!] AsyncDrainBuffer: WaitForSingleObject failed. " + GetWindowsErrorString(waitErr));
+                            CancelIo(hPrinter);
+                            GetOverlappedResult(hPrinter, &osRead, &bytesRead, TRUE);
+                        }
+                    }
+                    else
+                    {
+                        LogToTrace("[!] AsyncDrainBuffer: ReadFile failed immediately. " + GetWindowsErrorString(err));
+                    }
+                }
+
+                CloseHandle(osRead.hEvent);
+
+                if (bytesRead == 0)
+                    break;
+
+                totalData.insert(totalData.end(), buffer, buffer + bytesRead);
+            }
+            return totalData;
+        }
+
+        class WindowsUsbTransport final : public ITransport
+        {
+        public:
+            explicit WindowsUsbTransport(HANDLE handle) : handle_(handle) {}
+
+            bool Send(const std::vector<unsigned char>& packet) override
+            {
+                return AsyncWrite(handle_, packet);
+            }
+
+            std::vector<unsigned char> Drain() override
+            {
+                return AsyncDrainBuffer(handle_);
+            }
+
+        private:
+            HANDLE handle_;
+        };
+
+    } // namespace
 
     bool ExecutePayloadSequence(EwrDeviceHandle hPrinter, const std::vector<std::vector<unsigned char>>& sequence)
     {
         std::cout << "\nExecuting universal Windows hardware state machine..." << std::endl;
         std::cout << "[i] Saving hardware trace to ewr_trace.log for diagnostics." << std::endl;
-        
-        LogToTrace("\n==================================================");
-        LogToTrace("BEGIN PAYLOAD SEQUENCE EXECUTION");
-        LogToTrace("Total Packets: " + std::to_string(sequence.size()));
-        LogToTrace("==================================================\n");
 
-        HANDLE winHandle = static_cast<HANDLE>(hPrinter);
-        size_t ackCount = 0;
+        std::ofstream logFile("ewr_trace.log", std::ios::app);
+        logFile << "\n==================================================\n";
+        logFile << "BEGIN PAYLOAD SEQUENCE EXECUTION\n";
+        logFile << "Total Packets: " << sequence.size() << "\n";
+        logFile << "==================================================\n\n";
 
-        for (size_t i = 0; i < sequence.size(); ++i)
+        WindowsUsbTransport transport(static_cast<HANDLE>(hPrinter));
+        ExecutionResult result = ExecuteSequence(transport, sequence, std::cout, logFile);
+
+        logFile << "==================================================\n";
+        logFile << "SEQUENCE COMPLETE\n";
+        logFile << "Packets sent:       " << result.packetsSent << " / " << sequence.size() << "\n";
+        logFile << "EEPROM writes:      " << result.writesVerified << " verified / " << result.writesTotal << " total\n";
+        logFile << "Result:             " << (result.success ? "SUCCESS" : ("FAILED - " + result.error)) << "\n";
+        logFile << "==================================================\n";
+
+        if (!result.success)
         {
-            LogToTrace("[OUT] Packet " + std::to_string(i + 1) + " (" + std::to_string(sequence[i].size()) + " bytes):");
-            LogToTrace(HexDump(sequence[i].data(), sequence[i].size()));
-
-            if (!AsyncWrite(winHandle, sequence[i]))
-            {
-                std::cerr << "Failed to send packet " << i + 1 << std::endl;
-                LogToTrace("[!] WRITE FAILED on Packet " + std::to_string(i + 1) + "\n");
-                return false;
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-            std::vector<unsigned char> ackData = AsyncDrainBuffer(winHandle);
-
-            LogToTrace("[IN]  ACK (" + std::to_string(ackData.size()) + " bytes):");
-            LogToTrace(HexDump(ackData.data(), ackData.size()));
-
-            if (!ackData.empty()) 
-            {
-                ackCount++;
-                std::cout << "-> Packet " << i + 1 << " / " << sequence.size() << " | Triggered ACK: Cleared " << ackData.size() << " bytes." << std::endl;
-            } 
-            else
-            {
-                std::cout << "-> Packet " << i + 1 << " / " << sequence.size() << " | Sent. (No ACK)" << std::endl;
-            }
-        }
-        
-        LogToTrace("==================================================");
-        LogToTrace("SEQUENCE COMPLETE");
-        LogToTrace("Total packets sent:          " + std::to_string(sequence.size()));
-        LogToTrace("Packets triggering responses: " + std::to_string(ackCount));
-        LogToTrace("==================================================\n");
-
-        if (ackCount == 0)
-        {
-            std::cerr << "\n[ERROR] The printer did not acknowledge any packets. The reset sequence was rejected or ignored." << std::endl;
-            std::cerr << "[!] Diagnostic tips:" << std::endl;
-            std::cerr << "    1. Unplug the printer's USB cable, wait 5 seconds, and plug it back in." << std::endl;
-            std::cerr << "    2. Restart the printer and try again." << std::endl;
-            std::cerr << "    3. Ensure no other printing software (like Epson Status Monitor) is active." << std::endl;
-            return false;
+            std::cerr << "\n[ERROR] " << result.error << std::endl;
+            std::cerr << "[!] The waste counter was NOT confirmed as reset." << std::endl;
+            std::cerr << "    Check ewr_trace.log for the full hardware trace." << std::endl;
         }
 
-        return true;
+        return result.success;
     }
-}
+
+} // namespace ewr

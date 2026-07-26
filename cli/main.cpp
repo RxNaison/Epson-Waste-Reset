@@ -36,6 +36,7 @@ int main()
         std::cout << "OFFLINE (Using local cache)." << std::endl;
 
     generator.LoadDatabase("database.json");
+
     auto replayModels = ewr::ScanModelsFolder("models");
     auto smartModels = generator.GetAvailableModels();
 
@@ -46,13 +47,25 @@ int main()
         return 1;
     }
 
-    std::cout << "[i] Loaded " << smartModels.size() << " Smart Protocol payloads." << std::endl;
-    std::cout << "[i] Loaded " << replayModels.size() << " Custom payloads.\n" << std::endl;
-
     std::vector<MenuOption> options;
+    size_t hiddenModels = 0;
 
     for (const auto& sm : smartModels)
+    {
+        if (!sm.HasResettableCounters())
+        {
+            hiddenModels++;
+            continue;
+        }
         options.push_back({ sm.name + " (Smart Protocol)", false, {}, sm });
+    }
+
+    std::cout << "[i] Loaded " << (smartModels.size() - hiddenModels) << " Smart Protocol payloads." << std::endl;
+
+    if (hiddenModels > 0)
+        std::cout << "[i] " << hiddenModels << " database entries have no USB-resettable counters and are hidden." << std::endl;
+
+    std::cout << "[i] Loaded " << replayModels.size() << " Custom payloads.\n" << std::endl;
 
     for (const auto& lm : replayModels)
         options.push_back({ lm.name + " (Replay)", true, lm, {} });
@@ -134,7 +147,18 @@ int main()
     }
     else
     {
-        std::cout << "\n[*] Generating safe Smart Protocol R/W sequence for " << selected.displayName << "..." << std::endl;
+        if (selected.smartModel.IsPlatenOnly())
+        {
+            std::cout << "\n================================================================================" << std::endl;
+            std::cout << "[!] NOTICE FOR " << selected.smartModel.name << ":" << std::endl;
+            std::cout << "    This printer model ONLY has EEPROM counters for the PLATEN PAD (borderless ink pad)." << std::endl;
+            std::cout << "    The MAIN WASTE INK BOX on this printer uses a physical hardware chip on the" << std::endl;
+            std::cout << "    maintenance tank and CANNOT be reset over USB EEPROM." << std::endl;
+            std::cout << "    To reset the Main Waste Ink Box, replace the maintenance box or use a physical chip resetter." << std::endl;
+            std::cout << "================================================================================\n" << std::endl;
+        }
+
+        std::cout << "[*] Generating safe Smart Protocol R/W sequence for " << selected.displayName << "..." << std::endl;
         executionSequence = generator.GenerateSequence(selected.smartModel);
     }
 
@@ -156,16 +180,26 @@ int main()
         return 1;
     }
 
-    if (ewr::ExecutePayloadSequence(hPrinter, executionSequence))
+    const bool resetOk = ewr::ExecutePayloadSequence(hPrinter, executionSequence);
+
+    if (resetOk)
     {
         std::cout << "\n========================================" << std::endl;
         std::cout << " SUCCESS! Turn the printer OFF, then ON." << std::endl;
         std::cout << "========================================" << std::endl;
+    }
+    else
+    {
+        std::cerr << "\n========================================" << std::endl;
+        std::cerr << " RESET FAILED. See messages above and" << std::endl;
+        std::cerr << " ewr_trace.log for details." << std::endl;
+        std::cerr << "========================================" << std::endl;
     }
 
     ewr::DisconnectPrinter(hPrinter);
 
     std::cout << "\nPress Enter to exit..." << std::endl;
     std::cin.get();
-    return 0;
+
+    return resetOk ? 0 : 1;
 }

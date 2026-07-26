@@ -45,3 +45,10 @@ Release
 .vscode/
 .idea/
 *.swp
+# Build artifacts
+build/
+Release/
+*.exe
+*.obj
+ewr_trace.log
+*.tmp

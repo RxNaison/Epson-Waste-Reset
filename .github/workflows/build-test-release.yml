@@ -1,0 +1,74 @@
+name: Build, Test & Release
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  checks: write
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install dependencies (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libusb-1.0-0-dev libcurl4-openssl-dev pkg-config
+
+    - name: Install dependencies (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install libusb curl pkgconfig
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DEWR_BUILD_TESTS=ON
+
+    - name: Build project
+      run: cmake --build build --config Release
+
+    - name: Run CTest
+      run: ctest --test-dir build --output-on-failure -C Release
+
+    - name: Publish Test Results Summary
+      if: always()
+      shell: bash
+      run: |
+        echo "## Test Summary for ${{ matrix.os }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Runner OS**: ${{ runner.os }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+    - name: Package Release Artifacts
+      if: startsWith(github.ref, 'refs/tags/')
+      shell: bash
+      run: |
+        mkdir -p dist
+        if [ "${{ runner.os }}" = "Windows" ]; then
+          cp build/Release/ewr.exe dist/ewr-windows-x64.exe || cp ewr.exe dist/ewr-windows-x64.exe
+        else
+          cp build/ewr dist/ewr-${{ runner.os }}-x64 || cp ewr dist/ewr-${{ runner.os }}-x64
+        fi
+
+    - name: Upload Artifacts to Draft Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        draft: true
+        files: dist/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

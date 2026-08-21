@@ -28,6 +28,8 @@ else()
     pkg_check_modules(LIBCURL REQUIRED libcurl)
     
     target_include_directories(ewr_core PRIVATE ${LIBUSB_INCLUDE_DIRS} ${LIBCURL_INCLUDE_DIRS})
+    # Homebrew keeps its libs outside the default linker search path.
+    target_link_directories(ewr_core PUBLIC ${LIBUSB_LIBRARY_DIRS} ${LIBCURL_LIBRARY_DIRS})
     target_link_libraries(ewr_core PRIVATE ${LIBUSB_LIBRARIES} ${LIBCURL_LIBRARIES})
 endif()
 

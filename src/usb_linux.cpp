@@ -1,7 +1,13 @@
 #include "ewr/usb.h"
 #include "ewr/executor.h"
 #include "ewr/generator.h"
+// Distro packages install the header under libusb-1.0/; Homebrew relies on the
+// pkg-config include dir already pointing inside that folder.
+#if __has_include(<libusb-1.0/libusb.h>)
 #include <libusb-1.0/libusb.h>
+#else
+#include <libusb.h>
+#endif
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
@@ -159,7 +165,7 @@ namespace ewr {
 
             if (logFile.is_open())
             {
-                logFile << "EWR Hardware Trace Log (Linux)\n";
+                logFile << "EWR Hardware Trace Log (libusb)\n";
                 logFile << "==================================================\n";
                 logFile << "Target VID: 0x04B8 | PID: 0x" << std::hex << desc.idProduct << std::dec << "\n";
                 logFile << "Target Interface: " << selected_interface << (found_printer_class ? " (Printer Class)" : " (Vendor-Specific Class)") << "\n";
@@ -211,7 +217,7 @@ namespace ewr {
 
     bool ExecutePayloadSequence(EwrDeviceHandle hPrinter, const std::vector<std::vector<unsigned char>>& sequence)
     {
-        std::cout << "\nExecuting universal Linux hardware state machine..." << std::endl;
+        std::cout << "\nExecuting universal libusb hardware state machine..." << std::endl;
         std::cout << "[i] Saving hardware trace to ewr_trace.log for diagnostics." << std::endl;
 
         LinuxDeviceContext* ctx = static_cast<LinuxDeviceContext*>(hPrinter);

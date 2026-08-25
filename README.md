@@ -1,5 +1,5 @@
 # EWR (Epson Waste Reset)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
 ![C++](https://img.shields.io/badge/language-C++17-orange)
 ![License](https://img.shields.io/badge/license-Apache_License_2.0-green)
 
@@ -12,20 +12,21 @@ EWR bypasses the need to pay for sketchy third-party reset keys (like WIC Reset)
 * **OTA Database Sync:** Automatically fetches a massive, continuously updated database of printer offsets and keys on startup using native OS APIs (Zero bloat).
 * **Cross-Platform Core:**
   * **Windows:** Uses 100% native Win32 `SetupAPI` and robust Asynchronous `OVERLAPPED` I/O to safely drain the Windows Print Spooler buffers. Zero custom drivers required.
-  * **Linux:** Uses `libusb` to automatically detach the kernel driver (CUPS) for exclusive, raw hardware access.
+  * **Linux & macOS:** Uses `libusb` to automatically detach the kernel driver (CUPS) for exclusive, raw hardware access.
 * **Zero Hardcoded PIDs:** Automatically scans your OS USB tree to find connected Epson printers.
 * **Replay Fallback:** If your printer is brand new and not in the database yet, EWR can still dynamically parse and execute raw Wireshark dumps (stripping USBPcap headers automatically).
 
 ### Prerequisites (For Building from Source)
 * **Windows:** Visual Studio with MSVC C++ build tools.
 * **Linux (Arch/Debian):** `cmake`, `gcc`, `pkgconf`, `libusb-1.0-dev`, and `libcurl4-openssl-dev`.
+* **macOS:** `brew install cmake libusb curl pkgconf`
 
 ## Usage
 
 1. Ensure your Epson printer is turned on and connected to your computer via USB.
 2. Run the executable:
    * **Windows:** Double-click `ewr.exe`
-   * **Linux:** `sudo ./ewr` *(Raw USB access requires root)*
+   * **Linux / macOS:** `sudo ./ewr` *(Raw USB access requires root)*
 3. **Note:** On the very first run, EWR requires an internet connection to download the latest printer database. Afterward, it works entirely offline.
 4. Type the number corresponding to your printer and hit Enter.
 5. Wait for the `SUCCESS` message, then **turn your printer off and back on using its physical power button** to commit the EEPROM changes to the motherboard.

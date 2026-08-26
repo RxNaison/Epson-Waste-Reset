@@ -13,7 +13,7 @@ configure_file(
     @ONLY
 )
 
-set(LIB_SOURCES src/parser.cpp src/generator.cpp src/executor.cpp src/status.cpp src/deviceid.cpp src/updater_common.cpp)
+set(LIB_SOURCES src/parser.cpp src/generator.cpp src/executor.cpp src/status.cpp src/deviceid.cpp src/updater_common.cpp src/end4.cpp)
 
 if(WIN32)
     list(APPEND LIB_SOURCES src/usb_windows.cpp src/updater_windows.cpp)

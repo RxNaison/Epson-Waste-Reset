@@ -2,31 +2,35 @@ name: Auto-Update Printer Database
 
 on:
   schedule:
-    - cron: '0 0 * * 0' # Every Sunday
-  workflow_dispatch:
+    - cron: '0 0 * * 0' # Sundays, 00:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
-  update-database:
+  update:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write 
-
     steps:
-      - name: Checkout Repository
+      - name: Check out the repo
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Run Conversion Script
-        run: python scripts/update_db.py
+      - name: Rebuild database.json from upstream sources
+        run: python scripts/build_db.py build
 
-      - name: Commit and Push
+      - name: Commit only if something new turned up
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add database.json
-          git commit -m "chore: auto-update printer database from upstream" || exit 0
-          git push
+          if git diff --quiet -- database.json; then
+            echo "Nothing new upstream this week; no commit."
+          else
+            git config user.name "ewr-database-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add database.json
+            git commit -m "database: weekly upstream refresh (automated)"
+            git push
+          fi

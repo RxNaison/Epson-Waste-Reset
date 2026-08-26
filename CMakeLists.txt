@@ -47,7 +47,16 @@ endif()
 
 add_executable(ewr cli/main.cpp)
 target_link_libraries(ewr PRIVATE ewr_core)
-set_target_properties(ewr PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+# Multi-config generators (MSVC) append the configuration name to the output
+# directory unless every per-config variant is set. The release workflow copies
+# the binary from a fixed path, so pin all of them.
+set_target_properties(ewr PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_SOURCE_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_CURRENT_SOURCE_DIR}"
+)
 
 option(EWR_BUILD_TESTS "Build EWR unit tests" ON)
 if(EWR_BUILD_TESTS)

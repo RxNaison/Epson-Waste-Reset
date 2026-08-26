@@ -3,6 +3,20 @@ models/*
 !models/*.txt
 !models/*.c
 !models/README.md
+ewr_trace.log
+dist/
+
+# Updater staging files
+*.staged
+database.json.tmp
+
+__pycache__/
+ewr_dump_*.txt
+dump-console-log*.txt
+
+ewr.zip
+EWR-*.zip
+EWR-*.tar.gz
 
 # CMake Artifacts
 build/
@@ -39,16 +53,11 @@ install_manifest.txt
 
 # Executables
 *.exe
-Release
+/ewr
+/ewr_tests
+Release/
 
 # Editor Settings
 .vscode/
 .idea/
 *.swp
-# Build artifacts
-build/
-Release/
-*.exe
-*.obj
-ewr_trace.log
-*.tmp

@@ -83692,6 +83692,62 @@
                     0
                 ]
             }
+        ],
+        "ink_groups": [
+            {
+                "color": "black",
+                "addresses": [
+                    132
+                ],
+                "reset": [
+                    0
+                ]
+            },
+            {
+                "color": "cyan",
+                "addresses": [
+                    136
+                ],
+                "reset": [
+                    0
+                ]
+            },
+            {
+                "color": "magenta",
+                "addresses": [
+                    140
+                ],
+                "reset": [
+                    0
+                ]
+            },
+            {
+                "color": "yellow",
+                "addresses": [
+                    144
+                ],
+                "reset": [
+                    0
+                ]
+            },
+            {
+                "color": "lightcyan",
+                "addresses": [
+                    148
+                ],
+                "reset": [
+                    0
+                ]
+            },
+            {
+                "color": "lightmagenta",
+                "addresses": [
+                    152
+                ],
+                "reset": [
+                    0
+                ]
+            }
         ]
     },
     "R230": {

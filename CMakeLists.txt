@@ -5,12 +5,20 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(LIB_SOURCES src/parser.cpp src/generator.cpp src/executor.cpp)
+# The version string the self-updater compares against GitHub release tags is
+# generated from the project() version above, so there is exactly one copy of it.
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/ewr/version.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/ewr/version.h
+    @ONLY
+)
+
+set(LIB_SOURCES src/parser.cpp src/generator.cpp src/executor.cpp src/updater_common.cpp)
 
 if(WIN32)
-    list(APPEND LIB_SOURCES src/usb_windows.cpp)
+    list(APPEND LIB_SOURCES src/usb_windows.cpp src/updater_windows.cpp)
 else()
-    list(APPEND LIB_SOURCES src/usb_linux.cpp)
+    list(APPEND LIB_SOURCES src/usb_linux.cpp src/updater_linux.cpp)
 endif()
 
 add_library(ewr_core STATIC ${LIB_SOURCES})
@@ -18,10 +26,14 @@ add_library(ewr_core STATIC ${LIB_SOURCES})
 target_include_directories(ewr_core PUBLIC 
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/vendor>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
 )
 
+find_package(Threads REQUIRED)
+target_link_libraries(ewr_core PUBLIC Threads::Threads)
+
 if(WIN32)
-    target_link_libraries(ewr_core PRIVATE setupapi urlmon)
+    target_link_libraries(ewr_core PRIVATE setupapi urlmon wininet)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBUSB REQUIRED libusb-1.0)

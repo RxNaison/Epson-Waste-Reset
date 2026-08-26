@@ -7,6 +7,12 @@ A free, cross-platform, and completely open-source C++ utility to reset the "Was
 
 EWR bypasses the need to pay for sketchy third-party reset keys (like WIC Reset) or run malicious, virus-flagged `AdjProg.exe` binaries. By dynamically generating IEEE 1284.4 hardware packets and utilizing a continuously updated database, EWR communicates directly with the printer's motherboard over USB to safely zero out the EEPROM waste counters.
 
+<p align="center">
+  <a href="https://github.com/RxNaison/Epson-Waste-Reset/releases/latest">
+    <img src="https://img.shields.io/badge/DOWNLOAD%20LATEST%20RELEASE-2ea44f?style=for-the-badge&logo=github&logoColor=white" alt="Download the latest EWR release">
+  </a>
+</p>
+
 ## Features
 * **Smart Protocol Engine:** Constructs exact EEPROM write packets (`|B`) on the fly based on specific printer models. It safely manages the IEEE 1284.4 (D4) hardware credit system to prevent buffer overflows and lockups.
 * **OTA Database Sync:** Automatically fetches a massive, continuously updated database of printer offsets and keys on startup using native OS APIs (Zero bloat).
@@ -23,13 +29,14 @@ EWR bypasses the need to pay for sketchy third-party reset keys (like WIC Reset)
 
 ## Usage
 
-1. Ensure your Epson printer is turned on and connected to your computer via USB.
-2. Run the executable:
+1. Download the latest version from the [Releases page](https://github.com/RxNaison/Epson-Waste-Reset/releases/latest) (or click the big green button above) and unzip it anywhere.
+2. Ensure your Epson printer is turned on and connected to your computer via USB.
+3. Run the executable:
    * **Windows:** Double-click `ewr.exe`
    * **Linux / macOS:** `sudo ./ewr` *(Raw USB access requires root)*
-3. **Note:** On the very first run, EWR requires an internet connection to download the latest printer database. Afterward, it works entirely offline.
-4. Type the number corresponding to your printer and hit Enter.
-5. Wait for the `SUCCESS` message, then **turn your printer off and back on using its physical power button** to commit the EEPROM changes to the motherboard.
+4. **Note:** On the very first run, EWR requires an internet connection to download the latest printer database. Afterward, it works entirely offline.
+5. Type the number corresponding to your printer and hit Enter.
+6. Wait for the `SUCCESS` message, then **turn your printer off and back on using its physical power button** to commit the EEPROM changes to the motherboard.
 
 ## Building from Source
 
@@ -42,7 +49,7 @@ cmake -B build
 # 2. Compile the project (Release mode)
 cmake --build build --config Release
 ```
-The compiled executable `(ewr.exe or ewr)` will be located in the `Release` directory.
+The compiled executable `(ewr.exe or ewr)` will be placed in the repository root (the build pins the output directory there so the binary sits next to `database.json` and the `models/` folder).
 
 ## 🤝 Contributing a New Printer Model (Replay Fallback)
 

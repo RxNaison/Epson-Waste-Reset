@@ -120,22 +120,26 @@ jobs:
     # to the user). Names follow the existing EWR-<tag>-<os> convention. The
     # macOS archive carries the machine type because the hosted runner is
     # arm64 and the binary is not universal.
+    #
+    # The payload is staged in stage/EWR, not ./EWR: CMake pins the built
+    # binary to the repo root as `ewr`, and macOS filesystems are
+    # case-insensitive, so mkdir EWR there collides with that file.
     - name: Package release artifacts
       shell: bash
       run: |
-        mkdir -p dist EWR
+        mkdir -p dist stage/EWR
         case "${{ runner.os }}" in
           Windows)
-            cp ewr.exe database.json EWR/
-            7z a "dist/EWR-${GITHUB_REF_NAME}-win.zip" EWR
+            cp ewr.exe database.json stage/EWR/
+            (cd stage && 7z a "../dist/EWR-${GITHUB_REF_NAME}-win.zip" EWR)
             ;;
           macOS)
-            cp ewr database.json EWR/
-            tar -czf "dist/EWR-${GITHUB_REF_NAME}-macos-$(uname -m).tar.gz" EWR
+            cp ewr database.json stage/EWR/
+            tar -czf "dist/EWR-${GITHUB_REF_NAME}-macos-$(uname -m).tar.gz" -C stage EWR
             ;;
           *)
-            cp ewr database.json EWR/
-            tar -czf "dist/EWR-${GITHUB_REF_NAME}-linux.tar.gz" EWR
+            cp ewr database.json stage/EWR/
+            tar -czf "dist/EWR-${GITHUB_REF_NAME}-linux.tar.gz" -C stage EWR
             ;;
         esac
         ls -l dist

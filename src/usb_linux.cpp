@@ -138,6 +138,12 @@ namespace ewr {
                     trace_ << "no data arrived; ";
                 trace_ << "last status: " << libusb_error_name(lastStatus) << ".\n";
 
+                // Logged here rather than at the call sites: a caller may
+                // discard a drain without ever looking at it.
+                if (!data.empty())
+                    trace_ << "[io] IN payload (" << data.size() << " bytes):\n"
+                           << HexDumpCapped(data.data(), data.size(), kTraceDumpCapBytes);
+
                 return data;
             }
 

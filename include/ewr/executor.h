@@ -111,6 +111,12 @@ namespace ewr {
 
     std::string HexDump(const unsigned char* data, size_t size);
 
+    // A drain may return kMaxDrainBytes, a quarter megabyte of hex per call.
+    // The head of a reply is what identifies it.
+    inline constexpr size_t kTraceDumpCapBytes = 512;
+
+    std::string HexDumpCapped(const unsigned char* data, size_t size, size_t maxBytes);
+
     // User-facing lines are Info events, trace-log lines are Trace events.
     ExecutionResult ExecuteSequence(ITransport& transport,
                                     const std::vector<std::vector<unsigned char>>& sequence,
@@ -163,6 +169,9 @@ namespace ewr {
         bool success = false;
         // Separates a silent transport from "answered, but not OK".
         bool anyReply = false;
+        // Inbound bytes of any framing. Only silence here indicts the transport:
+        // `anyReply` is false whenever the framing merely fails to match.
+        bool anyBytes = false;
         size_t writesTotal = 0;
         size_t writesVerified = 0;
         size_t writesRejected = 0;

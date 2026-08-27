@@ -3679,8 +3679,88 @@ void test_end4_sequence_silent_fails()
     // Honest failure: no false success, and silence is reported as silence.
     CHECK(!result.success);
     CHECK(!result.anyReply);
+    CHECK(!result.anyBytes);
     CHECK(result.writesVerified == 0);
     CHECK(!result.error.empty());
+}
+
+// The ET-2xxx case from issue #16: the printer answers the packet-mode flush
+// with a substantial non-END4 reply and then ignores the END4 writes. That is a
+// working transport with unanswered framing, not a filtered one, and the run
+// must not report it as silence.
+void test_end4_sequence_reports_unframed_bytes()
+{
+    std::cout << "[TEST] test_end4_sequence_reports_unframed_bytes" << std::endl;
+
+    const ewr::DbPrinterModel model = MakeTestModel();
+    const std::vector<std::vector<unsigned char>> commands =
+        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+
+    FakeTransport transport;
+    transport.replyFor = [](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
+        // Only the packet-mode flush draws anything, and it is not END4-framed.
+        if (!pkt.empty() && pkt.front() == 0x11)
+        {
+            const std::string status = "@BDC PS\r\nST:04;";
+            return std::vector<unsigned char>(status.begin(), status.end());
+        }
+        return {};
+    };
+
+    ewr::ExecutorOptions options;
+    options.writeKey = model.wkey;
+    options.interPacketDelayMs = 0;
+    options.writeAckTimeoutMs = 10;
+    options.handshakeDrainTimeoutMs = 100;
+
+    std::vector<ewr::log::Event> events;
+    ewr::log::Reporter reporter;
+    reporter.AddSink([&events](const ewr::log::Event& e) { events.push_back(e); });
+
+    const ewr::End4Result result =
+        ewr::ExecuteEnd4Sequence(transport, "DDS:0020;", commands, reporter, options);
+
+    CHECK(!result.success);
+    CHECK(!result.anyReply);      // nothing carried the 'END4' marker
+    CHECK(result.anyBytes);       // but bytes did arrive
+    CHECK(result.writesVerified == 0);
+
+    // A count alone made this indistinguishable from a mute printer, so the
+    // bytes themselves have to reach the trace.
+    bool dumped = false;
+    for (const auto& e : events)
+    {
+        if (e.code != "end4.post_flush")
+            continue;
+
+        CHECK(e.level == ewr::log::Level::Trace);
+        CHECK(e.message.find("15 bytes") != std::string::npos);
+        CHECK(e.message.find("40 42 44 43") != std::string::npos); // "@BDC" in hex
+        CHECK(e.message.find("@BDC PS") != std::string::npos);     // ASCII column
+        dumped = true;
+    }
+    CHECK(dumped);
+
+    // The old wording blamed the driver on this exact evidence. It must not.
+    CHECK(result.error.find("usbprint.sys") == std::string::npos);
+    CHECK(result.error.find("never answered") == std::string::npos);
+}
+
+void test_hex_dump_capping()
+{
+    std::cout << "[TEST] test_hex_dump_capping" << std::endl;
+
+    const std::vector<unsigned char> eight = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+    CHECK(ewr::HexDumpCapped(eight.data(), eight.size(), 8) == ewr::HexDump(eight.data(), eight.size()));
+    CHECK(ewr::HexDumpCapped(eight.data(), eight.size(), 64) == ewr::HexDump(eight.data(), eight.size()));
+
+    // Over the cap: head kept, remainder counted rather than silently dropped.
+    const std::string capped = ewr::HexDumpCapped(eight.data(), eight.size(), 4);
+    CHECK(capped.find("... 4 further byte(s) not shown") != std::string::npos);
+    CHECK(capped.find(ewr::HexDump(eight.data(), 4)) == 0);
+
+    CHECK(ewr::HexDumpCapped(eight.data(), 0, 16) == ewr::HexDump(eight.data(), 0));
 }
 
 void test_end4_sequence_alternate_key()
@@ -3809,6 +3889,8 @@ int main()
     test_end4_framing();
     test_end4_factory_command_extraction();
     test_end4_dds_parsing();
+    test_end4_sequence_reports_unframed_bytes();
+    test_hex_dump_capping();
     test_end4_sequence_verified();
     test_end4_sequence_silent_fails();
     test_end4_sequence_alternate_key();

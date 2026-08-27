@@ -480,6 +480,12 @@ namespace ewr {
             trace << "empty polls: " << syncEmptyPolls << " sync, " << pendingEmpty
                   << " pending-empty, " << pendingTimeouts << " pending-timeout.\n";
 
+            // Logged here rather than at the call sites: a caller may discard
+            // a drain without ever looking at it.
+            if (!totalData.empty())
+                trace << "[io] IN payload (" << totalData.size() << " bytes):\n"
+                      << HexDumpCapped(totalData.data(), totalData.size(), kTraceDumpCapBytes);
+
             return totalData;
         }
 

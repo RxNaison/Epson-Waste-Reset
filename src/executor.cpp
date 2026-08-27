@@ -55,6 +55,15 @@ namespace ewr {
         return oss.str();
     }
 
+    std::string HexDumpCapped(const unsigned char* data, size_t size, size_t maxBytes)
+    {
+        if (size <= maxBytes)
+            return HexDump(data, size);
+
+        return HexDump(data, maxBytes)
+            + "    ... " + std::to_string(size - maxBytes) + " further byte(s) not shown\n";
+    }
+
     bool IsWritePacket(const std::vector<unsigned char>& p)
     {
         // [0..5] D4 header, [6..9] 7C 7C + LE inner length,
@@ -707,8 +716,16 @@ namespace ewr {
             }
         }
 
-        // Clear anything the preamble / flush stirred up before the writes.
-        transport.Drain(options.drainTimeoutMs);
+        // Clears the channel before the writes, but on the ET-2xxx units in
+        // issue #16 this is the only multi-byte reply of the run, so it is
+        // dumped rather than dropped.
+        const std::vector<unsigned char> postFlush = transport.Drain(options.drainTimeoutMs);
+        EmitTrace(reporter, "end4.post_flush", "[END4 IN] post-flush drain ("
+            + std::to_string(postFlush.size()) + " bytes):\n"
+            + HexDumpCapped(postFlush.data(), postFlush.size(), kTraceDumpCapBytes));
+
+        if (!postFlush.empty())
+            result.anyBytes = true;
 
         // 3) Each factory write, framed in END4 and confirmed with ':42:OK;'.
         const int totalDeadlineMs = (options.handshakeDrainTimeoutMs > 0)
@@ -744,7 +761,10 @@ namespace ewr {
                     DrainForEnd4Reply(transport, options.writeAckTimeoutMs, totalDeadlineMs);
 
                 EmitTrace(reporter, "end4.rx", "[END4 IN] reply (" + std::to_string(reply.size())
-                    + " bytes):\n" + HexDump(reply.data(), reply.size()));
+                    + " bytes):\n" + HexDumpCapped(reply.data(), reply.size(), kTraceDumpCapBytes));
+
+                if (!reply.empty())
+                    result.anyBytes = true;
 
                 // Verification below still runs on the whole buffer, which is
                 // robust to usbprint.sys prefix junk.
@@ -814,8 +834,11 @@ namespace ewr {
             {
                 if (!result.anyReply)
                 {
-                    result.error = "END4: the printer never answered on the END4 channel (no 'END4' reply)"
-                                   " - usbprint.sys is most likely filtering this transport as well.";
+                    result.error = result.anyBytes
+                        ? "END4: the printer returned data but never an 'END4' reply - the transport"
+                          " is carrying bytes, the END4 framing is what it does not answer."
+                        : "END4: the printer never answered on the END4 channel - no inbound bytes"
+                          " arrived at all.";
                 }
                 else if (result.error.empty())
                 {

@@ -547,7 +547,8 @@ int main(int argc, char* argv[])
 
     if (replayModels.empty() && smartModels.empty())
     {
-        std::cerr << "\n[!] No payloads found. You need internet access on first run, or a 'models' folder with payload dumps." << std::endl;
+        std::cerr << "\n[!] No payloads found: database.json is missing or unreadable." << std::endl;
+        std::cerr << "    It ships next to ewr - re-extract the archive, or run once with internet access to fetch it." << std::endl;
         return FinishRun(1);
     }
 
@@ -577,7 +578,15 @@ int main(int argc, char* argv[])
 
     std::sort(options.begin(), options.end(), [](const MenuOption& a, const MenuOption& b)
         {
-            return a.displayName < b.displayName;
+            const std::string& an = a.isReplay ? a.replayModel.name : a.smartModel.name;
+            const std::string& bn = b.isReplay ? b.replayModel.name : b.smartModel.name;
+            if (an != bn)
+                return an < bn;
+
+            // Same model from both sources. Sorting the display name would put
+            // "(Replay)" above "(Smart Protocol - Recommended)" and offer the
+            // path with no read-back verification as choice [1].
+            return !a.isReplay && b.isReplay;
         });
 
     // One per run: it owns the ewr_trace.log lifecycle, so the first device

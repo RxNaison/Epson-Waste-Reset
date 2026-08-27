@@ -13,11 +13,11 @@ namespace ewr {
         std::vector<PrinterModel> availableModels;
         std::regex filenameRegex(R"((.+)\.(txt|c)$)");
 
+        // Deliberately does not create the folder: replay dumps are an opt-in
+        // escape hatch, so an absent folder means "no replay models", not
+        // "make me one".
         if (!fs::exists(folderPath))
-        {
-            fs::create_directory(folderPath);
             return availableModels;
-        }
 
         for (const auto& entry : fs::directory_iterator(folderPath))
         {

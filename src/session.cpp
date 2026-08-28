@@ -20,6 +20,21 @@ namespace ewr {
         // during warm-up.
         constexpr int kStateBusy = 0x02;
 
+        // `replies` is padded one-for-one with the queries, an empty vector
+        // standing in for every query that drew no answer - so a non-empty
+        // `replies` means only that queries were sent. A snapshot is evidence
+        // about the printer only once something actually came back.
+        bool AnyReplyArrived(const std::vector<std::vector<unsigned char>>& replies)
+        {
+            for (const auto& reply : replies)
+            {
+                if (!reply.empty())
+                    return true;
+            }
+
+            return false;
+        }
+
     } // namespace
 
     bool IsExpectedWastePadError(int errorCode)
@@ -39,6 +54,20 @@ namespace ewr {
                 "The printer is busy (initializing, printing or cleaning), and busy printers\n"
                 "    can omit active errors (e.g. INK OUT) from their status report. Waiting\n"
                 "    until the printer is idle and running EWR again gives a trustworthy check.";
+            return blocker;
+        }
+
+        // Same reasoning for a report that stopped mid-field: the error entry
+        // may be one of the fields that never arrived. An incomplete report
+        // without an error is not a report without an error.
+        if (status.valid && status.truncated && !status.hasError)
+        {
+            Blocker blocker;
+            blocker.errorName = "INCOMPLETE STATUS REPORT";
+            blocker.explanation =
+                "The printer's status report ended mid-field, so the error entry may simply\n"
+                "    be part of what never arrived. Running EWR again - on the interface that\n"
+                "    answers cleanly - gives a trustworthy check.";
             return blocker;
         }
 
@@ -117,7 +146,7 @@ namespace ewr {
         const QueryRunResult run =
             gateway.RunQuery(UniversalGenerator::GenerateHandshake(), queries, options);
 
-        if (!run.deviceFound || run.query.handshakeFailed || run.query.replies.empty())
+        if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
             return out;
 
         out.available = true;
@@ -176,7 +205,7 @@ namespace ewr {
         const QueryRunResult run =
             m_gateway.RunQuery(UniversalGenerator::GenerateHandshake(), queries, m_queryOptions);
 
-        if (!run.deviceFound || run.query.handshakeFailed || run.query.replies.empty())
+        if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
             return out;
 
         out.available = true;

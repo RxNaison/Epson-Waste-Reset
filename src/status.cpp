@@ -1,5 +1,4 @@
 #include "ewr/status.h"
-#include "ewr/generator.h"
 
 #include <algorithm>
 #include <cctype>
@@ -108,9 +107,12 @@ namespace ewr {
 
             const bool plausible = len >= 6 && i + len <= raw.size();
 
-            if (plausible && psid == EpsonD4::SOCKET_EPSON_CTRL && ssid == EpsonD4::SOCKET_EPSON_CTRL)
+            if (plausible && psid == ssid && psid != 0x00)
             {
-                // EPSON-CTRL data packet: keep the payload, drop the header.
+                // Data packet on the negotiated socket - GetSocketID may answer
+                // with something other than the well-known 2, and the session
+                // frames its replies with whatever it got. Same rule the D4
+                // layer itself applies in ExtractDataPayload.
                 payload.insert(payload.end(), raw.begin() + i + 6, raw.begin() + i + len);
                 i += len;
             }
@@ -149,6 +151,8 @@ namespace ewr {
         const size_t declared = payload[bodyStart] | (static_cast<size_t>(payload[bodyStart + 1]) << 8);
         const size_t end = std::min(bodyStart + 2 + declared, payload.size());
 
+        size_t fieldsDecoded = 0;
+
         size_t i = bodyStart + 2;
         while (i + 2 <= end)
         {
@@ -156,10 +160,17 @@ namespace ewr {
             const unsigned char fieldLen = payload[i + 1];
             i += 2;
 
+            // The report announced more than it delivered. Keep what parsed,
+            // but record that the rest never arrived.
             if (i + fieldLen > end)
+            {
+                status.truncated = true;
                 break;
+            }
 
             const unsigned char* field = payload.data() + i;
+
+            bool recognized = true;
 
             switch (header)
             {
@@ -212,13 +223,22 @@ namespace ewr {
                     break;
 
                 default:
+                    recognized = false;
                     break;
             }
+
+            // A recognized header with an empty body decodes nothing, so it is
+            // no evidence about the printer either.
+            if (recognized && fieldLen >= 1)
+                ++fieldsDecoded;
 
             i += fieldLen;
         }
 
-        status.valid = true;
+        // An '@BDC ST2' prefix with a length field and nothing readable behind
+        // it is not a status report. Reporting it as valid would tell the
+        // blocker gate the printer is clear when nothing was ever read.
+        status.valid = fieldsDecoded > 0;
         return status;
     }
 

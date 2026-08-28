@@ -1459,18 +1459,45 @@ void test_executor_na_refusal_fatal_in_replay_mode()
 // Status / read-back fixtures
 // ---------------------------------------------------------------------------
 
-static std::vector<unsigned char> WrapD4Data(const std::vector<unsigned char>& payload)
+// GetSocketID can hand back a socket other than the well-known 2, and the
+// session frames its replies with whatever it negotiated.
+static std::vector<unsigned char> WrapD4DataOnSocket(const std::vector<unsigned char>& payload,
+                                                     unsigned char socket)
 {
     std::vector<unsigned char> pkt;
     const uint16_t len = static_cast<uint16_t>(payload.size() + 6);
-    pkt.push_back(0x02);
-    pkt.push_back(0x02);
+    pkt.push_back(socket);
+    pkt.push_back(socket);
     pkt.push_back((len >> 8) & 0xFF);
     pkt.push_back(len & 0xFF);
     pkt.push_back(0x00);
     pkt.push_back(0x00);
     pkt.insert(pkt.end(), payload.begin(), payload.end());
     return pkt;
+}
+
+static std::vector<unsigned char> WrapD4Data(const std::vector<unsigned char>& payload)
+{
+    return WrapD4DataOnSocket(payload, ewr::EpsonD4::SOCKET_EPSON_CTRL);
+}
+
+// '@BDC ST2', a 2-byte little-endian body length, then the field block.
+// `declaredLength` overrides that length so a report can announce more than it
+// delivers, the way a reply cut short by the transport does.
+static std::vector<unsigned char> WrapSt2Body(const std::vector<unsigned char>& body,
+                                              unsigned char socket = ewr::EpsonD4::SOCKET_EPSON_CTRL,
+                                              int declaredLength = -1)
+{
+    const size_t declared = (declaredLength >= 0) ? static_cast<size_t>(declaredLength) : body.size();
+
+    std::vector<unsigned char> payload;
+    const std::string prefix = "@BDC ST2\r\n";
+    payload.insert(payload.end(), prefix.begin(), prefix.end());
+    payload.push_back(static_cast<unsigned char>(declared & 0xFF));
+    payload.push_back(static_cast<unsigned char>((declared >> 8) & 0xFF));
+    payload.insert(payload.end(), body.begin(), body.end());
+
+    return WrapD4DataOnSocket(payload, socket);
 }
 
 // A synthetic but structurally faithful '@BDC ST2' status reply:
@@ -1489,14 +1516,7 @@ static std::vector<unsigned char> MakeSt2Reply()
     body.push_back(static_cast<unsigned char>(serial.size()));
     body.insert(body.end(), serial.begin(), serial.end());
 
-    std::vector<unsigned char> payload;
-    const std::string prefix = "@BDC ST2\r\n";
-    payload.insert(payload.end(), prefix.begin(), prefix.end());
-    payload.push_back(static_cast<unsigned char>(body.size() & 0xFF));
-    payload.push_back(static_cast<unsigned char>((body.size() >> 8) & 0xFF));
-    payload.insert(payload.end(), body.begin(), body.end());
-
-    return WrapD4Data(payload);
+    return WrapSt2Body(body);
 }
 
 static std::vector<unsigned char> MakeEepromReadReply(uint8_t value)
@@ -1551,9 +1571,56 @@ void test_status_reply_parsing()
     CHECK(st.serial == "X7A9000123");
     CHECK(ewr::DescribePrinterCondition(st).find("INK OUT") != std::string::npos);
 
+    CHECK(!st.truncated);
+
     // Streams that never contain '@BDC ST2' parse to valid == false.
     CHECK(!ewr::ParseStatusReply(HandshakeAck()).valid);
     CHECK(!ewr::ParseStatusReply({}).valid);
+}
+
+// An '@BDC ST2' prefix and a length field are not a status report on their own.
+// Reporting one as valid tells the blocker gate the printer is clear when
+// nothing about the printer was ever read.
+void test_status_reply_without_fields_is_invalid()
+{
+    std::cout << "[TEST] test_status_reply_without_fields_is_invalid" << std::endl;
+
+    // Declared length 0: the prefix arrived, the body did not.
+    const auto empty = ewr::ParseStatusReply(WrapSt2Body({}));
+    CHECK(!empty.valid);
+    CHECK(!empty.hasError);
+    CHECK(empty.stateCode == -1);
+    CHECK(ewr::DescribePrinterCondition(empty) == "status unavailable");
+
+    // A body of headers this build does not decode is no evidence either.
+    const std::vector<unsigned char> unknownOnly = { 0x71, 0x01, 0x00, 0x72, 0x01, 0x00 };
+    CHECK(!ewr::ParseStatusReply(WrapSt2Body(unknownOnly)).valid);
+
+    // A recognized header with an empty body decodes nothing.
+    const std::vector<unsigned char> emptyField = { 0x01, 0x00 };
+    CHECK(!ewr::ParseStatusReply(WrapSt2Body(emptyField)).valid);
+}
+
+// A report that stops mid-field parses what arrived, but the error entry may be
+// part of what did not - so the truncation has to survive into the snapshot.
+void test_status_reply_truncation_is_recorded()
+{
+    std::cout << "[TEST] test_status_reply_truncation_is_recorded" << std::endl;
+
+    // State IDLE, then a serial field announcing 32 bytes that never arrive.
+    std::vector<unsigned char> body = { 0x01, 0x01, 0x04, 0x40, 0x20, 'X', '7' };
+
+    // The length field counts the bytes the report claims, not the ones sent.
+    const auto st = ewr::ParseStatusReply(WrapSt2Body(body, ewr::EpsonD4::SOCKET_EPSON_CTRL, 0x25));
+
+    CHECK(st.valid);        // the state field did arrive
+    CHECK(st.truncated);    // the serial field did not
+    CHECK(st.stateCode == 0x04);
+    CHECK(st.stateName == "IDLE");
+    CHECK(!st.hasError);
+
+    // A complete report is not flagged.
+    CHECK(!ewr::ParseStatusReply(WrapSt2Body({ 0x01, 0x01, 0x04 })).truncated);
 }
 
 void test_d4_payload_extraction()
@@ -1575,6 +1642,45 @@ void test_d4_payload_extraction()
     std::vector<unsigned char> mixed = HandshakeAck();
     mixed.insert(mixed.end(), pkt.begin(), pkt.end());
     CHECK(ewr::ExtractD4Payload(mixed) == inner);
+}
+
+// GetSocketID answers with the socket the firmware chose, and the session
+// frames every reply with that one. Parsing only socket 2 would drop the
+// payload of every printer that picks anything else - silently, because an
+// unparsed reply looks exactly like a printer that answered nothing.
+void test_d4_payload_extraction_on_negotiated_socket()
+{
+    std::cout << "[TEST] test_d4_payload_extraction_on_negotiated_socket" << std::endl;
+
+    const std::vector<unsigned char> inner = { 'H', 'i', '!' };
+
+    for (unsigned char socket : { 0x01, 0x02, 0x04, 0x7F, 0xFE })
+    {
+        const auto pkt = WrapD4DataOnSocket(inner, socket);
+        CHECK(ewr::ExtractD4Payload(pkt) == inner);
+
+        // Transaction traffic ahead of it is still skipped, not merged in.
+        std::vector<unsigned char> mixed = HandshakeAck();
+        mixed.insert(mixed.end(), pkt.begin(), pkt.end());
+        CHECK(ewr::ExtractD4Payload(mixed) == inner);
+    }
+
+    // Mismatched psid/ssid is not a data packet: resync rather than accept it.
+    std::vector<unsigned char> mismatched = WrapD4DataOnSocket(inner, 0x04);
+    mismatched[1] = 0x05;
+    CHECK(ewr::ExtractD4Payload(mismatched) != inner);
+
+    // The whole status and read-back path has to survive the other socket, not
+    // just the extractor.
+    const auto st = ewr::ParseStatusReply(WrapSt2Body({ 0x01, 0x01, 0x02 }, 0x04));
+    CHECK(st.valid);
+    CHECK(st.stateCode == 0x02);
+
+    const std::string ps = "@BDC PS\r\nrw:41:5A;";
+    uint8_t value = 0;
+    CHECK(ewr::ParseEepromReadReply(
+        WrapD4DataOnSocket(std::vector<unsigned char>(ps.begin(), ps.end()), 0x04), value));
+    CHECK(value == 0x5A);
 }
 
 void test_eeprom_read_reply_parsing()
@@ -3385,6 +3491,57 @@ void test_session_read_addresses()
     }
 }
 
+// Both executor paths pad `replies` one-for-one with the queries, pushing an
+// empty vector for every query that drew no answer. A snapshot that reads that
+// padding as "the preflight ran" hands the blocker gate an empty status and
+// calls the printer clear without ever having read it.
+void test_snapshot_requires_a_reply()
+{
+    std::cout << "[TEST] test_snapshot_requires_a_reply" << std::endl;
+
+    const ewr::DbPrinterModel model = MakeSessionModel();
+
+    // Handshake fine, device found, every query unanswered.
+    FakeGateway silent = MakeSessionGateway();
+    for (auto& reply : silent.queryResult.query.replies)
+        reply.clear();
+    silent.queryResult.query.success = false;
+
+    ewr::Session session(model, silent, ewr::log::Default(), ewr::DefaultQueryOptions());
+    const ewr::StateSnapshot snap = session.ReadState();
+    CHECK(!snap.available);
+    CHECK(!snap.status.valid);
+
+    // The model-free read is gated the same way.
+    FakeGateway silentStatus = silent;
+    CHECK(!ewr::ReadPrinterStatus(silentStatus, ewr::DefaultQueryOptions()).available);
+
+    // One answered query is enough: a printer that answers the counter reads
+    // but not the status query is still readable.
+    FakeGateway partial = MakeSessionGateway();
+    partial.queryResult.query.replies[0].clear();
+    ewr::Session partialSession(model, partial, ewr::log::Default(), ewr::DefaultQueryOptions());
+    const ewr::StateSnapshot partialSnap = partialSession.ReadState();
+    CHECK(partialSnap.available);
+    CHECK(!partialSnap.status.valid);
+
+    // And the reset that refuses to run blind must refuse on silence, not just
+    // on a missing device.
+    FakeGateway silentInk = MakeInkSessionGateway();
+    for (auto& reply : silentInk.queryResult.query.replies)
+        reply.clear();
+    silentInk.queryResult.query.success = false;
+
+    const ewr::DbPrinterModel inkModel = MakeInkSessionModel();
+    ewr::log::Reporter reporter;
+    ewr::Session inkSession(inkModel, silentInk, reporter);
+
+    const ewr::ResetOutcome out = inkSession.ResetInk();
+    CHECK(out.phase == ewr::ResetPhase::Aborted);
+    CHECK(!out.success);
+    CHECK(silentInk.resetCalls == 0); // nothing was written
+}
+
 // A BUSY status with no error entry can be hiding a real blocker (the R220
 // omits INK OUT from ST2 while warming up), so both classifiers must demand
 // a decision instead of treating it as a green light.
@@ -3429,6 +3586,53 @@ void test_busy_status_blocker()
     busyInkOut.errorName = "INK OUT";
     CHECK(ewr::EvaluateBlocker(busyInkOut).has_value());
     CHECK(!ewr::EvaluateInkBlocker(busyInkOut).has_value());
+}
+
+// Same reasoning as BUSY: a report that ran out mid-field may have been cut off
+// right before its error entry, so its silence about errors proves nothing.
+void test_truncated_status_blocker()
+{
+    std::cout << "[TEST] test_truncated_status_blocker" << std::endl;
+
+    ewr::PrinterStatus partial;
+    partial.valid = true;
+    partial.truncated = true;
+    partial.hasError = false;
+    partial.stateCode = 0x04; // IDLE - the reassuring case
+    partial.stateName = "IDLE";
+
+    const std::optional<ewr::Blocker> waste = ewr::EvaluateBlocker(partial);
+    CHECK(waste.has_value());
+    if (waste.has_value())
+    {
+        CHECK(waste->errorCode == -1);
+        CHECK(waste->errorName == "INCOMPLETE STATUS REPORT");
+        CHECK(!waste->explanation.empty());
+    }
+    CHECK(ewr::EvaluateInkBlocker(partial).has_value());
+
+    // A truncated report that still carried its error entry is classified on
+    // the error, not on the truncation: the waste-pad errors stay expected.
+    ewr::PrinterStatus partialService = partial;
+    partialService.hasError = true;
+    partialService.errorCode = 0x10; // SERVICE REQUEST
+    partialService.errorName = "SERVICE REQUEST";
+    CHECK(!ewr::EvaluateBlocker(partialService).has_value());
+
+    ewr::PrinterStatus partialJam = partial;
+    partialJam.hasError = true;
+    partialJam.errorCode = 0x04; // PAPER JAM
+    partialJam.errorName = "PAPER JAM";
+    const std::optional<ewr::Blocker> jam = ewr::EvaluateBlocker(partialJam);
+    CHECK(jam.has_value());
+    if (jam.has_value())
+        CHECK(jam->errorName == "PAPER JAM");
+
+    // A complete report is untouched by the new gate.
+    ewr::PrinterStatus complete = partial;
+    complete.truncated = false;
+    CHECK(!ewr::EvaluateBlocker(complete).has_value());
+    CHECK(!ewr::EvaluateInkBlocker(complete).has_value());
 }
 
 // The unconditional ask-once gate: fires after every conditional gate, right
@@ -3848,13 +4052,18 @@ int main()
     test_database_load_skips_malformed_entries();
     test_database_reload_replaces_previous_contents();
     test_status_reply_parsing();
+    test_status_reply_without_fields_is_invalid();
+    test_status_reply_truncation_is_recorded();
     test_d4_payload_extraction();
+    test_d4_payload_extraction_on_negotiated_socket();
     test_eeprom_read_reply_parsing();
     test_evaluate_blocker();
     test_evaluate_ink_blocker();
     test_session_reset_lifecycle();
     test_session_ink_reset();
     test_busy_status_blocker();
+    test_truncated_status_blocker();
+    test_snapshot_requires_a_reply();
     test_confirm_write_gate();
     test_ink_reset_requires_preflight();
     test_session_conflict_gate();

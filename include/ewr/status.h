@@ -19,7 +19,8 @@ namespace ewr {
 
     struct PrinterStatus
     {
-        bool valid = false;           // a well-formed ST2 payload was parsed
+        bool valid = false;           // at least one ST2 field was decoded
+        bool truncated = false;       // the field walk hit the end of the payload
         int stateCode = -1;
         std::string stateName;        // "IDLE", "BUSY", ...
         bool hasError = false;        // the printer reported an error entry
@@ -31,12 +32,18 @@ namespace ewr {
         std::vector<InkReading> inks;
     };
 
-    // Concatenated EPSON-CTRL payload bytes, with socket 0 credit/control
-    // traffic skipped. Bytes that do not line up with a plausible D4 header are
-    // dropped one at a time, so a partial capture still yields what arrived.
+    // Concatenated data-channel payload bytes, with socket 0 credit/control
+    // traffic skipped. Any packet whose psid and ssid match and are non-zero is
+    // a data packet: GetSocketID can hand back a socket other than the
+    // well-known 2, and this parser sees the negotiated one. Bytes that do not
+    // line up with a plausible D4 header are dropped one at a time, so a partial
+    // capture still yields what arrived.
     std::vector<unsigned char> ExtractD4Payload(const std::vector<unsigned char>& raw);
 
-    // valid=false when the stream holds no parseable status.
+    // valid=false when the stream holds no parseable status. A report whose
+    // fields run past the end of the payload parses what arrived and sets
+    // `truncated`; callers must not read the absence of an error entry in a
+    // truncated report as the absence of an error.
     PrinterStatus ParseStatusReply(const std::vector<unsigned char>& raw);
 
     // Two firmware reply forms exist:

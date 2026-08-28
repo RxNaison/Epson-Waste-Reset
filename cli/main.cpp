@@ -13,6 +13,7 @@
 #include "ewr/updater.h"
 #include "ewr/version.h"
 #include "ewr/log.h"
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <ctime>
@@ -22,6 +23,9 @@
 #else
 #include <unistd.h>
 #include <climits>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 namespace fs = std::filesystem;
@@ -60,6 +64,20 @@ static void SetWorkingDirectoryToExecutable()
     {
         std::error_code ec;
         fs::current_path(fs::path(path).parent_path(), ec);
+    }
+#elif defined(__APPLE__)
+    // macOS has no procfs, so /proc/self/exe silently fails there and the run
+    // keeps the shell's CWD - which puts database.json and models/ wherever
+    // the user happened to be standing.
+    char path[PATH_MAX];
+    uint32_t size = static_cast<uint32_t>(sizeof(path));
+    if (_NSGetExecutablePath(path, &size) == 0)
+    {
+        std::error_code ec;
+        // The path may be a symlink or contain '..'; canonical() resolves both,
+        // and the raw path is still a usable fallback if it cannot.
+        const fs::path exe = fs::canonical(fs::path(path), ec);
+        fs::current_path((ec ? fs::path(path) : exe).parent_path(), ec);
     }
 #else
     char path[PATH_MAX];

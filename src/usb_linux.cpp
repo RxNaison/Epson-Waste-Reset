@@ -92,7 +92,11 @@ namespace ewr {
                 // window is enough - no re-post polling here.
                 std::vector<unsigned char> data;
                 unsigned char buffer[kDrainReadChunkBytes];
-                unsigned int readTimeoutMs = (timeoutMs > 0) ? static_cast<unsigned int>(timeoutMs) : 0;
+
+                // libusb reads a timeout of 0 as "block forever", which is the
+                // one thing ITransport::Drain must never do - a poll would hang
+                // the process with no way out. Clamp to the shortest real wait.
+                unsigned int readTimeoutMs = (timeoutMs > 0) ? static_cast<unsigned int>(timeoutMs) : 1;
 
                 const auto start = std::chrono::steady_clock::now();
                 const auto sinceStartMs = [&]() {
@@ -202,7 +206,13 @@ namespace ewr {
                         LinuxCandidate cand;
                         cand.device = devs[i];
                         cand.pid = desc.idProduct;
-                        cand.interfaceNumber = iface_idx;
+                        // bInterfaceNumber, not the descriptor's array index:
+                        // claim, kernel-driver detach and the GET_DEVICE_ID
+                        // wIndex all address the interface by its own number,
+                        // and on a composite device whose printer function is
+                        // not first in the configuration descriptor the two
+                        // differ. The Windows backend reports mi_XX here.
+                        cand.interfaceNumber = interdesc->bInterfaceNumber;
                         cand.epIn = ep_in;
                         cand.epOut = ep_out;
                         cand.printerClass = (interdesc->bInterfaceClass == LIBUSB_CLASS_PRINTER);

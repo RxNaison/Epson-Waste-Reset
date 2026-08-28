@@ -14,7 +14,9 @@ namespace ewr {
         virtual ~ITransport() = default;
         virtual bool Send(const std::vector<unsigned char>& packet) = 0;
         // timeoutMs bounds how long the FIRST read may wait for the reply to
-        // start arriving, not the total call.
+        // start arriving, not the total call. A timeoutMs of zero or less is a
+        // poll: it returns whatever is already there. No value of timeoutMs
+        // ever means "wait forever".
         virtual std::vector<unsigned char> Drain(int timeoutMs) = 0;
     };
 

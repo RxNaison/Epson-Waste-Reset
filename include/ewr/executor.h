@@ -89,7 +89,10 @@ namespace ewr {
         bool handshakeFailed = false;
         // At least one write drew replies, but ':42:OK;' never arrived.
         bool writesUnverified = false;
-        // Worth surfacing: the database's primary keyword is wrong here.
+        // A write was retried with the alternate keyword ('wkey1') after
+        // ':42:NG;' AND that retry was confirmed. Worth surfacing: the
+        // database's primary keyword is wrong here. False when both keywords
+        // were rejected - that is a bad database entry, not a fixed one.
         bool alternateKeyUsed = false;
         std::string error;
     };

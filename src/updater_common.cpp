@@ -194,17 +194,18 @@ namespace ewr {
             json root = json::parse(file);
             if (!root.is_object()) return false;
 
+            // Refuse to install a database this build cannot read; the user
+            // would end up with an app that no longer finds any printer. The
+            // check is on the root whatever shape follows it: the shipped
+            // database.json is the flat form, so nesting this under "models"
+            // meant the gate never ran for the format actually in use.
+            if (root.contains("schema_version") && root["schema_version"].is_number_integer() &&
+                root["schema_version"].get<int>() > maxSupportedSchema)
+                return false;
+
             const json* models = &root;
             if (root.contains("models"))
-            {
-                // Refuse to install a database this build cannot read; the user
-                // would end up with an app that no longer finds any printer.
-                if (root.contains("schema_version") && root["schema_version"].is_number_integer() &&
-                    root["schema_version"].get<int>() > maxSupportedSchema)
-                    return false;
-
                 models = &root["models"];
-            }
 
             if (!models->is_object() || models->empty()) return false;
 

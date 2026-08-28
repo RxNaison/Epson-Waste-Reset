@@ -828,7 +828,15 @@ int main(int argc, char* argv[])
             std::cout << "\nEnter printer model to search (e.g., 'L3150' or 'XP') or type 'exit' to quit: ";
 
         std::string searchQuery;
-        std::getline(std::cin, searchQuery);
+        if (!std::getline(std::cin, searchQuery))
+        {
+            // No stdin to read (a pipe, a redirect, a service context). Every
+            // other prompt here needs a typed word and so aborts on its own;
+            // this one treats empty as "search again" and would spin forever.
+            std::cerr << "\n[ERROR] No input available: EWR needs a model to work with and stdin\n"
+                         "        is closed. Pass --model <name> to choose one non-interactively." << std::endl;
+            return FinishRun(1);
+        }
 
         if (searchQuery.empty())
         {

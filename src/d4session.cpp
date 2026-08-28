@@ -824,7 +824,6 @@ namespace ewr {
                         && SubstituteTrailingWriteKey(payload, options.writeKey, options.alternateWriteKey, alternate))
                     {
                         triedAlternateKey = true;
-                        result.alternateKeyUsed = true;
                         payload = std::move(alternate);
 
                         EmitProgress(reporter, log::Stage::Write, "exec.write_key_retry", i + 1, items.size(),
@@ -884,6 +883,12 @@ namespace ewr {
 
                 EmitTrace(reporter, "exec.write_unconfirmed", "[WARNING] Command " + std::to_string(i + 1) + " write reply missing ':42:OK;'");
             }
+
+            // The flag means the alternate keyword WORKED, not that it was
+            // tried. Hosts surface it as a database fix worth reporting, so a
+            // run where both keywords were rejected must not claim it.
+            if (confirmed && triedAlternateKey)
+                result.alternateKeyUsed = true;
 
             if (verifyThisWrite && !confirmed)
             {

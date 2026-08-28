@@ -659,6 +659,19 @@ void test_updater_database_payload_validation()
     write(R"({"schema_version": 99, "models": {"L222": {"wkey": "Yj4"}}})");
     CHECK(!ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
 
+    // ...including the flat form, which is what database.json actually ships
+    // as. Nesting the version check under "models" meant the refusal never ran
+    // for the only shape in use, and a too-new database went straight over the
+    // live file on exit.
+    write(R"({"schema_version": 99, "L222": {"rkey": 8, "wkey": "Yj4", "addresses": [24], "reset": [0]}})");
+    CHECK(!ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
+
+    // A schema this build does support still installs, in either shape.
+    write(R"({"schema_version": 4, "L222": {"rkey": 8, "wkey": "Yj4", "addresses": [24], "reset": [0]}})");
+    CHECK(ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
+    write(R"({"schema_version": 4, "models": {"L222": {"wkey": "Yj4"}}})");
+    CHECK(ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
+
     // A 404 page, an empty model map, or entries without a write key are rejected.
     write("<html>Not Found</html>");
     CHECK(!ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
@@ -2919,6 +2932,29 @@ void test_alternate_write_key_retry()
     CHECK(!rejected.alternateKeyUsed);
     CHECK(rejected.writesRejected == 1);
     CHECK(rejected.error.find(":42:NG;") != std::string::npos);
+
+    // Both keywords rejected: the flag says the alternate one WORKED, and a
+    // host turns it into "please report this model" - so a database entry
+    // whose keys are both wrong must not be reported as one that was fixed.
+    FakeTransport bothBad;
+    bothBad.replyFor = [](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
+        return ewr::IsWritePacket(pkt) ? NgAck() : HandshakeAck();
+    };
+
+    std::ostringstream bothOut;
+    auto bothRejected = ewr::ExecuteSequence(bothBad, legacy::GenerateSequence(MakeTestModel()),
+                                             bothOut, log, options);
+
+    CHECK(!bothRejected.success);
+    CHECK(!bothRejected.alternateKeyUsed);
+    CHECK(bothRejected.writesRejected == 1);
+
+    // The alternate keyword was still tried - this is about what gets reported
+    // afterwards, not about giving up early.
+    bool sawAlternate = false;
+    for (const auto& s : bothBad.sent)
+        sawAlternate = sawAlternate || EndsWithKey(s, "Bslbopje");
+    CHECK(sawAlternate);
 }
 
 void test_alternate_write_key_retry_d4()
@@ -2942,6 +2978,21 @@ void test_alternate_write_key_retry_d4()
     CHECK(result.success);
     CHECK(result.alternateKeyUsed);
     CHECK(result.writesVerified == 2);
+
+    // Same on the session path: both keywords rejected is a bad database
+    // entry, not a fixed one.
+    FakeTransport bothBad;
+    bothBad.replyFor = D4SessionReplier(0x02, [](const std::vector<unsigned char>&) {
+        return NgAck();
+    });
+
+    std::ostringstream bothOut;
+    auto bothRejected = ewr::ExecuteSequence(bothBad, legacy::GenerateSequence(MakeTestModel()),
+                                             bothOut, log, options);
+
+    CHECK(!bothRejected.success);
+    CHECK(!bothRejected.alternateKeyUsed);
+    CHECK(bothRejected.writesRejected == 1);
 }
 
 void test_schema4_counter_specs_loading()

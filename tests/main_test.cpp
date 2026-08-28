@@ -2612,6 +2612,89 @@ void test_d4_transport_failure_closes_before_recovery_leave()
     CHECK(closeAfterWrite < leaveSessionAt);
 }
 
+// One credit buys one packet, so a reply longer than the channel's payload
+// capacity arrives in pieces. Reading only the first left the rest in the
+// framer, to be handed back as the answer to the NEXT query - and callers match
+// replies to addresses positionally, so one truncation shifts every value after
+// it onto the wrong EEPROM address.
+void test_d4_reassembles_a_fragmented_reply()
+{
+    std::cout << "[TEST] test_d4_reassembles_a_fragmented_reply" << std::endl;
+
+    // MTU to host is 256, so 250 payload bytes per packet. A first fragment
+    // that fills it without the end-of-message bit means more is coming.
+    const std::vector<unsigned char> head(250, 'A');
+    const std::vector<unsigned char> tail = { 'B', 'C', 'D' };
+
+    FakeTransport t;
+    t.replyFor = D4SessionReplier(0x02, [&](const std::vector<unsigned char>&) {
+        std::vector<unsigned char> both = D4Frame(0x02, 0x02, head, 0x00, 0x00); // no EOM
+        const auto second = D4Frame(0x02, 0x02, tail, 0x00, 0x01);               // EOM
+        both.insert(both.end(), second.begin(), second.end());
+        return both;
+    });
+
+    ewr::D4SessionOptions options;
+    options.replyTimeoutMs = 200;
+    options.dataTimeoutMs = 200;
+    options.fragmentTimeoutMs = 100;
+
+    std::ofstream log = NullLog();
+    ewr::D4Session session(t, log, options);
+    CHECK(session.Start());
+    CHECK(session.MtuToHost() == 0x0100);
+
+    std::vector<unsigned char> reply;
+    CHECK(session.Exchange({ 's', 't' }, reply));
+    CHECK(reply.size() == head.size() + tail.size());
+
+    if (reply.size() == head.size() + tail.size())
+    {
+        CHECK(reply.front() == 'A');
+        CHECK(reply[249] == 'A');
+        CHECK(reply[250] == 'B');
+        CHECK(reply.back() == 'D');
+    }
+
+    session.Close();
+}
+
+// The reassembly must stay free on the firmware everybody actually has: a reply
+// shorter than the MTU cannot have been cut off by it, so it ends the exchange
+// whatever the control byte says - no extra credit packet, no extra wait.
+void test_d4_short_reply_costs_no_extra_round_trip()
+{
+    std::cout << "[TEST] test_d4_short_reply_costs_no_extra_round_trip" << std::endl;
+
+    for (unsigned char control : { 0x00, 0x01 })
+    {
+        FakeTransport t;
+        t.replyFor = D4SessionReplier(0x02, [control](const std::vector<unsigned char>&) {
+            return D4Frame(0x02, 0x02, { ':', '4', '2', ':', 'O', 'K', ';' }, 0x00, control);
+        });
+
+        ewr::D4SessionOptions options;
+        options.replyTimeoutMs = 200;
+        options.dataTimeoutMs = 200;
+        options.fragmentTimeoutMs = 100;
+
+        std::ofstream log = NullLog();
+        ewr::D4Session session(t, log, options);
+        CHECK(session.Start());
+
+        const size_t afterStart = t.sent.size();
+
+        std::vector<unsigned char> reply;
+        CHECK(session.Exchange({ 's', 't' }, reply));
+        CHECK(reply.size() == 7);
+
+        // Credit grant, credit request, the data packet - and nothing more.
+        CHECK(t.sent.size() - afterStart == 3);
+
+        session.Close();
+    }
+}
+
 void test_d4_recovery_absent_is_silent()
 {
     std::cout << "[TEST] test_d4_recovery_absent_is_silent" << std::endl;
@@ -4307,6 +4390,8 @@ int main()
     test_d4_recovery_channel_wraps_writes();
     test_d4_recovery_absent_is_silent();
     test_d4_transport_failure_closes_before_recovery_leave();
+    test_d4_reassembles_a_fragmented_reply();
+    test_d4_short_reply_costs_no_extra_round_trip();
     test_address_length_framing();
     test_one_byte_model_address_encoding();
     test_eeprom_read_reply_two_byte_address();

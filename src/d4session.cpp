@@ -296,6 +296,12 @@ namespace ewr {
                 if (incoming.payload[0] == D4::CMD_ERROR)
                     return false;
             }
+            else if (!incoming.IsTransaction() && incoming.psid == m_socket)
+            {
+                // Data arriving while we wait for a transaction reply belongs
+                // to the caller, not to this wait. Keep it for WaitForData.
+                m_pendingData.push_back(incoming);
+            }
 
             if (RemainingMs(deadline) == 0)
                 return false;
@@ -304,6 +310,15 @@ namespace ewr {
 
     bool D4Session::WaitForData(D4Packet& pkt, int timeoutMs)
     {
+        // Anything a transaction wait set aside is already here and already
+        // credit-accounted; hand it over before going back to the wire.
+        if (!m_pendingData.empty())
+        {
+            pkt = m_pendingData.front();
+            m_pendingData.erase(m_pendingData.begin());
+            return true;
+        }
+
         const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
 
         for (;;)
@@ -518,15 +533,52 @@ namespace ewr {
         if (!SendData(payload))
             return false;
 
-        D4Packet pkt;
-        if (!WaitForData(pkt, m_options.dataTimeoutMs))
+        reply.clear();
+
+        // One credit buys the printer one packet, so a reply longer than the
+        // channel's payload capacity arrives in pieces. Anything left unread
+        // would be delivered as the answer to the *next* query, and callers
+        // match replies to addresses positionally - so a single truncation
+        // shifts every value after it onto the wrong EEPROM address.
+        const size_t mtuPayload = (m_mtuToHost > 6) ? static_cast<size_t>(m_mtuToHost - 6) : 1;
+
+        for (int fragment = 0; fragment < m_options.maxReplyFragments; ++fragment)
         {
-            if (m_lastError.empty())
-                m_lastError = "The printer did not answer on the EPSON-CTRL data channel";
-            return false;
+            D4Packet pkt;
+            const int timeout = (fragment == 0) ? m_options.dataTimeoutMs : m_options.fragmentTimeoutMs;
+
+            if (!WaitForData(pkt, timeout))
+            {
+                // Nothing at all is a failed exchange; a continuation that
+                // never came just ends the reply with what did arrive.
+                if (fragment == 0)
+                {
+                    if (m_lastError.empty())
+                        m_lastError = "The printer did not answer on the EPSON-CTRL data channel";
+                    return false;
+                }
+
+                EmitTrace(m_reporter, "d4.fragment_timeout", "[!] Reply fragment " + std::to_string(fragment + 1)
+                    + " never arrived; returning the " + std::to_string(reply.size()) + " byte(s) that did.");
+                break;
+            }
+
+            reply.insert(reply.end(), pkt.payload.begin(), pkt.payload.end());
+
+            // End-of-message, or a packet that did not fill the MTU and so
+            // cannot have been cut short by it. The second test is what keeps
+            // this free on firmware that never sets the control bit: every
+            // reply EWR asks for is far shorter than the negotiated MTU.
+            if (pkt.IsEndOfMessage() || pkt.payload.size() < mtuPayload)
+                return true;
+
+            EmitTrace(m_reporter, "d4.fragment", "[i] Reply fragment " + std::to_string(fragment + 1)
+                + " filled the MTU without end-of-message; granting credit for the next one.");
+
+            if (!EnsurePrinterCredit())
+                break;
         }
 
-        reply = pkt.payload;
         return true;
     }
 

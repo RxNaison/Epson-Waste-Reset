@@ -39,6 +39,11 @@ namespace ewr {
         std::vector<unsigned char> payload;
 
         bool IsTransaction() const { return psid == 0x00 && ssid == 0x00; }
+
+        // Control bit 0 marks the last packet of a message. Every complete
+        // reply in the hardware traces carries it; a printer that splits a
+        // reply across packets clears it on all but the last.
+        bool IsEndOfMessage() const { return (control & 0x01) != 0; }
     };
 
     // Leftover bytes stay buffered between calls, so replies split across USB
@@ -75,6 +80,12 @@ namespace ewr {
         int replyTimeoutMs = 2000;
         int dataTimeoutMs = 2000;
         int interPacketDelayMs = 0;
+        // Window for a continuation packet once a reply has already started.
+        // Short on purpose: it is only ever waited out by a fragment that
+        // filled the MTU on firmware that does not set end-of-message.
+        int fragmentTimeoutMs = 250;
+        // Bounds a firmware that never sets end-of-message.
+        int maxReplyFragments = 16;
         std::string serviceName = "EPSON-CTRL";
     };
 
@@ -87,7 +98,10 @@ namespace ewr {
 
         // EJL enter -> Init -> GetSocketID -> OpenChannel (+ MTU parse).
         bool Start();
-        // Chunked to the negotiated MTU and credit-gated.
+        // Chunked to the negotiated MTU and credit-gated. A reply the printer
+        // splits across packets is reassembled: one credit buys one packet, so
+        // a fragment that filled the MTU without the end-of-message bit buys
+        // another and appends.
         bool Exchange(const std::vector<unsigned char>& payload, std::vector<unsigned char>& reply);
         // Same, without waiting for a reply.
         bool SendData(const std::vector<unsigned char>& payload);
@@ -115,6 +129,10 @@ namespace ewr {
 
         ITransport& m_transport;
         D4Framer m_framer;
+        // Data packets that turned up while waiting for a transaction reply -
+        // a reply fragment can arrive alongside the credit ack that bought it.
+        // Dropping them would hand the caller a truncated reply.
+        std::vector<D4Packet> m_pendingData;
         // Owns the reporter only when constructed over an ostream; otherwise
         // events go to the caller's reporter.
         log::Reporter m_ownedReporter;

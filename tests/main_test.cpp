@@ -131,11 +131,14 @@ public:
     std::vector<std::vector<unsigned char>> sent;
     std::vector<int> drainTimeouts;
     bool failSend = false;
+    // Fails only the sends this says to, so a transport can break mid-session
+    // and recover - which is what the close-and-recover paths need.
+    std::function<bool(const std::vector<unsigned char>&)> failSendIf;
 
     bool Send(const std::vector<unsigned char>& packet) override
     {
         sent.push_back(packet);
-        if (failSend)
+        if (failSend || (failSendIf && failSendIf(packet)))
             return false;
         pending_ = replyFor ? replyFor(packet) : std::vector<unsigned char>{};
         return true;
@@ -2233,6 +2236,79 @@ void test_d4_framer_length_framing()
     }
 }
 
+// The length-is-truth rule needs a header worth trusting. A corrupt header
+// announcing a plausible-but-wrong length used to buffer forever: the packet
+// never completed, nothing was ever discarded, and every later read on the
+// session re-evaluated the same bytes and timed out the same way - so the
+// status query, every EEPROM read and every write acknowledgement came back
+// empty and the run reported that the printer never answered.
+void test_d4_framer_resyncs_on_bogus_length()
+{
+    std::cout << "[TEST] test_d4_framer_resyncs_on_bogus_length" << std::endl;
+
+    std::ofstream log = NullLog();
+
+    // A header announcing 65535 bytes that never arrive must not wedge the
+    // framer: the next read has to start clean.
+    {
+        ChunkedTransport t;
+        t.chunks.push_back({ 0x02, 0x02, 0xFF, 0xFF, 0x00, 0x00, 0xDE, 0xAD });
+
+        ewr::D4Framer framer(t);
+        ewr::D4Packet out;
+        CHECK(!framer.ReadPacket(out, 20, log));
+        CHECK(!framer.HasBufferedData());
+
+        // Second read on the same framer: a real packet now gets through.
+        t.chunks.push_back(D4Frame(0x02, 0x02, { 'O', 'K' }, 0x00, 0x01));
+        CHECK(framer.ReadPacket(out, 50, log));
+        CHECK(out.payload.size() == 2);
+    }
+
+    // A stray byte ahead of a real packet (the ET-2803 mi_00 chatter) resyncs
+    // to the packet instead of reading a length out of the junk.
+    {
+        ChunkedTransport t;
+        std::vector<unsigned char> noisy = { 0x15 };
+        const auto pkt = D4Frame(0x02, 0x02, { '@', 'B', 'D', 'C' }, 0x00, 0x01);
+        noisy.insert(noisy.end(), pkt.begin(), pkt.end());
+        t.chunks.push_back(noisy);
+
+        ewr::D4Framer framer(t);
+        ewr::D4Packet out;
+        CHECK(framer.ReadPacket(out, 50, log));
+        CHECK(out.psid == 0x02);
+        CHECK(out.payload.size() == 4);
+        CHECK(!framer.HasBufferedData());
+    }
+
+    // Mismatched socket ids are not a header either, however plausible the
+    // length behind them looks.
+    {
+        ChunkedTransport t;
+        t.chunks.push_back({ 0x02, 0x05, 0x00, 0x40, 0x00, 0x00 });
+
+        ewr::D4Framer framer(t);
+        ewr::D4Packet out;
+        CHECK(!framer.ReadPacket(out, 20, log));
+        CHECK(!framer.HasBufferedData());
+    }
+
+    // A header split across two reads still reassembles - resync must not eat
+    // a partial header while the rest is still in flight.
+    {
+        ChunkedTransport t;
+        const auto pkt = D4Frame(0x02, 0x02, { 'H', 'i' }, 0x00, 0x01);
+        t.chunks.push_back(std::vector<unsigned char>(pkt.begin(), pkt.begin() + 2));
+        t.chunks.push_back(std::vector<unsigned char>(pkt.begin() + 2, pkt.end()));
+
+        ewr::D4Framer framer(t);
+        ewr::D4Packet out;
+        CHECK(framer.ReadPacket(out, 100, log));
+        CHECK(out.payload.size() == 2);
+    }
+}
+
 void test_d4_session_start_negotiates_socket_and_mtu()
 {
     std::cout << "[TEST] test_d4_session_start_negotiates_socket_and_mtu" << std::endl;
@@ -2466,6 +2542,76 @@ void test_d4_recovery_channel_wraps_writes()
 }
 
 // A model with no recovery channel must not emit any RCMODE traffic.
+// Every other exit from the write loop closed the channel; the transport-
+// failure return did not. The RCMODE leave then opened a second D4 session on
+// the same transport while the first channel was still open on the same
+// socket - the printer answers CMD_ERROR 0x04 or stays silent, the leave never
+// lands, and the unit is left in firmware recovery mode after a failed run.
+void test_d4_transport_failure_closes_before_recovery_leave()
+{
+    std::cout << "[TEST] test_d4_transport_failure_closes_before_recovery_leave" << std::endl;
+
+    // One EEPROM write fails to send; everything after it works again, so the
+    // close and the RCMODE leave are both observable.
+    bool failedOnce = false;
+
+    FakeTransport t;
+    t.failSendIf = [&failedOnce](const std::vector<unsigned char>& pkt) {
+        if (!failedOnce && pkt.size() > 7 && pkt[6] == 0x7C && pkt[7] == 0x7C)
+        {
+            failedOnce = true;
+            return true;
+        }
+        return false;
+    };
+    t.replyFor = D4SessionReplier(0x02, [](const std::vector<unsigned char>& sent) -> std::vector<unsigned char> {
+        if (sent.size() > 7 && sent[6] == 0x67 && sent[7] == 0x6D)
+            return D4Frame(0x02, 0x02, { 'O', 'K' }, 0x00, 0x01);
+        return OkAck();
+    });
+
+    ewr::ExecutorOptions options = FastOptions();
+    options.useSessionLayer = true;
+    options.recoveryService = "fwu:ctrl";
+    options.recoveryEnter = { 0x67, 0x6D, 0x01, 0x00, 0x01 };
+    options.recoveryClose = { 0x67, 0x6D, 0x01, 0x00, 0x03 };
+    options.recoveryReply = { 0x4F, 0x4B };
+
+    std::ofstream log = NullLog();
+    std::ostringstream out;
+    const auto result = ewr::ExecuteSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, options);
+
+    CHECK(!result.success);
+    CHECK(result.error.find("Transport failure") != std::string::npos);
+    CHECK(failedOnce);
+
+    auto isEjlEnter = [](const std::vector<unsigned char>& s) {
+        static const unsigned char magic[] = { '@', 'E', 'J', 'L' };
+        return std::search(s.begin(), s.end(), magic, magic + 4) != s.end();
+    };
+
+    const size_t none = t.sent.size();
+    size_t writeAt = none, closeAfterWrite = none, leaveSessionAt = none;
+
+    for (size_t i = 0; i < t.sent.size(); ++i)
+    {
+        const auto& s = t.sent[i];
+        const bool isTxn = s.size() > 6 && s[0] == 0x00 && s[1] == 0x00;
+
+        if (writeAt == none && s.size() > 7 && s[6] == 0x7C && s[7] == 0x7C)
+            writeAt = i;
+        else if (writeAt != none && closeAfterWrite == none && isTxn && s[6] == 0x02)
+            closeAfterWrite = i; // CloseChannel
+        else if (closeAfterWrite != none && leaveSessionAt == none && isEjlEnter(s))
+            leaveSessionAt = i;  // the RCMODE leave opening its own session
+    }
+
+    CHECK(writeAt != none);
+    CHECK(closeAfterWrite != none);  // the channel is closed at all
+    CHECK(leaveSessionAt != none);   // and the leave still runs
+    CHECK(closeAfterWrite < leaveSessionAt);
+}
+
 void test_d4_recovery_absent_is_silent()
 {
     std::cout << "[TEST] test_d4_recovery_absent_is_silent" << std::endl;
@@ -4151,6 +4297,7 @@ int main()
     test_query_session_failfast_on_silence();
     test_query_session_happy_path();
     test_d4_framer_length_framing();
+    test_d4_framer_resyncs_on_bogus_length();
     test_d4_session_start_negotiates_socket_and_mtu();
     test_d4_session_socketid_fallback();
     test_d4_session_credit_gating_and_chunking();
@@ -4159,6 +4306,7 @@ int main()
     test_d4_sequence_na_fails_fast();
     test_d4_recovery_channel_wraps_writes();
     test_d4_recovery_absent_is_silent();
+    test_d4_transport_failure_closes_before_recovery_leave();
     test_address_length_framing();
     test_one_byte_model_address_encoding();
     test_eeprom_read_reply_two_byte_address();

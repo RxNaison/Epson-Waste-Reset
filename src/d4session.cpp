@@ -35,6 +35,32 @@ namespace ewr {
             reporter.Log(log::Level::Trace, log::Stage::General, code, message);
         }
 
+        // Offset of the first bytes that could begin a D4 packet. Every packet
+        // EWR sends or asks for carries matching socket ids (the channel is
+        // opened socket-to-itself) and no packet is shorter than its own 6-byte
+        // header, so anything else is not a header - usbprint.sys prefix junk,
+        // or a burst that starts mid-packet. Without this the framer would read
+        // a length out of the junk; a bogus length that happens to be >= 6
+        // never completes, and the bytes then sit in the buffer being
+        // re-evaluated by every later read for the rest of the session.
+        //
+        // A trailing partial header is kept: the rest of it may be in the next
+        // read.
+        size_t FindPacketStart(const std::vector<unsigned char>& buffer)
+        {
+            for (size_t i = 0; i + 4 <= buffer.size(); ++i)
+            {
+                if (buffer[i] != buffer[i + 1])
+                    continue;
+
+                const size_t total = (static_cast<size_t>(buffer[i + 2]) << 8) | buffer[i + 3];
+                if (total >= 6)
+                    return i;
+            }
+
+            return (buffer.size() > 3) ? buffer.size() - 3 : 0;
+        }
+
     } // namespace
 
     namespace D4 {
@@ -73,6 +99,16 @@ namespace ewr {
 
         for (;;)
         {
+            // Drop anything ahead of the next plausible header before reading a
+            // length out of it.
+            const size_t start = FindPacketStart(m_buffer);
+            if (start > 0)
+            {
+                EmitTrace(reporter, "d4.resync", "[!] D4 resync: discarding " + std::to_string(start)
+                    + " leading byte(s) that cannot begin a packet.");
+                m_buffer.erase(m_buffer.begin(), m_buffer.begin() + static_cast<long>(start));
+            }
+
             // Bytes [2..3] are the big-endian total length, header included.
             // The timeout bounds only how long bytes may take to arrive; the
             // length decides where the packet ends.
@@ -80,6 +116,11 @@ namespace ewr {
             {
                 const size_t total = (static_cast<size_t>(m_buffer[2]) << 8) | m_buffer[3];
 
+                // FindPacketStart already refuses a header announcing less than
+                // its own size, so this cannot fire. It stays because what
+                // follows would otherwise run the payload's end iterator
+                // backwards past its start, and that must not depend on a
+                // guarantee made somewhere else in the file.
                 if (total < 6)
                 {
                     EmitTrace(reporter, "d4.framing_error", "[!] D4 framing error: header announces "
@@ -102,7 +143,20 @@ namespace ewr {
 
             const int remaining = RemainingMs(deadline);
             if (remaining == 0)
+            {
+                // A header whose body never arrived. Keeping it would make
+                // every later read on this session re-evaluate the same
+                // incomplete bytes and time out the same way.
+                if (!m_buffer.empty())
+                {
+                    EmitTrace(reporter, "d4.framing_error", "[!] D4 framing error: "
+                        + std::to_string(m_buffer.size()) + " buffered byte(s) never completed a packet."
+                          " Discarding them so the next read starts clean.");
+                    m_buffer.clear();
+                }
+
                 return false;
+            }
 
             const std::vector<unsigned char> chunk = m_transport.Drain(remaining);
             if (!chunk.empty())
@@ -111,7 +165,9 @@ namespace ewr {
             }
             else if (Clock::now() >= deadline)
             {
-                return false;
+                // Round the loop once more so the deadline path above gets to
+                // discard whatever never completed.
+                continue;
             }
             else
             {
@@ -379,6 +435,7 @@ namespace ewr {
                   + " to host, initial send credit " + std::to_string(m_sendCredit));
         }
 
+        m_started = true;
         return true;
     }
 
@@ -475,6 +532,14 @@ namespace ewr {
 
     void D4Session::Close()
     {
+        // A session that never fully started never entered D4 mode, so there is
+        // nothing to close and CloseChannel/Exit would be the first packets it
+        // ever saw. Closing twice would send them twice.
+        if (m_closed || !m_started)
+            return;
+
+        m_closed = true;
+
         const int timeout = std::min(m_options.replyTimeoutMs, 500);
 
         if (m_channelOpen)
@@ -573,6 +638,16 @@ namespace ewr {
             return acknowledged;
         }
 
+        // Closes the D4 channel however the session ends. Declared after the
+        // recovery guard so it destructs first: the channel is closed before
+        // any RCMODE leave opens a second session on the same transport.
+        struct SessionCloseGuard
+        {
+            D4Session& session;
+
+            ~SessionCloseGuard() { session.Close(); }
+        };
+
         // Leaves RCMODE however the write session ends. Armed only when an
         // enter was actually attempted.
         struct RecoveryLeaveGuard
@@ -614,6 +689,7 @@ namespace ewr {
         RecoveryLeaveGuard recoveryLeaveGuard{ transport, reporter, sessionOptions, options, useRecovery };
 
         D4Session session(transport, reporter, sessionOptions);
+        SessionCloseGuard sessionCloseGuard{ session };
 
         EmitTrace(reporter, "d4.banner", "=== IEEE 1284.4 SESSION CORE ===\n");
 
@@ -715,7 +791,6 @@ namespace ewr {
                                  "-> Command " + std::to_string(i + 1) + " / " + std::to_string(items.size())
                                      + " | EEPROM write REJECTED (||:42:NG;).");
                     EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write rejected with ':42:NG;' on command " + std::to_string(i + 1) + "\n");
-                    session.Close();
 
                     return result;
                 }
@@ -731,7 +806,6 @@ namespace ewr {
                                  "-> Command " + std::to_string(i + 1) + " / " + std::to_string(items.size())
                                      + " | EEPROM write REFUSED (||:42:NA;) - printer locked by another error.");
                     EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write refused with ':42:NA;' on command " + std::to_string(i + 1) + "\n");
-                    session.Close();
 
                     return result;
                 }
@@ -778,13 +852,10 @@ namespace ewr {
                 }
 
                 EmitTrace(reporter, "exec.trace_fatal", "[FATAL] " + result.error + "\n");
-                session.Close();
 
                 return result;
             }
         }
-
-        session.Close();
 
         if (options.verifyWrites && result.writesTotal == 0)
         {
@@ -828,6 +899,7 @@ namespace ewr {
         sessionOptions.interPacketDelayMs = options.interPacketDelayMs;
 
         D4Session session(transport, reporter, sessionOptions);
+        SessionCloseGuard sessionCloseGuard{ session };
 
         EmitTrace(reporter, "d4.banner", "=== IEEE 1284.4 SESSION CORE (read-only) ===\n");
 
@@ -904,8 +976,6 @@ namespace ewr {
                 result.replies.push_back(std::move(framed));
             }
         }
-
-        session.Close();
 
         result.success = allAnswered;
 

@@ -91,7 +91,8 @@ namespace ewr {
         bool Exchange(const std::vector<unsigned char>& payload, std::vector<unsigned char>& reply);
         // Same, without waiting for a reply.
         bool SendData(const std::vector<unsigned char>& payload);
-        // Best-effort CloseChannel + Exit.
+        // Best-effort CloseChannel + Exit. Idempotent, and inert on a session
+        // that never started, so it is safe to call from a scope guard.
         void Close();
 
         bool ChannelOpen() const { return m_channelOpen; }
@@ -120,6 +121,8 @@ namespace ewr {
         log::Reporter& m_reporter;
         D4SessionOptions m_options;
 
+        bool m_started = false;
+        bool m_closed = false;
         bool m_channelOpen = false;
         uint8_t m_socket = EpsonD4::SOCKET_EPSON_CTRL;
         uint16_t m_mtuToPrinter = 0x0040;

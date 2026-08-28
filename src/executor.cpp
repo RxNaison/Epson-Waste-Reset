@@ -202,7 +202,7 @@ namespace ewr {
             ack = transport.Drain(drainTimeoutMs);
 
             EmitTrace(reporter, "exec.rx", "[IN]  ACK (" + std::to_string(ack.size()) + " bytes):\n"
-                + HexDump(ack.data(), ack.size()));
+                + HexDumpCapped(ack.data(), ack.size(), kTraceDumpCapBytes));
 
             if (!ack.empty())
                 result.ackCount++;
@@ -459,7 +459,7 @@ namespace ewr {
             ack = transport.Drain(drainTimeoutMs);
 
             EmitTrace(reporter, "exec.rx", "[IN]  ACK (" + std::to_string(ack.size()) + " bytes):\n"
-                + HexDump(ack.data(), ack.size()));
+                + HexDumpCapped(ack.data(), ack.size(), kTraceDumpCapBytes));
 
             if (IsChannelOpenAck(ack))
                 result.handshakeConfirmed = true;

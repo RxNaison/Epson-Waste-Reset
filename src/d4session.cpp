@@ -225,7 +225,7 @@ namespace ewr {
 
             EmitTrace(m_reporter, "d4.rx", "[IN]  D4 " + std::string(incoming.IsTransaction() ? "transaction" : "data")
                   + " payload (" + std::to_string(incoming.payload.size()) + " bytes):\n"
-                  + HexDump(incoming.payload.data(), incoming.payload.size()));
+                  + HexDumpCapped(incoming.payload.data(), incoming.payload.size(), kTraceDumpCapBytes));
 
             Absorb(incoming);
 
@@ -258,7 +258,7 @@ namespace ewr {
 
             EmitTrace(m_reporter, "d4.rx", "[IN]  D4 " + std::string(incoming.IsTransaction() ? "transaction" : "data")
                   + " payload (" + std::to_string(incoming.payload.size()) + " bytes):\n"
-                  + HexDump(incoming.payload.data(), incoming.payload.size()));
+                  + HexDumpCapped(incoming.payload.data(), incoming.payload.size(), kTraceDumpCapBytes));
 
             Absorb(incoming);
 

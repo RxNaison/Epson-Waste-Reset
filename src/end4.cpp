@@ -70,6 +70,13 @@ namespace end4 {
             return false;
 
         const std::size_t expectedLen = rawBytes[9];
+
+        // A frame whose declared total is shorter than its own header is
+        // malformed, not truncated: there is no body to point at, and treating
+        // the length as an end offset would run it backwards past the start.
+        if (expectedLen < kReplyHeaderSize)
+            return false;
+
         if (rawBytes.size() < expectedLen)
         {
             // Truncated: hand back the partial body so the caller can keep

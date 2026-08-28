@@ -21,7 +21,8 @@ namespace end4 {
     std::vector<unsigned char> BuildEscRemotePacket(const std::vector<unsigned char>& factoryCmd);
 
     // Strips the 10-byte END4 header. False when the buffer is not a complete
-    // END4 packet; outPayload still carries whatever body arrived.
+    // END4 packet; outPayload still carries whatever body arrived, and is left
+    // empty when the frame declares a length shorter than its own header.
     bool ParseEnd4Response(const std::vector<unsigned char>& rawBytes, std::vector<unsigned char>& outPayload);
 
     // Number of packet-mode flush bytes (0x11) an END4 session sends after the

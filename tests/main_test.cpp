@@ -3761,6 +3761,49 @@ void test_end4_framing()
     }
 }
 
+// The END4 path hands ParseEnd4Response an arbitrary suffix found by searching
+// for the literal 'END4' anywhere in a raw drain, prefix junk included, so a
+// length byte that makes no sense is the expected case rather than the
+// exceptional one. A declared total below the header's own size would run the
+// body's end iterator backwards past its start.
+void test_end4_response_rejects_short_declared_length()
+{
+    std::cout << "[TEST] test_end4_response_rejects_short_declared_length" << std::endl;
+
+    for (unsigned char declared : { 0x00, 0x01, 0x05, 0x09 })
+    {
+        const std::vector<unsigned char> malformed = {
+            'E', 'N', 'D', '4', 0x02, 0x01, 0x00, 0x00, 0x00, declared,
+            '@', 'B', 'D', 'C'
+        };
+
+        std::vector<unsigned char> body = { 0xFF }; // must be cleared, not kept
+        CHECK(!ewr::end4::ParseEnd4Response(malformed, body));
+        CHECK(body.empty());
+    }
+
+    // Exactly the header size is a well-formed frame with an empty body.
+    const std::vector<unsigned char> headerOnly = {
+        'E', 'N', 'D', '4', 0x02, 0x01, 0x00, 0x00, 0x00, 0x0A,
+        '@', 'B', 'D', 'C'
+    };
+
+    std::vector<unsigned char> emptyBody = { 0xFF };
+    CHECK(ewr::end4::ParseEnd4Response(headerOnly, emptyBody));
+    CHECK(emptyBody.empty());
+
+    // A frame that announces more than arrived still hands back the partial
+    // body, which is what lets the caller keep draining.
+    const std::vector<unsigned char> short_ = {
+        'E', 'N', 'D', '4', 0x02, 0x01, 0x00, 0x00, 0x00, 0x20,
+        '@', 'B', 'D', 'C'
+    };
+
+    std::vector<unsigned char> partial;
+    CHECK(!ewr::end4::ParseEnd4Response(short_, partial));
+    CHECK(partial.size() == 4);
+}
+
 // Wrap a factory-control inner payload in the 10-byte END4 reply framing a real
 // printer returns, so FakeTransport can hand it back byte-shaped.
 static std::vector<unsigned char> End4Wrap(const std::vector<unsigned char>& inner)
@@ -3950,6 +3993,42 @@ void test_end4_sequence_reports_unframed_bytes()
     CHECK(result.error.find("never answered") == std::string::npos);
 }
 
+// executor.h caps trace dumps because a single drain may return kMaxDrainBytes.
+// The backends honour that cap; the executor and the D4 session used to format
+// the same bytes a second time, uncapped - hundreds of KB of hex per run, built
+// eagerly as a function argument before the reporter has even looked for a
+// trace sink, and written into the one artifact users attach to bug reports.
+void test_executor_caps_inbound_trace_dumps()
+{
+    std::cout << "[TEST] test_executor_caps_inbound_trace_dumps" << std::endl;
+
+    ewr::UniversalGenerator gen;
+    const auto seq = gen.GenerateSequence(MakeTestModel());
+
+    // A channel-open ack trailed by a burst the size of a full drain window.
+    std::vector<unsigned char> flood = HandshakeAck();
+    flood.resize(16 * 1024, 0xA5);
+
+    FakeTransport t;
+    t.replyFor = [&flood](const std::vector<unsigned char>& pkt) {
+        return ewr::IsWritePacket(pkt) ? OkAck() : flood;
+    };
+
+    std::ostringstream out;
+    std::ostringstream log;
+    ewr::ExecuteSequence(t, seq, out, log, FastOptions());
+
+    const std::string trace = log.str();
+
+    // The burst is reported, not silently dropped...
+    CHECK(trace.find("16384 bytes") != std::string::npos);
+    CHECK(trace.find("further byte(s) not shown") != std::string::npos);
+
+    // ...and 16 KB of hex (~70 KB of text) never reaches the file. Several
+    // packets draw the flood, so uncapped this runs to hundreds of KB.
+    CHECK(trace.size() < 64 * 1024);
+}
+
 void test_hex_dump_capping()
 {
     std::cout << "[TEST] test_hex_dump_capping" << std::endl;
@@ -4096,10 +4175,12 @@ int main()
     test_device_id_extraction_and_parsing();
     test_device_id_model_matching();
     test_end4_framing();
+    test_end4_response_rejects_short_declared_length();
     test_end4_factory_command_extraction();
     test_end4_dds_parsing();
     test_end4_sequence_reports_unframed_bytes();
     test_hex_dump_capping();
+    test_executor_caps_inbound_trace_dumps();
     test_end4_sequence_verified();
     test_end4_sequence_silent_fails();
     test_end4_sequence_alternate_key();

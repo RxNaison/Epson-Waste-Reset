@@ -83,6 +83,58 @@ namespace ewr {
             std::ostream stream;
         };
 
+        // The trace sink points into a TraceLog that dies with this run, while
+        // log::Default() is process-global and outlives it. Anything that
+        // leaves the executor call without removing the sink - a throw out of
+        // a hex dump, a future early return - leaves that global holding a
+        // pointer to a destroyed stream.
+        class ScopedTraceSink
+        {
+        public:
+            ScopedTraceSink(log::Reporter& reporter, std::ostream& trace)
+                : reporter_(reporter)
+                , id_(reporter.AddSink(log::OStreamSink(trace, log::Level::Trace)))
+            {
+            }
+
+            ~ScopedTraceSink() { reporter_.RemoveSink(id_); }
+
+            ScopedTraceSink(const ScopedTraceSink&) = delete;
+            ScopedTraceSink& operator=(const ScopedTraceSink&) = delete;
+
+        private:
+            log::Reporter& reporter_;
+            int id_;
+        };
+
+        // Same shape for the open interface: an attempt that leaves early must
+        // not keep the device claimed. Close() is idempotent, so the normal
+        // path still closes exactly where it always did and the destructor
+        // only covers the paths that never reach it.
+        class ScopedBackendClose
+        {
+        public:
+            explicit ScopedBackendClose(UsbBackend& backend) : backend_(backend) {}
+
+            ~ScopedBackendClose() { Close(); }
+
+            void Close()
+            {
+                if (closed_)
+                    return;
+
+                closed_ = true;
+                backend_.Close();
+            }
+
+            ScopedBackendClose(const ScopedBackendClose&) = delete;
+            ScopedBackendClose& operator=(const ScopedBackendClose&) = delete;
+
+        private:
+            UsbBackend& backend_;
+            bool closed_ = false;
+        };
+
         void WriteTraceBanner(std::ostream& trace, const std::string& title)
         {
             trace << "==================================================\n";
@@ -232,11 +284,15 @@ namespace ewr {
                 return outcome;
             }
 
+            ScopedBackendClose closeGuard(backend);
+
             log::Reporter& reporter = log::Default();
-            const int traceSinkId = reporter.AddSink(log::OStreamSink(trace, log::Level::Trace));
-            const End4Result e4 = ExecuteEnd4Sequence(*transport, deviceId, factoryCommands, reporter, options);
-            reporter.RemoveSink(traceSinkId);
-            backend.Close();
+            End4Result e4;
+            {
+                ScopedTraceSink traceSink(reporter, trace);
+                e4 = ExecuteEnd4Sequence(*transport, deviceId, factoryCommands, reporter, options);
+            }
+            closeGuard.Close();
 
             outcome.success = e4.success;
             outcome.writesTotal = e4.writesTotal;
@@ -313,12 +369,15 @@ namespace ewr {
                 trace << "Total Packets: " << sequence.size() << "\n";
                 trace << "==================================================\n\n";
 
+                ScopedBackendClose closeGuard(*backend);
+
                 // Host sinks plus this run's trace file, at Trace level so the
                 // file gets full hex detail alongside the user-facing lines.
                 log::Reporter& reporter = log::Default();
-                const int traceSinkId = reporter.AddSink(log::OStreamSink(trace, log::Level::Trace));
-                result = ExecuteSequence(*transport, sequence, reporter, options);
-                reporter.RemoveSink(traceSinkId);
+                {
+                    ScopedTraceSink traceSink(reporter, trace);
+                    result = ExecuteSequence(*transport, sequence, reporter, options);
+                }
 
                 trace << "==================================================\n";
                 trace << "SEQUENCE COMPLETE\n";
@@ -327,7 +386,7 @@ namespace ewr {
                 trace << "Result:             " << (result.success ? "SUCCESS" : ("FAILED - " + result.error)) << "\n";
                 trace << "==================================================\n";
 
-                backend->Close();
+                closeGuard.Close();
                 log::Log(log::Level::Info, log::Stage::General, "usb.lock_released", "Hardware lock released.");
 
                 if (!result.handshakeFailed)
@@ -448,10 +507,13 @@ namespace ewr {
                 trace << "Queries:       " << queries.size() << "\n";
                 trace << "==================================================\n\n";
 
+                ScopedBackendClose closeGuard(*backend);
+
                 log::Reporter& reporter = log::Default();
-                const int traceSinkId = reporter.AddSink(log::OStreamSink(trace, log::Level::Trace));
-                result = ExecuteQuerySession(*transport, handshake, queries, reporter, options);
-                reporter.RemoveSink(traceSinkId);
+                {
+                    ScopedTraceSink traceSink(reporter, trace);
+                    result = ExecuteQuerySession(*transport, handshake, queries, reporter, options);
+                }
 
                 trace << "==================================================\n";
                 trace << "QUERY SESSION COMPLETE\n";
@@ -459,7 +521,7 @@ namespace ewr {
                 trace << "Result:             " << (result.success ? "SUCCESS" : ("FAILED - " + result.error)) << "\n";
                 trace << "==================================================\n";
 
-                backend->Close();
+                closeGuard.Close();
 
                 if (!result.handshakeFailed)
                     break;

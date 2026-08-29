@@ -237,7 +237,7 @@ namespace ewr {
             return out;
         }
 
-        struct End4Attempt
+        struct FallbackAttempt
         {
             bool attempted = false;
             bool success = false;
@@ -246,41 +246,79 @@ namespace ewr {
             std::string error;
         };
 
-        // Last resort on an interface whose D4 handshake stayed silent: some
-        // composite ET-2xxx units answer Epson's non-D4 END4 direct-control
-        // path over the same handle even when they never open a D4 channel.
-        End4Attempt TryEnd4Fallback(UsbBackend& backend,
-                                    const UsbCandidate& cand,
-                                    const std::vector<std::vector<unsigned char>>& sequence,
-                                    const ExecutorOptions& options,
-                                    std::ostream& trace)
+        // The non-D4 write paths, in the order they are tried on an interface
+        // whose D4 handshake went nowhere.
+        enum class NonD4Path
         {
-            End4Attempt outcome;
+            // Epson's own direct-control framing, after a packet-mode flush
+            // sized from the device ID's DDS field.
+            End4,
+            // ESC/P Remote carrying the same '||' command. Stateless where the
+            // other two are not: ESC @ before every write, one self-contained
+            // block, nothing carried between attempts. It is the only path that
+            // does not assume EWR owns the pipe - on Windows it never does,
+            // since usbprint.sys cannot be detached and the spooler shares it.
+            EscRemote,
+        };
+
+        struct PathLabels
+        {
+            const char* tag;          // trace prefix
+            const char* attemptCode;  // event code for the attempt line
+            const char* announce;     // user-facing line
+        };
+
+        PathLabels LabelsFor(NonD4Path path)
+        {
+            if (path == NonD4Path::End4)
+            {
+                return { "[END4]", "usb.end4_attempt",
+                         "[!] D4 handshake silent - attempting the END4 direct-control fallback (no driver, no D4 framing)..." };
+            }
+
+            return { "[ESC/P]", "usb.esc_remote_attempt",
+                     "[!] END4 silent as well - attempting the ESC/P Remote fallback (no handshake, no session)..." };
+        }
+
+        // Last resort on an interface whose D4 handshake stayed silent: some
+        // composite ET-2xxx units answer a non-D4 direct-control path over the
+        // same handle even when they never open a D4 channel.
+        FallbackAttempt TryNonD4Fallback(UsbBackend& backend,
+                                         const UsbCandidate& cand,
+                                         const std::vector<std::vector<unsigned char>>& sequence,
+                                         const ExecutorOptions& options,
+                                         std::ostream& trace,
+                                         NonD4Path path)
+        {
+            FallbackAttempt outcome;
+            const PathLabels labels = LabelsFor(path);
 
             const std::vector<std::vector<unsigned char>> factoryCommands =
                 ExtractFactoryWriteCommands(sequence);
             if (factoryCommands.empty())
             {
-                trace << "[END4] No factory EEPROM writes in this sequence; END4 fallback is not applicable.\n\n";
+                trace << labels.tag << " No factory EEPROM writes in this sequence; the fallback is not applicable.\n\n";
                 return outcome; // attempted == false -> normal interface fallback continues
             }
 
             outcome.attempted = true;
 
             // The DDS flush length lives in the device ID, and that IOCTL needs
-            // its own handle - so ask before opening this interface.
-            const std::string deviceId = backend.QueryDeviceId(cand.ordinal);
+            // its own handle - so ask before opening this interface. ESC/P
+            // Remote sends no flush and has no use for it.
+            const std::string deviceId = (path == NonD4Path::End4)
+                ? backend.QueryDeviceId(cand.ordinal)
+                : std::string();
 
-            trace << "[END4] D4 handshake stayed silent on " << backend.Describe(cand.ordinal)
-                  << "; attempting the non-D4 END4 direct-control fallback on this interface.\n";
-            log::Log(log::Level::Info, log::Stage::Handshake, "usb.end4_attempt",
-                     "[!] D4 handshake silent - attempting the END4 direct-control fallback (no driver, no D4 framing)...");
+            trace << labels.tag << " D4 handshake stayed silent on " << backend.Describe(cand.ordinal)
+                  << "; attempting a non-D4 direct-control fallback on this interface.\n";
+            log::Log(log::Level::Info, log::Stage::Handshake, labels.attemptCode, labels.announce);
 
             ITransport* transport = backend.Open(cand.ordinal, options.usbSoftResetOnOpen);
             if (!transport)
             {
-                outcome.error = "END4: could not reopen the interface for the fallback.";
-                trace << "[END4] " << outcome.error << "\n\n";
+                outcome.error = "Could not reopen the interface for the fallback.";
+                trace << labels.tag << " " << outcome.error << "\n\n";
                 return outcome;
             }
 
@@ -290,7 +328,9 @@ namespace ewr {
             End4Result e4;
             {
                 ScopedTraceSink traceSink(reporter, trace);
-                e4 = ExecuteEnd4Sequence(*transport, deviceId, factoryCommands, reporter, options);
+                e4 = (path == NonD4Path::End4)
+                    ? ExecuteEnd4Sequence(*transport, deviceId, factoryCommands, reporter, options)
+                    : ExecuteEscRemoteSequence(*transport, factoryCommands, reporter, options);
             }
             closeGuard.Close();
 
@@ -299,7 +339,7 @@ namespace ewr {
             outcome.writesVerified = e4.writesVerified;
             outcome.error = e4.error;
 
-            trace << "[END4] Fallback result: "
+            trace << labels.tag << " Fallback result: "
                   << (e4.success
                           ? ("SUCCESS - " + std::to_string(e4.writesVerified) + "/" + std::to_string(e4.writesTotal) + " writes verified")
                           : ("FAILED - " + e4.error))
@@ -329,7 +369,7 @@ namespace ewr {
         const int pinned = options.interfaceCandidate;
 
         // Once per run, on the first interface whose D4 handshake goes silent.
-        bool end4Attempted = false;
+        bool fallbackAttempted = false;
 
         log::Log(log::Level::Info, log::Stage::Detect, "usb.device_detected",
                  "[SUCCESS] Auto-detected Epson Printer (PID: " + candidates[0].pid + ")");
@@ -404,37 +444,53 @@ namespace ewr {
 
             // D4 stayed silent: try END4 on this same interface before moving
             // to the next candidate. Once per run, on the first silent one.
-            if (result.handshakeFailed && !end4Attempted)
+            if (result.handshakeFailed && !fallbackAttempted)
             {
-                end4Attempted = true;
-                const End4Attempt e4 = TryEnd4Fallback(*backend, cand, sequence, options, trace);
-                if (e4.attempted)
+                fallbackAttempted = true;
+
+                // END4 first: it is Epson's own framing and the one the captures
+                // show. ESC/P Remote follows because it assumes least about the
+                // transport, so it is what is left standing when END4 draws
+                // nothing back.
+                bool counterReset = false;
+                for (const NonD4Path path : { NonD4Path::End4, NonD4Path::EscRemote })
                 {
-                    if (e4.success)
+                    const FallbackAttempt attempt =
+                        TryNonD4Fallback(*backend, cand, sequence, options, trace, path);
+                    if (!attempt.attempted)
+                        break; // no factory writes at all - neither path applies
+
+                    if (attempt.success)
                     {
                         run.exec.success = true;
                         run.exec.handshakeFailed = false;
-                        run.exec.writesTotal = e4.writesTotal;
-                        run.exec.writesVerified = e4.writesVerified;
+                        run.exec.writesTotal = attempt.writesTotal;
+                        run.exec.writesVerified = attempt.writesVerified;
                         run.exec.error.clear();
-                        log::Log(log::Level::Info, log::Stage::Write, "usb.end4_success",
-                                 "[SUCCESS] END4 direct-control fallback reset the counter ("
-                                     + std::to_string(e4.writesVerified) + "/" + std::to_string(e4.writesTotal) + " writes verified).");
+                        log::Log(log::Level::Info, log::Stage::Write, "usb.fallback_success",
+                                 "[SUCCESS] Direct-control fallback reset the counter ("
+                                     + std::to_string(attempt.writesVerified) + "/"
+                                     + std::to_string(attempt.writesTotal) + " writes verified).");
+                        counterReset = true;
                         break;
                     }
 
                     // Keep the silent-handshake status so the interface fallback
-                    // below still runs, but surface END4's real reason.
-                    run.exec.error = e4.error;
+                    // below still runs, but surface this path's real reason.
+                    run.exec.error = attempt.error;
                 }
+
+                if (counterReset)
+                    break;
             }
 
             if (result.handshakeFailed && pinned < 1 && idx + 1 < candidates.size())
             {
                 log::Log(log::Level::Info, log::Stage::Handshake, "usb.interface_fallback",
                          "[!] Interface " + std::to_string(idx + 1) + "/" + std::to_string(candidates.size())
-                             + " stayed silent to both D4 and END4. Trying the next USB interface...");
-                trace << "[!] Handshake silent (D4 and END4) on this interface. Trying the next USB interface candidate.\n\n";
+                             + " stayed silent to D4, END4 and ESC/P Remote. Trying the next USB interface...");
+                trace << "[!] Handshake silent (D4, END4 and ESC/P Remote) on this interface."
+                         " Trying the next USB interface candidate.\n\n";
                 continue;
             }
 

@@ -42,9 +42,13 @@ namespace end4 {
         packet.push_back(0x1b); packet.push_back('@');
         packet.push_back(0x1b); packet.push_back('@');
 
-        // REMOTE_MODE: \x1b(R\x08\x00REMOTE1
+        // REMOTE_MODE: ESC ( R, a little-endian parameter length, then that
+        // many bytes. The parameter is a NUL followed by "REMOTE1", which is 8
+        // - counting only the seven letters leaves the printer one byte short
+        // and it swallows the leading '|' of the command that follows.
         packet.push_back(0x1b); packet.push_back('('); packet.push_back('R');
         packet.push_back(0x08); packet.push_back(0x00);
+        packet.push_back(0x00);
         packet.push_back('R'); packet.push_back('E'); packet.push_back('M');
         packet.push_back('O'); packet.push_back('T'); packet.push_back('E');
         packet.push_back('1');

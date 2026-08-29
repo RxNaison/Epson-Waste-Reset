@@ -623,12 +623,23 @@ namespace ewr {
                 && std::search(buffer.begin(), buffer.end(), marker, marker + sizeof(marker)) != buffer.end();
         }
 
-        // Accumulates an END4 reply, bounded by a hard deadline so a silent
-        // printer can never wedge the run. Stops as soon as a decisive
-        // ':42:...' token has arrived behind an END4 marker.
-        std::vector<unsigned char> DrainForEnd4Reply(ITransport& transport,
-                                                     int firstReadTimeoutMs,
-                                                     int totalDeadlineMs)
+        // Accumulates a direct-control reply, bounded by a hard deadline so a
+        // silent printer can never wedge the run. Stops as soon as a decisive
+        // ':42:...' token has arrived.
+        //
+        // Accumulating rather than taking the first drain is the point: the
+        // first read after a command routinely hands back something queued
+        // earlier - a stale '@BDC ST2', a lone status byte - instead of the
+        // answer just asked for.
+        //
+        // requireEnd4Marker gates the token on an 'END4' frame having arrived
+        // too. END4 replies always carry it; ESC/P Remote answers the bare
+        // command with no envelope at all, so the marker must not be required
+        // there or a valid ':42:OK;' would be drained straight past.
+        std::vector<unsigned char> DrainForWriteAck(ITransport& transport,
+                                                    int firstReadTimeoutMs,
+                                                    int totalDeadlineMs,
+                                                    bool requireEnd4Marker)
         {
             const auto start = std::chrono::steady_clock::now();
             std::vector<unsigned char> buffer;
@@ -639,7 +650,7 @@ namespace ewr {
                 if (!chunk.empty())
                     buffer.insert(buffer.end(), chunk.begin(), chunk.end());
 
-                if (HasEnd4Marker(buffer)
+                if ((!requireEnd4Marker || HasEnd4Marker(buffer))
                     && (IsEepromWriteOkAck(buffer) || IsEepromWriteNgAck(buffer) || IsEepromWriteNaAck(buffer)))
                     break;
 
@@ -656,6 +667,152 @@ namespace ewr {
         }
 
     } // namespace
+
+    End4Result ExecuteEscRemoteSequence(ITransport& transport,
+                                        const std::vector<std::vector<unsigned char>>& factoryWriteCommands,
+                                        log::Reporter& reporter,
+                                        const ExecutorOptions& options)
+    {
+        End4Result result;
+
+        EmitTrace(reporter, "escr.begin",
+            "[ESC/P] Entering ESC/P Remote direct-control mode: no handshake, no session, no"
+            " packet-mode flush. Each write is one self-contained ESC/P Remote block.");
+
+        if (factoryWriteCommands.empty())
+        {
+            result.error = "ESC/P Remote: no EEPROM write commands to send.";
+            EmitTrace(reporter, "escr.empty", "[ESC/P] " + result.error);
+            return result;
+        }
+
+        const int totalDeadlineMs = (options.handshakeDrainTimeoutMs > 0)
+            ? options.handshakeDrainTimeoutMs * 2
+            : 4000;
+
+        for (size_t i = 0; i < factoryWriteCommands.size(); ++i)
+        {
+            result.writesTotal++;
+            std::vector<unsigned char> command = factoryWriteCommands[i];
+            bool confirmed = false;
+            bool triedAlternateKey = false;
+
+            for (int attempt = 1; attempt <= 2; ++attempt) // original + one alternate-key retry
+            {
+                // ESC @ resets the printer to a known state every time, so an
+                // attempt inherits nothing from the one before it. That is the
+                // whole reason this path exists.
+                const std::vector<unsigned char> packet = end4::BuildEscRemotePacket(command);
+
+                EmitTrace(reporter, "escr.tx", "[ESC/P OUT] write " + std::to_string(i + 1) + "/"
+                    + std::to_string(factoryWriteCommands.size()) + " (" + std::to_string(packet.size())
+                    + " bytes):\n" + HexDumpCapped(packet.data(), packet.size(), kTraceDumpCapBytes));
+
+                if (!transport.Send(packet))
+                {
+                    result.error = "ESC/P Remote: transport failed sending write " + std::to_string(i + 1) + ".";
+                    EmitTrace(reporter, "escr.tx_failed", "[ESC/P] " + result.error);
+                    return result;
+                }
+
+                if (options.interPacketDelayMs > 0)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(options.interPacketDelayMs));
+
+                const std::vector<unsigned char> reply =
+                    DrainForWriteAck(transport, options.writeAckTimeoutMs, totalDeadlineMs, false);
+
+                EmitTrace(reporter, "escr.rx", "[ESC/P IN] reply (" + std::to_string(reply.size())
+                    + " bytes):\n" + HexDumpCapped(reply.data(), reply.size(), kTraceDumpCapBytes));
+
+                if (!reply.empty())
+                    result.anyBytes = true;
+
+                // No envelope to look for here, so a decisive ':42:' token is
+                // the only thing that counts as this path having been answered.
+                if (IsEepromWriteOkAck(reply) || IsEepromWriteNgAck(reply) || IsEepromWriteNaAck(reply))
+                    result.anyReply = true;
+
+                if (IsEepromWriteOkAck(reply))
+                {
+                    result.writesVerified++;
+                    confirmed = true;
+                    EmitProgress(reporter, log::Stage::Write, "escr.write_verified", i + 1, factoryWriteCommands.size(),
+                        "-> ESC/P Remote write " + std::to_string(i + 1) + " / "
+                            + std::to_string(factoryWriteCommands.size()) + " verified (||:42:OK;).");
+                    break;
+                }
+
+                if (IsEepromWriteNgAck(reply))
+                {
+                    std::vector<unsigned char> alternate;
+                    if (!triedAlternateKey
+                        && SubstituteTrailingWriteKey(command, options.writeKey, options.alternateWriteKey, alternate))
+                    {
+                        triedAlternateKey = true;
+                        command = std::move(alternate);
+                        EmitTrace(reporter, "escr.retry", "[ESC/P] write " + std::to_string(i + 1)
+                            + " rejected (||:42:NG;); retrying with the alternate keyword ('wkey1').");
+                        continue;
+                    }
+
+                    result.writesRejected++;
+                    result.error = "ESC/P Remote: printer rejected EEPROM write " + std::to_string(i + 1)
+                        + " (||:42:NG;). The write key does not match this model.";
+                    EmitTrace(reporter, "escr.fatal", "[ESC/P] " + result.error);
+                    return result;
+                }
+
+                if (IsEepromWriteNaAck(reply))
+                {
+                    result.writesRejected++;
+                    result.error = "ESC/P Remote: printer refused EEPROM write " + std::to_string(i + 1)
+                        + " (||:42:NA;). It is locked by another error, or needs a recovery mode"
+                          " this path cannot enter.";
+                    EmitTrace(reporter, "escr.fatal", "[ESC/P] " + result.error);
+                    return result;
+                }
+
+                // Do not spend the alternate-key retry on silence.
+                EmitTrace(reporter, "escr.unconfirmed", "[ESC/P] write " + std::to_string(i + 1)
+                    + " drew no '||:42:OK;' confirmation.");
+                break;
+            }
+
+            if (confirmed && triedAlternateKey)
+                result.alternateKeyUsed = true;
+
+            if (!confirmed)
+            {
+                if (!result.anyReply)
+                {
+                    result.error = result.anyBytes
+                        ? "ESC/P Remote: the printer returned data but never a '||:42:' verdict."
+                        : "ESC/P Remote: no inbound bytes arrived at all.";
+                }
+                else if (result.error.empty())
+                {
+                    result.error = "ESC/P Remote: write " + std::to_string(i + 1)
+                        + " was not confirmed with '||:42:OK;'.";
+                }
+                EmitTrace(reporter, "escr.fatal", "[ESC/P] " + result.error);
+                return result;
+            }
+        }
+
+        result.success = (result.writesVerified == result.writesTotal);
+        if (!result.success && result.error.empty())
+            result.error = "ESC/P Remote: verified " + std::to_string(result.writesVerified) + " of "
+                + std::to_string(result.writesTotal) + " writes.";
+
+        if (result.success)
+        {
+            reporter.Log(log::Level::Info, log::Stage::Write, "escr.success",
+                "-> ESC/P Remote fallback verified all " + std::to_string(result.writesVerified)
+                    + " EEPROM write(s) (||:42:OK;).");
+        }
+
+        return result;
+    }
 
     End4Result ExecuteEnd4Sequence(ITransport& transport,
                                    const std::string& deviceId,
@@ -763,7 +920,7 @@ namespace ewr {
                     std::this_thread::sleep_for(std::chrono::milliseconds(options.interPacketDelayMs));
 
                 const std::vector<unsigned char> reply =
-                    DrainForEnd4Reply(transport, options.writeAckTimeoutMs, totalDeadlineMs);
+                    DrainForWriteAck(transport, options.writeAckTimeoutMs, totalDeadlineMs, true);
 
                 EmitTrace(reporter, "end4.rx", "[END4 IN] reply (" + std::to_string(reply.size())
                     + " bytes):\n" + HexDumpCapped(reply.data(), reply.size(), kTraceDumpCapBytes));
@@ -805,7 +962,6 @@ namespace ewr {
                         && SubstituteTrailingWriteKey(command, options.writeKey, options.alternateWriteKey, alternate))
                     {
                         triedAlternateKey = true;
-                        result.alternateKeyUsed = true;
                         command = std::move(alternate);
                         EmitTrace(reporter, "end4.retry", "[END4] write " + std::to_string(i + 1)
                             + " rejected (||:42:NG;); retrying with the alternate keyword ('wkey1').");
@@ -834,6 +990,11 @@ namespace ewr {
                     + (HasEnd4Marker(reply) ? " drew no '||:42:OK;' confirmation." : " drew no END4 reply."));
                 break;
             }
+
+            // The flag means the alternate keyword WORKED, not that it was
+            // tried - the same rule the D4 paths follow.
+            if (confirmed && triedAlternateKey)
+                result.alternateKeyUsed = true;
 
             if (!confirmed)
             {

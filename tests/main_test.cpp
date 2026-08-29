@@ -4011,6 +4011,155 @@ void test_ink_reset_requires_preflight()
     CHECK(gw.resetCalls == 0);  // nothing was written
 }
 
+// A stand-in for what an ESC/P Remote capable printer answers a factory write.
+// No END4 envelope: the '||' verdict arrives bare.
+static std::vector<unsigned char> BareOkAck()
+{
+    const std::string ack = "||:42:OK;";
+    return std::vector<unsigned char>(ack.begin(), ack.end());
+}
+
+void test_esc_remote_sequence_verified()
+{
+    std::cout << "[TEST] test_esc_remote_sequence_verified" << std::endl;
+
+    const ewr::DbPrinterModel model = MakeTestModel();
+    const std::vector<std::vector<unsigned char>> commands =
+        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+    CHECK(commands.size() == 2);
+
+    FakeTransport transport;
+    transport.replyFor = [](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
+        if (pkt.size() >= 2 && pkt[0] == 0x1b && pkt[1] == '@')
+            return BareOkAck();
+        return {};
+    };
+
+    ewr::ExecutorOptions options;
+    options.writeKey = model.wkey;
+    options.interPacketDelayMs = 0;
+
+    ewr::log::Reporter reporter;
+    const ewr::End4Result result =
+        ewr::ExecuteEscRemoteSequence(transport, commands, reporter, options);
+
+    CHECK(result.success);
+    CHECK(result.anyReply);
+    CHECK(result.anyBytes);
+    CHECK(result.writesTotal == 2);
+    CHECK(result.writesVerified == 2);
+    CHECK(!result.alternateKeyUsed);
+
+    // One self-contained block per write, and nothing else. The point of this
+    // path is that it sends no handshake, opens no session and floods no
+    // packet-mode filler, so a run that emitted any of those is not this path.
+    CHECK(transport.sent.size() == commands.size());
+    for (const auto& pkt : transport.sent)
+    {
+        CHECK(pkt.size() >= 2 && pkt[0] == 0x1b && pkt[1] == '@');
+        CHECK(pkt.front() != 0x11);
+        CHECK(pkt != ewr::end4::kExitPacketMode2);
+    }
+}
+
+void test_esc_remote_sequence_silent_fails()
+{
+    std::cout << "[TEST] test_esc_remote_sequence_silent_fails" << std::endl;
+
+    const ewr::DbPrinterModel model = MakeTestModel();
+    const std::vector<std::vector<unsigned char>> commands =
+        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+
+    FakeTransport transport; // no replyFor -> the printer never answers
+
+    ewr::ExecutorOptions options;
+    options.writeKey = model.wkey;
+    options.interPacketDelayMs = 0;
+    options.writeAckTimeoutMs = 10;
+    options.handshakeDrainTimeoutMs = 100;
+
+    ewr::log::Reporter reporter;
+    const ewr::End4Result result =
+        ewr::ExecuteEscRemoteSequence(transport, commands, reporter, options);
+
+    CHECK(!result.success);
+    CHECK(!result.anyReply);
+    CHECK(!result.anyBytes);
+    CHECK(result.writesVerified == 0);
+    CHECK(!result.error.empty());
+}
+
+// ':42:NG;' is the write key being wrong, not the transport failing, so the
+// alternate keyword gets one try - and the flag only claims the alternate
+// worked when the retry actually came back OK.
+void test_esc_remote_alternate_key()
+{
+    std::cout << "[TEST] test_esc_remote_alternate_key" << std::endl;
+
+    const ewr::DbPrinterModel model = MakeTestModel(); // writes end with wkey "Arkanoid"
+    const std::vector<std::vector<unsigned char>> commands =
+        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+
+    const std::string alternate = "Tetris01"; // same length, so the tail swap applies
+
+    FakeTransport transport;
+    transport.replyFor = [&alternate](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
+        const bool carriesAlternate = pkt.size() >= alternate.size()
+            && std::equal(alternate.begin(), alternate.end(),
+                          pkt.end() - static_cast<long>(alternate.size()) - 6);
+        const std::string ng = "||:42:NG;";
+        return carriesAlternate ? BareOkAck() : std::vector<unsigned char>(ng.begin(), ng.end());
+    };
+
+    ewr::ExecutorOptions options;
+    options.writeKey = model.wkey;
+    options.alternateWriteKey = alternate;
+    options.interPacketDelayMs = 0;
+    options.writeAckTimeoutMs = 10;
+    options.handshakeDrainTimeoutMs = 100;
+
+    ewr::log::Reporter reporter;
+    const ewr::End4Result result =
+        ewr::ExecuteEscRemoteSequence(transport, commands, reporter, options);
+
+    CHECK(result.success);
+    CHECK(result.alternateKeyUsed);
+    CHECK(result.writesVerified == result.writesTotal);
+}
+
+// Both keywords rejected is a bad database entry, not a fixed one, so the
+// alternate-key flag must stay false - hosts surface it as a fix worth
+// reporting upstream.
+void test_esc_remote_both_keys_rejected_claims_nothing()
+{
+    std::cout << "[TEST] test_esc_remote_both_keys_rejected_claims_nothing" << std::endl;
+
+    const ewr::DbPrinterModel model = MakeTestModel();
+    const std::vector<std::vector<unsigned char>> commands =
+        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+
+    FakeTransport transport;
+    transport.replyFor = [](const std::vector<unsigned char>&) -> std::vector<unsigned char> {
+        const std::string ng = "||:42:NG;";
+        return std::vector<unsigned char>(ng.begin(), ng.end());
+    };
+
+    ewr::ExecutorOptions options;
+    options.writeKey = model.wkey;
+    options.alternateWriteKey = "Tetris01";
+    options.interPacketDelayMs = 0;
+    options.writeAckTimeoutMs = 10;
+    options.handshakeDrainTimeoutMs = 100;
+
+    ewr::log::Reporter reporter;
+    const ewr::End4Result result =
+        ewr::ExecuteEscRemoteSequence(transport, commands, reporter, options);
+
+    CHECK(!result.success);
+    CHECK(!result.alternateKeyUsed);
+    CHECK(result.writesRejected == 1);
+}
+
 void test_end4_framing()
 {
     std::cout << "[TEST] test_end4_framing" << std::endl;
@@ -4022,9 +4171,28 @@ void test_end4_framing()
     CHECK(end4Pkt[0] == 'E' && end4Pkt[1] == 'N' && end4Pkt[2] == 'D' && end4Pkt[3] == '4');
     CHECK(end4Pkt[9] == static_cast<uint8_t>(14 + cmd.size()));
 
+    // ESC @ ESC @ | ESC ( R len=8 | \0 REMOTE1 | <cmd> | ESC 0 0 0 | ESC @
     const std::vector<unsigned char> escPkt = ewr::end4::BuildEscRemotePacket(cmd);
-    CHECK(escPkt.size() > cmd.size());
+    CHECK(escPkt.size() == 23 + cmd.size());
     CHECK(escPkt[0] == 0x1b && escPkt[1] == '@');
+    CHECK(escPkt[2] == 0x1b && escPkt[3] == '@');
+    CHECK(escPkt[4] == 0x1b && escPkt[5] == '(' && escPkt[6] == 'R');
+
+    // The declared parameter length has to match the bytes actually supplied.
+    // Counting only "REMOTE1" leaves it one short and the printer eats the
+    // leading '|' of the command behind it.
+    const size_t declared = static_cast<size_t>(escPkt[7]) | (static_cast<size_t>(escPkt[8]) << 8);
+    CHECK(declared == 8);
+
+    const std::vector<unsigned char> expectedParam = { 0x00, 'R', 'E', 'M', 'O', 'T', 'E', '1' };
+    CHECK(std::equal(expectedParam.begin(), expectedParam.end(), escPkt.begin() + 9));
+
+    // The command starts immediately after the declared parameter.
+    CHECK(std::equal(cmd.begin(), cmd.end(), escPkt.begin() + 9 + static_cast<long>(declared)));
+
+    const std::vector<unsigned char> tail(escPkt.end() - 6, escPkt.end());
+    const std::vector<unsigned char> expectedTail = { 0x1b, 0x00, 0x00, 0x00, 0x1b, '@' };
+    CHECK(tail == expectedTail);
 
     std::vector<unsigned char> rawReply = {
         'E', 'N', 'D', '4', 0x02, 0x01, 0x00, 0x00, 0x00, 0x0E,
@@ -4462,6 +4630,10 @@ int main()
     test_end4_response_rejects_short_declared_length();
     test_end4_factory_command_extraction();
     test_end4_dds_parsing();
+    test_esc_remote_sequence_verified();
+    test_esc_remote_sequence_silent_fails();
+    test_esc_remote_alternate_key();
+    test_esc_remote_both_keys_rejected_claims_nothing();
     test_end4_sequence_reports_unframed_bytes();
     test_hex_dump_capping();
     test_executor_caps_inbound_trace_dumps();

@@ -196,6 +196,17 @@ namespace ewr {
     // write in END4 framing. success requires every write confirmed with
     // ':42:OK;'; a silent printer yields anyReply == false, never a false
     // success. The read wait is bounded so it cannot wedge the run.
+    // Third rung, after D4 and END4: ESC/P Remote mode carrying the same '||'
+    // factory commands. Stateless where the other two are not - no handshake,
+    // no session, no credit, no packet-mode flush - so it survives a transport
+    // that reorders, splits or interleaves, which is what usbprint.sys does
+    // when the spooler and Epson's status poller share the handle. Shares
+    // End4Result: both are non-D4 direct-control paths with the same outcomes.
+    End4Result ExecuteEscRemoteSequence(ITransport& transport,
+                                        const std::vector<std::vector<unsigned char>>& factoryWriteCommands,
+                                        log::Reporter& reporter,
+                                        const ExecutorOptions& options = {});
+
     End4Result ExecuteEnd4Sequence(ITransport& transport,
                                    const std::string& deviceId,
                                    const std::vector<std::vector<unsigned char>>& factoryWriteCommands,

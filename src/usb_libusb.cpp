@@ -1,5 +1,6 @@
 #include "ewr/usb.h"
 #include "ewr/usb_backend.h"
+#include "usb_backends_internal.h"
 #include "ewr/usb_timing.h"
 #include "ewr/deviceid.h"
 #include "ewr/log.h"
@@ -21,10 +22,15 @@
 #include <string>
 #include <vector>
 
-// Linux USB backend: libusb enumeration (printer-class first,
-// vendor-specific fallback) and raw bulk I/O. The run choreography (pin,
-// retry, fallback, banners) lives in usb_driver.cpp; see ewr/usb_backend.h
-// for the seam.
+// libusb USB backend: enumeration (printer-class first, vendor-specific
+// fallback) and raw bulk I/O.
+//
+// The whole backend on Linux and macOS; on Windows it runs alongside
+// usb_windows.cpp (see usb_composite.cpp) for the WinUSB-bound vendor
+// interfaces. Anything another driver owns just fails to claim.
+//
+// The run choreography (pin, retry, fallback, banners) lives in
+// usb_driver.cpp; see ewr/usb_backend.h for the seam.
 
 namespace ewr {
 
@@ -32,7 +38,7 @@ namespace ewr {
 
         using namespace usb_timing;
 
-        struct LinuxCandidate
+        struct LibusbCandidate
         {
             libusb_device* device = nullptr; // borrowed ref, owned by the device list
             uint16_t pid = 0;
@@ -49,10 +55,10 @@ namespace ewr {
             bool detachedKernelDriver = false;
         };
 
-        class LinuxUsbTransport final : public ITransport
+        class LibusbTransport final : public ITransport
         {
         public:
-            LinuxUsbTransport(libusb_device_handle* handle, unsigned char epIn, unsigned char epOut, std::ostream& trace)
+            LibusbTransport(libusb_device_handle* handle, unsigned char epIn, unsigned char epOut, std::ostream& trace)
                 : handle_(handle), epIn_(epIn), epOut_(epOut), trace_(trace) {}
 
             bool Send(const std::vector<unsigned char>& packet) override
@@ -160,9 +166,9 @@ namespace ewr {
 
         // Printer class first, vendor-specific as fallback; each candidate
         // needs both a bulk IN and a bulk OUT endpoint.
-        std::vector<LinuxCandidate> CollectCandidates(libusb_device** devs, ssize_t cnt)
+        std::vector<LibusbCandidate> CollectCandidates(libusb_device** devs, ssize_t cnt)
         {
-            std::vector<LinuxCandidate> candidates;
+            std::vector<LibusbCandidate> candidates;
 
             for (ssize_t i = 0; i < cnt; i++)
             {
@@ -203,7 +209,7 @@ namespace ewr {
 
                     if (ep_in != 0 && ep_out != 0)
                     {
-                        LinuxCandidate cand;
+                        LibusbCandidate cand;
                         cand.device = devs[i];
                         cand.pid = desc.idProduct;
                         // bInterfaceNumber, not the descriptor's array index:
@@ -224,7 +230,7 @@ namespace ewr {
             }
 
             std::stable_sort(candidates.begin(), candidates.end(),
-                [](const LinuxCandidate& a, const LinuxCandidate& b)
+                [](const LibusbCandidate& a, const LibusbCandidate& b)
                 {
                     if (a.printerClass != b.printerClass)
                         return a.printerClass;
@@ -234,7 +240,7 @@ namespace ewr {
             return candidates;
         }
 
-        bool OpenCandidate(const LinuxCandidate& cand, OpenInterface& open)
+        bool OpenCandidate(const LibusbCandidate& cand, OpenInterface& open)
         {
             libusb_device_handle* handle = nullptr;
             if (libusb_open(cand.device, &handle) != 0)
@@ -286,7 +292,7 @@ namespace ewr {
 
         // GET_DEVICE_ID is a printer-class request, so vendor-specific
         // interfaces return "" rather than being asked.
-        std::string QueryCandidateDeviceId(const LinuxCandidate& cand, std::ostream& trace)
+        std::string QueryCandidateDeviceId(const LibusbCandidate& cand, std::ostream& trace)
         {
             if (!cand.printerClass)
                 return "";
@@ -318,10 +324,10 @@ namespace ewr {
             return ExtractDeviceIdString(buffer, static_cast<size_t>(received));
         }
 
-        class LinuxUsbBackend final : public UsbBackend
+        class LibusbBackend final : public UsbBackend
         {
         public:
-            explicit LinuxUsbBackend(std::ostream& trace) : trace_(trace)
+            explicit LibusbBackend(std::ostream& trace) : trace_(trace)
             {
                 if (libusb_init(nullptr) < 0)
                 {
@@ -339,7 +345,7 @@ namespace ewr {
                 }
             }
 
-            ~LinuxUsbBackend() override
+            ~LibusbBackend() override
             {
                 Close();
                 if (devices_)
@@ -348,7 +354,8 @@ namespace ewr {
                     libusb_exit(nullptr);
             }
 
-            // Names the transport, not the OS: this backend also serves macOS.
+            // Names the transport, not the OS: this also serves macOS, and
+            // the vendor interfaces of a Windows run.
             const char* PlatformName() const override { return "libusb"; }
 
             const std::string& InitError() const override { return initError_; }
@@ -378,7 +385,7 @@ namespace ewr {
                 if (ordinal >= candidates_.size())
                     return "<invalid candidate>";
 
-                const LinuxCandidate& cand = candidates_[ordinal];
+                const LibusbCandidate& cand = candidates_[ordinal];
                 std::ostringstream text;
                 text << "Interface " << cand.interfaceNumber
                      << (cand.printerClass ? " (Printer Class)" : " (Vendor-Specific Class)")
@@ -401,7 +408,7 @@ namespace ewr {
                     return nullptr;
                 }
 
-                transport_ = std::make_unique<LinuxUsbTransport>(open_.handle, candidates_[ordinal].epIn, candidates_[ordinal].epOut, trace_);
+                transport_ = std::make_unique<LibusbTransport>(open_.handle, candidates_[ordinal].epIn, candidates_[ordinal].epOut, trace_);
                 return transport_.get();
             }
 
@@ -413,7 +420,7 @@ namespace ewr {
 
             // libusb reads block properly, so a silent handshake here means
             // the interface is genuinely mute - retrying it proves nothing.
-            int AttemptsPerCandidate() const override { return 1; }
+            int AttemptsPerCandidate(std::size_t) const override { return 1; }
 
             std::string QueryDeviceId(std::size_t ordinal) override
             {
@@ -426,8 +433,17 @@ namespace ewr {
 
                 if (payloadRun)
                 {
+#ifdef _WIN32
+                    // No sudo, and nothing to detach: usbprint.sys owns the
+                    // printer-class interfaces by design, and the composite
+                    // has already tried them.
+                    log::Log(log::Level::Warning, log::Stage::Detect, "usb.claim_all_failed",
+                             "[!] Found an Epson device but could not claim any interface "
+                             "(close Epson Status Monitor and any pending print job, then try again).");
+#else
                     log::Log(log::Level::Warning, log::Stage::Detect, "usb.claim_all_failed",
                              "[!] Found an Epson device but could not claim any interface (is another program using it? try running with sudo).");
+#endif
                 }
 
                 return "Could not claim any Epson USB interface.";
@@ -441,7 +457,7 @@ namespace ewr {
                 return text.str();
             }
 
-            static std::string SummarizePath(const LinuxCandidate& cand)
+            static std::string SummarizePath(const LibusbCandidate& cand)
             {
                 std::ostringstream path;
                 path << "vid_04b8&pid_" << FormatPid(cand.pid) << "&if_" << cand.interfaceNumber;
@@ -453,16 +469,24 @@ namespace ewr {
             bool inited_ = false;
             libusb_device** devices_ = nullptr;
             ssize_t deviceCount_ = 0;
-            std::vector<LinuxCandidate> candidates_;
+            std::vector<LibusbCandidate> candidates_;
             OpenInterface open_;
-            std::unique_ptr<LinuxUsbTransport> transport_;
+            std::unique_ptr<LibusbTransport> transport_;
         };
 
     } // namespace
 
+    std::unique_ptr<UsbBackend> CreateLibusbBackend(std::ostream& trace)
+    {
+        return std::make_unique<LibusbBackend>(trace);
+    }
+
+#ifndef _WIN32
+    // Windows takes CreateUsbBackend from usb_composite.cpp instead.
     std::unique_ptr<UsbBackend> CreateUsbBackend(std::ostream& trace)
     {
-        return std::make_unique<LinuxUsbBackend>(trace);
+        return CreateLibusbBackend(trace);
     }
+#endif
 
 } // namespace ewr

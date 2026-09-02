@@ -13,12 +13,12 @@ configure_file(
     @ONLY
 )
 
-set(LIB_SOURCES src/parser.cpp src/generator.cpp src/executor.cpp src/d4session.cpp src/session.cpp src/status.cpp src/deviceid.cpp src/updater_common.cpp src/usb_driver.cpp src/end4.cpp)
+set(LIB_SOURCES src/parser.cpp src/generator.cpp src/executor.cpp src/d4session.cpp src/session.cpp src/status.cpp src/deviceid.cpp src/updater_common.cpp src/usb_driver.cpp src/end4.cpp src/usb_composite.cpp)
 
 if(WIN32)
-    list(APPEND LIB_SOURCES src/usb_windows.cpp src/updater_windows.cpp)
+    list(APPEND LIB_SOURCES src/usb_windows.cpp src/usb_libusb.cpp src/updater_windows.cpp)
 else()
-    list(APPEND LIB_SOURCES src/usb_linux.cpp src/updater_linux.cpp)
+    list(APPEND LIB_SOURCES src/usb_libusb.cpp src/updater_linux.cpp)
 endif()
 
 add_library(ewr_core STATIC ${LIB_SOURCES})
@@ -33,7 +33,23 @@ find_package(Threads REQUIRED)
 target_link_libraries(ewr_core PUBLIC Threads::Threads)
 
 if(WIN32)
-    target_link_libraries(ewr_core PRIVATE setupapi urlmon wininet)
+    # Windows needs libusb too: the ET-2xxx maintenance engine sits on a
+    # WinUSB-bound vendor interface usbprint.sys cannot see. Fetched and
+    # static so a release stays one ewr.exe with no DLL and no vcpkg.
+    include(FetchContent)
+    set(LIBUSB_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(LIBUSB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(LIBUSB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(LIBUSB_INSTALL_TARGETS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(libusb_cmake
+        GIT_REPOSITORY https://github.com/libusb/libusb-cmake.git
+        GIT_TAG v1.0.29-0
+    )
+    FetchContent_MakeAvailable(libusb_cmake)
+
+    # Bare target name: the libusb::usb-1.0 alias is only on libusb-cmake's
+    # main branch, which has no release tag.
+    target_link_libraries(ewr_core PRIVATE setupapi urlmon wininet usb-1.0)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBUSB REQUIRED libusb-1.0)

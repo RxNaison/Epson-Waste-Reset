@@ -28,7 +28,8 @@ namespace ewr {
     // Platform seam for the driver loop in usb_driver.cpp. The driver owns
     // candidate iteration, pinning, retry-and-fallback and the trace
     // choreography; a backend owns enumeration, open/close and raw I/O.
-    // Exactly one usb_<platform>.cpp implements this per build.
+    // usb_windows.cpp and usb_libusb.cpp each implement it; a Windows build
+    // runs both behind the composite in usb_composite.cpp.
     class UsbBackend
     {
     public:
@@ -56,11 +57,12 @@ namespace ewr {
 
         virtual void Close() = 0;
 
-        // Full sessions (Open -> handshake -> Close) per candidate before
-        // the driver falls through to the next candidate. Windows: 2, Linux:
-        // 1. There is no in-place retry: a failed session is always closed
-        // first, so the second attempt inherits nothing from the first.
-        virtual int AttemptsPerCandidate() const = 0;
+        // Full sessions (Open -> handshake -> Close) on candidate `ordinal`
+        // before the driver falls through to the next. usbprint: 2, libusb: 1,
+        // and a Windows run carries both - hence per candidate, not per
+        // backend. There is no in-place retry: a failed session is always
+        // closed first, so the second attempt inherits nothing from the first.
+        virtual int AttemptsPerCandidate(std::size_t ordinal) const = 0;
 
         // "" when the candidate's class cannot answer.
         virtual std::string QueryDeviceId(std::size_t ordinal) = 0;
@@ -73,5 +75,19 @@ namespace ewr {
     // `trace` is the run's single open trace stream and must outlive the
     // backend, which must never reopen ewr_trace.log itself.
     std::unique_ptr<UsbBackend> CreateUsbBackend(std::ostream& trace);
+
+    struct UsbBackendMember
+    {
+        std::unique_ptr<UsbBackend> backend;
+        // Prefixed onto this member's class names ("libusb:VENDOR"). Empty
+        // leaves them as the member reported them.
+        std::string tag;
+    };
+
+    // Candidates concatenate in member order, the first member to list an
+    // interface keeps it, and every ordinal routes back to its owner. Only
+    // Windows composes (usbprint.sys + libusb).
+    std::unique_ptr<UsbBackend> CreateCompositeUsbBackend(std::vector<UsbBackendMember> members,
+                                                          std::ostream& trace);
 
 } // namespace ewr

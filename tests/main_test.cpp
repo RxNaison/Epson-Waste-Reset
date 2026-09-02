@@ -16,6 +16,7 @@
 #include "ewr/d4session.h"
 #include "ewr/log.h"
 #include "ewr/session.h"
+#include "ewr/usb_backend.h"
 
 namespace fs = std::filesystem;
 
@@ -4534,6 +4535,272 @@ void test_end4_sequence_alternate_key()
     CHECK(result.writesVerified == 2);
 }
 
+// ---------------------------------------------------------------------------
+// Composite backend (usb_composite.cpp)
+// ---------------------------------------------------------------------------
+
+// Describe(), QueryDeviceId() and AttemptsPerCandidate() all echo the ordinal
+// they were handed, so a mistranslated ordinal fails loudly instead of
+// looking like a pass.
+class FakeBackend final : public ewr::UsbBackend
+{
+public:
+    FakeBackend(std::string name, std::vector<ewr::UsbCandidate> candidates, std::string initError = "")
+        : name_(std::move(name)), candidates_(std::move(candidates)), initError_(std::move(initError))
+    {
+        for (std::size_t i = 0; i < candidates_.size(); ++i)
+            candidates_[i].ordinal = i;
+    }
+
+    const char* PlatformName() const override { return name_.c_str(); }
+    const std::string& InitError() const override { return initError_; }
+
+    std::vector<ewr::UsbCandidate> Enumerate() override
+    {
+        ++enumerations;
+        return candidates_;
+    }
+
+    std::string Describe(std::size_t ordinal) const override
+    {
+        return name_ + " candidate " + std::to_string(ordinal);
+    }
+
+    ewr::ITransport* Open(std::size_t ordinal, bool) override
+    {
+        opened.push_back(ordinal);
+        return openSucceeds ? &transport : nullptr;
+    }
+
+    void Close() override { ++closes; }
+
+    int AttemptsPerCandidate(std::size_t ordinal) const override
+    {
+        return attemptsBase + static_cast<int>(ordinal);
+    }
+
+    std::string QueryDeviceId(std::size_t ordinal) override
+    {
+        return name_ + " id " + std::to_string(ordinal);
+    }
+
+    std::string DescribeOpenFailure(bool) override { return name_ + " could not open."; }
+
+    FakeTransport transport;
+    std::vector<std::size_t> opened;
+    int closes = 0;
+    int enumerations = 0;
+    int attemptsBase = 1;
+    bool openSucceeds = true;
+
+private:
+    std::string name_;
+    std::vector<ewr::UsbCandidate> candidates_;
+    std::string initError_;
+};
+
+static ewr::UsbCandidate MakeCandidate(const std::string& className, int interfaceNumber,
+                                       const std::string& pid = "1187")
+{
+    ewr::UsbCandidate cand;
+    cand.className = className;
+    cand.interfaceNumber = interfaceNumber;
+    cand.path = className + "#if_" + std::to_string(interfaceNumber);
+    cand.pid = pid;
+    return cand;
+}
+
+static ewr::UsbBackendMember Member(std::unique_ptr<ewr::UsbBackend> backend, std::string tag)
+{
+    ewr::UsbBackendMember member;
+    member.backend = std::move(backend);
+    member.tag = std::move(tag);
+    return member;
+}
+
+void test_composite_merges_candidates_in_member_order()
+{
+    std::cout << "[TEST] test_composite_merges_candidates_in_member_order" << std::endl;
+
+    auto primary = std::make_unique<FakeBackend>("usbprint",
+        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", 1), MakeCandidate("IMAGE", 0) });
+    auto secondary = std::make_unique<FakeBackend>("libusb",
+        std::vector<ewr::UsbCandidate>{ MakeCandidate("VENDOR", 2), MakeCandidate("VENDOR", 3) });
+
+    std::vector<ewr::UsbBackendMember> members;
+    members.push_back(Member(std::move(primary), ""));
+    members.push_back(Member(std::move(secondary), "libusb"));
+
+    std::ostringstream trace;
+    std::unique_ptr<ewr::UsbBackend> composite = ewr::CreateCompositeUsbBackend(std::move(members), trace);
+
+    CHECK(std::string(composite->PlatformName()) == "usbprint + libusb");
+    CHECK(composite->InitError().empty());
+
+    const std::vector<ewr::UsbCandidate> merged = composite->Enumerate();
+    CHECK(merged.size() == 4);
+
+    // Order is the guarantee: a printer that already worked never reaches
+    // libusb.
+    CHECK(merged[0].className == "USBPRINT");
+    CHECK(merged[1].className == "IMAGE");
+    CHECK(merged[2].className == "libusb:VENDOR");
+    CHECK(merged[3].className == "libusb:VENDOR");
+
+    // --interface N and the fallback ladder both address candidates by this.
+    for (std::size_t i = 0; i < merged.size(); ++i)
+        CHECK(merged[i].ordinal == i);
+
+    CHECK(merged[2].interfaceNumber == 2);
+    CHECK(merged[2].pid == "1187");
+    CHECK(merged[0].path == "USBPRINT#if_1");
+}
+
+void test_composite_identifies_a_shared_interface_by_number()
+{
+    std::cout << "[TEST] test_composite_identifies_a_shared_interface_by_number" << std::endl;
+
+    // mi_01 is bound to usbprint.sys and still visible to libusb; listing it
+    // twice only spends a failed claim on a handle usbprint already holds.
+    auto primary = std::make_unique<FakeBackend>("usbprint",
+        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", 1) });
+    auto secondary = std::make_unique<FakeBackend>("libusb",
+        std::vector<ewr::UsbCandidate>{
+            MakeCandidate("PRINTER", 1),              // the same interface
+            MakeCandidate("VENDOR", 1, "1234"),       // same number, different device
+            MakeCandidate("VENDOR", 2) });
+
+    std::vector<ewr::UsbBackendMember> members;
+    members.push_back(Member(std::move(primary), ""));
+    members.push_back(Member(std::move(secondary), "libusb"));
+
+    std::ostringstream trace;
+    std::unique_ptr<ewr::UsbBackend> composite = ewr::CreateCompositeUsbBackend(std::move(members), trace);
+
+    const std::vector<ewr::UsbCandidate> merged = composite->Enumerate();
+    CHECK(merged.size() == 3);
+    CHECK(merged[0].className == "USBPRINT");
+    CHECK(merged[1].className == "libusb:VENDOR" && merged[1].pid == "1234");
+    CHECK(merged[2].className == "libusb:VENDOR" && merged[2].interfaceNumber == 2);
+
+    for (std::size_t i = 0; i < merged.size(); ++i)
+        CHECK(merged[i].ordinal == i);
+
+    // No mi_XX means non-composite: one function, so libusb's interface 0 on
+    // that PID is the same one.
+    auto lonePrimary = std::make_unique<FakeBackend>("usbprint",
+        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", -1) });
+    auto loneSecondary = std::make_unique<FakeBackend>("libusb",
+        std::vector<ewr::UsbCandidate>{ MakeCandidate("PRINTER", 0) });
+
+    std::vector<ewr::UsbBackendMember> loneMembers;
+    loneMembers.push_back(Member(std::move(lonePrimary), ""));
+    loneMembers.push_back(Member(std::move(loneSecondary), "libusb"));
+
+    std::unique_ptr<ewr::UsbBackend> lone = ewr::CreateCompositeUsbBackend(std::move(loneMembers), trace);
+    CHECK(lone->Enumerate().size() == 1);
+    CHECK(lone->Enumerate()[0].className == "USBPRINT");
+
+    // Two of the same printer share a PID and an interface number and are
+    // still two printers.
+    auto twins = std::make_unique<FakeBackend>("usbprint",
+        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", 1), MakeCandidate("USBPRINT", 1) });
+
+    std::vector<ewr::UsbBackendMember> twinMembers;
+    twinMembers.push_back(Member(std::move(twins), ""));
+
+    std::unique_ptr<ewr::UsbBackend> pair = ewr::CreateCompositeUsbBackend(std::move(twinMembers), trace);
+    CHECK(pair->Enumerate().size() == 2);
+}
+
+void test_composite_routes_every_call_to_the_owning_member()
+{
+    std::cout << "[TEST] test_composite_routes_every_call_to_the_owning_member" << std::endl;
+
+    auto primary = std::make_unique<FakeBackend>("usbprint",
+        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", 1), MakeCandidate("IMAGE", 0) });
+    auto secondary = std::make_unique<FakeBackend>("libusb",
+        std::vector<ewr::UsbCandidate>{ MakeCandidate("VENDOR", 2), MakeCandidate("VENDOR", 3) });
+
+    FakeBackend* primaryRaw = primary.get();
+    FakeBackend* secondaryRaw = secondary.get();
+
+    // usbprint retries a silent handshake on a fresh handle; libusb does not.
+    primaryRaw->attemptsBase = 2;
+    secondaryRaw->attemptsBase = 1;
+
+    std::vector<ewr::UsbBackendMember> members;
+    members.push_back(Member(std::move(primary), ""));
+    members.push_back(Member(std::move(secondary), "libusb"));
+
+    std::ostringstream trace;
+    std::unique_ptr<ewr::UsbBackend> composite = ewr::CreateCompositeUsbBackend(std::move(members), trace);
+    composite->Enumerate();
+
+    // Composite ordinal 3 is libusb's own ordinal 1.
+    CHECK(composite->Describe(3) == "[libusb] libusb candidate 1");
+    CHECK(composite->QueryDeviceId(3) == "libusb id 1");
+    CHECK(composite->AttemptsPerCandidate(3) == 2); // 1 + local ordinal 1
+    CHECK(composite->AttemptsPerCandidate(2) == 1); // 1 + local ordinal 0
+    CHECK(composite->AttemptsPerCandidate(1) == 3); // 2 + local ordinal 1
+
+    CHECK(composite->Open(3, false) == &secondaryRaw->transport);
+    CHECK(secondaryRaw->opened == std::vector<std::size_t>{ 1 });
+    CHECK(primaryRaw->opened.empty());
+
+    composite->Close();
+    CHECK(secondaryRaw->closes == 1);
+    CHECK(primaryRaw->closes == 0);
+
+    // Refused, not routed to member zero.
+    CHECK(composite->Open(99, false) == nullptr);
+    CHECK(composite->Describe(99) == "<invalid candidate>");
+    CHECK(composite->QueryDeviceId(99).empty());
+    CHECK(secondaryRaw->opened.size() == 1);
+
+    // A failed open still leaves the diagnosis with the transport that tried.
+    secondaryRaw->openSucceeds = false;
+    CHECK(composite->Open(2, false) == nullptr);
+    CHECK(composite->DescribeOpenFailure(true) == "libusb could not open.");
+}
+
+void test_composite_runs_on_the_transports_that_came_up()
+{
+    std::cout << "[TEST] test_composite_runs_on_the_transports_that_came_up" << std::endl;
+
+    // libusb failing to initialise must not stop a run usbprint can finish.
+    auto primary = std::make_unique<FakeBackend>("usbprint",
+        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", 1) });
+    auto secondary = std::make_unique<FakeBackend>("libusb",
+        std::vector<ewr::UsbCandidate>{ MakeCandidate("VENDOR", 2) }, "Failed to initialize libusb.");
+
+    FakeBackend* secondaryRaw = secondary.get();
+
+    std::vector<ewr::UsbBackendMember> members;
+    members.push_back(Member(std::move(primary), ""));
+    members.push_back(Member(std::move(secondary), "libusb"));
+
+    std::ostringstream trace;
+    std::unique_ptr<ewr::UsbBackend> composite = ewr::CreateCompositeUsbBackend(std::move(members), trace);
+
+    CHECK(composite->InitError().empty());
+    CHECK(std::string(composite->PlatformName()) == "usbprint");
+    CHECK(composite->Enumerate().size() == 1);
+    CHECK(secondaryRaw->enumerations == 0);
+    CHECK(trace.str().find("Failed to initialize libusb.") != std::string::npos);
+
+    // Every transport down is the only fatal case, and the reason survives.
+    std::vector<ewr::UsbBackendMember> deadMembers;
+    deadMembers.push_back(Member(std::make_unique<FakeBackend>("usbprint",
+        std::vector<ewr::UsbCandidate>{}, "SetupAPI enumeration failed."), ""));
+    deadMembers.push_back(Member(std::make_unique<FakeBackend>("libusb",
+        std::vector<ewr::UsbCandidate>{}, "Failed to initialize libusb."), "libusb"));
+
+    std::unique_ptr<ewr::UsbBackend> dead = ewr::CreateCompositeUsbBackend(std::move(deadMembers), trace);
+    CHECK(dead->InitError() == "SetupAPI enumeration failed.");
+    CHECK(dead->Enumerate().empty());
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -4640,6 +4907,10 @@ int main()
     test_end4_sequence_verified();
     test_end4_sequence_silent_fails();
     test_end4_sequence_alternate_key();
+    test_composite_merges_candidates_in_member_order();
+    test_composite_identifies_a_shared_interface_by_number();
+    test_composite_routes_every_call_to_the_owning_member();
+    test_composite_runs_on_the_transports_that_came_up();
 
     std::cout << "\n----------------------------------------" << std::endl;
     if (g_failures == 0)

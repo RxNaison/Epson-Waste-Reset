@@ -1,5 +1,6 @@
 #include "ewr/usb.h"
 #include "ewr/usb_backend.h"
+#include "usb_backends_internal.h"
 #include "ewr/usb_timing.h"
 #include "ewr/deviceid.h"
 #include "ewr/log.h"
@@ -33,6 +34,9 @@ DEFINE_GUID(GUID_DEVINTERFACE_USBPRINT, 0x28d78fad, 0x5a12, 0x11d1, 0xae, 0x5b, 
 // Windows USB backend: SetupAPI enumeration across the USBPRINT / IMAGE /
 // USB_DEVICE / WINUSB interface classes plus raw overlapped I/O against
 // usbprint.sys.
+//
+// Tried first; usb_composite.cpp appends the vendor-specific interfaces only
+// libusb can open.
 //
 // A session is never repaired in place: a silent handshake means close and
 // reopen, and the driver loop owns that policy. The run choreography (pin,
@@ -688,7 +692,7 @@ namespace ewr {
 
             // A silent handshake earns one more session on a fresh handle
             // before the driver falls through to the next candidate.
-            int AttemptsPerCandidate() const override { return 2; }
+            int AttemptsPerCandidate(std::size_t) const override { return 2; }
 
             std::string QueryDeviceId(std::size_t ordinal) override
             {
@@ -739,7 +743,7 @@ namespace ewr {
 
     } // namespace
 
-    std::unique_ptr<UsbBackend> CreateUsbBackend(std::ostream& trace)
+    std::unique_ptr<UsbBackend> CreateWindowsUsbBackend(std::ostream& trace)
     {
         return std::make_unique<WindowsUsbBackend>(trace);
     }

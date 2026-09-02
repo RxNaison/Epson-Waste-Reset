@@ -20,8 +20,8 @@
 // Every attempt is a full session - open, handshake, close - never an
 // in-place repair: resetting a live session desyncs the printer from the
 // host-side channel state. The platform backends (usb_windows.cpp /
-// usb_linux.cpp) only enumerate interfaces and move raw bytes; see
-// ewr/usb_backend.h for the seam.
+// usb_libusb.cpp, merged by usb_composite.cpp on Windows) only enumerate
+// interfaces and move raw bytes; see ewr/usb_backend.h for the seam.
 
 namespace ewr {
 
@@ -192,7 +192,7 @@ namespace ewr {
                                     const UsbCandidate& cand, std::size_t idx, std::size_t total)
         {
             trace << "\n[Selection Decision]\n";
-            trace << "  Attempt:       " << (idx + 1) << " of " << total << "\n";
+            trace << "  Candidate:     " << (idx + 1) << " of " << total << "\n";
             trace << "  Interface:     " << backend.Describe(cand.ordinal) << "\n";
             trace << "  Product ID:    0x" << cand.pid << "\n\n";
         }
@@ -391,11 +391,12 @@ namespace ewr {
             // is a brand-new session that inherits nothing from the failed one.
             ExecutionResult result;
             bool opened = false;
-            const int attempts = backend->AttemptsPerCandidate();
+            const int attempts = backend->AttemptsPerCandidate(cand.ordinal);
             for (int attempt = 0; attempt < attempts; ++attempt)
             {
-                trace << "[Session] Interface " << (idx + 1) << ", attempt " << (attempt + 1)
-                      << " of " << attempts << ": starting a fresh session.\n";
+                trace << "[Session] Candidate " << (idx + 1) << " of " << candidates.size()
+                      << ", attempt " << (attempt + 1) << " of " << attempts
+                      << ": starting a fresh session.\n";
 
                 ITransport* transport = backend->Open(cand.ordinal, options.usbSoftResetOnOpen);
                 if (!transport)
@@ -545,11 +546,12 @@ namespace ewr {
 
             QuerySessionResult result;
             bool opened = false;
-            const int attempts = backend->AttemptsPerCandidate();
+            const int attempts = backend->AttemptsPerCandidate(cand.ordinal);
             for (int attempt = 0; attempt < attempts; ++attempt)
             {
-                trace << "[Session] Interface " << (idx + 1) << ", attempt " << (attempt + 1)
-                      << " of " << attempts << ": starting a fresh session.\n";
+                trace << "[Session] Candidate " << (idx + 1) << " of " << candidates.size()
+                      << ", attempt " << (attempt + 1) << " of " << attempts
+                      << ": starting a fresh session.\n";
 
                 ITransport* transport = backend->Open(cand.ordinal, options.usbSoftResetOnOpen);
                 if (!transport)

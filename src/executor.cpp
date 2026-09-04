@@ -595,6 +595,176 @@ namespace ewr {
         return ExecuteQuerySession(transport, handshake, queries, reporter, options);
     }
 
+    // ---- Read-only non-D4 direct-control fallback --------------------------
+
+    std::vector<std::vector<unsigned char>> ExtractFactoryQueryCommands(
+        const std::vector<std::vector<unsigned char>>& queries)
+    {
+        constexpr size_t kD4DataHeaderSize = 6;
+
+        std::vector<std::vector<unsigned char>> commands;
+        commands.reserve(queries.size());
+
+        for (const auto& packet : queries)
+        {
+            if (packet.size() <= kD4DataHeaderSize || packet[0] != 0x02 || packet[1] != 0x02)
+                continue;
+
+            const size_t declared = (static_cast<size_t>(packet[2]) << 8)
+                                  | static_cast<size_t>(packet[3]);
+            if (declared < kD4DataHeaderSize || declared > packet.size())
+                continue;
+
+            commands.emplace_back(packet.begin() + static_cast<std::ptrdiff_t>(kD4DataHeaderSize),
+                                  packet.begin() + static_cast<std::ptrdiff_t>(declared));
+        }
+
+        return commands;
+    }
+
+    namespace {
+
+        std::vector<unsigned char> DrainForDirectQuery(ITransport& transport,
+                                                        int firstReadTimeoutMs,
+                                                        int totalDeadlineMs,
+                                                        bool semicolonCompletes)
+        {
+            const auto start = std::chrono::steady_clock::now();
+            std::vector<unsigned char> buffer;
+            bool sawBytes = false;
+
+            for (;;)
+            {
+                // After the first bytes arrive, 75 ms is only a quiet-window
+                // check, not the response timeout. It is intentionally a little
+                // longer than the existing 50 ms write-ACK retry sleep so split
+                // USB chunks can land without adding seconds to every query.
+                const int timeout = sawBytes ? 75 : firstReadTimeoutMs;
+                std::vector<unsigned char> chunk = transport.Drain(timeout);
+                if (!chunk.empty())
+                {
+                    sawBytes = true;
+                    buffer.insert(buffer.end(), chunk.begin(), chunk.end());
+                }
+
+                // EEPROM factory replies are single semicolon-terminated
+                // records; @BDC ST2 status reports can contain many fields, so
+                // do not truncate them at the first ';' - wait for form-feed
+                // or one quiet drain instead.
+                const bool formFeed = std::find(buffer.begin(), buffer.end(),
+                    static_cast<unsigned char>(0x0C)) != buffer.end();
+                const bool semicolon = semicolonCompletes &&
+                    std::find(buffer.begin(), buffer.end(), static_cast<unsigned char>(';')) != buffer.end();
+                if (formFeed || semicolon)
+                    break;
+
+                const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+                if (elapsedMs >= totalDeadlineMs)
+                    break;
+
+                // Once data has started and one short drain is quiet, the
+                // record is complete enough for the existing parsers.
+                if (sawBytes && chunk.empty())
+                    break;
+            }
+
+            return buffer;
+        }
+
+    } // namespace
+
+    QuerySessionResult ExecuteEscRemoteQuerySequence(
+        ITransport& transport,
+        const std::vector<std::vector<unsigned char>>& factoryQueryCommands,
+        log::Reporter& reporter,
+        const ExecutorOptions& options)
+    {
+        QuerySessionResult result;
+
+        EmitTrace(reporter, "escr.query_begin",
+            "[ESC/P QUERY] D4 stayed silent; trying read-only ESC/P Remote commands on the same printer function.");
+
+        if (factoryQueryCommands.empty())
+        {
+            result.handshakeFailed = true;
+            result.error = "ESC/P Remote query: no generated factory-control queries to send.";
+            return result;
+        }
+
+        // Match the established non-D4 write fallback deadline: allow two
+        // handshake-drain windows for a direct reply. 4000 ms is the historical
+        // fallback used by that path when no positive timeout is configured.
+        const int totalDeadlineMs = (options.handshakeDrainTimeoutMs > 0)
+            ? options.handshakeDrainTimeoutMs * 2
+            : 4000;
+
+        bool anyAnswered = false;
+        bool allAnswered = true;
+        result.replies.reserve(factoryQueryCommands.size());
+
+        for (size_t i = 0; i < factoryQueryCommands.size(); ++i)
+        {
+            const std::vector<unsigned char> packet =
+                end4::BuildEscRemotePacket(factoryQueryCommands[i]);
+
+            EmitTrace(reporter, "escr.query_tx", "[ESC/P QUERY OUT] "
+                + std::to_string(i + 1) + "/" + std::to_string(factoryQueryCommands.size())
+                + " (" + std::to_string(packet.size()) + " bytes):\n"
+                + HexDumpCapped(packet.data(), packet.size(), kTraceDumpCapBytes));
+
+            result.packetsSent++;
+            if (!transport.Send(packet))
+            {
+                result.replies.push_back({});
+                allAnswered = false;
+                result.error = "ESC/P Remote query: transport failed sending query "
+                             + std::to_string(i + 1) + ".";
+                break;
+            }
+
+            if (options.interPacketDelayMs > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(options.interPacketDelayMs));
+
+            const bool factoryRecord = factoryQueryCommands[i].size() >= 2
+                && factoryQueryCommands[i][0] == '|' && factoryQueryCommands[i][1] == '|';
+            std::vector<unsigned char> reply =
+                DrainForDirectQuery(transport, options.writeAckTimeoutMs, totalDeadlineMs, factoryRecord);
+
+            EmitTrace(reporter, "escr.query_rx", "[ESC/P QUERY IN] reply ("
+                + std::to_string(reply.size()) + " bytes):\n"
+                + HexDumpCapped(reply.data(), reply.size(), kTraceDumpCapBytes));
+
+            if (reply.empty())
+                allAnswered = false;
+            else
+                anyAnswered = true;
+
+            result.replies.push_back(std::move(reply));
+        }
+
+        // Keep one reply slot per query even if a transport failure stopped the
+        // loop early; Session::ReadStateFor relies on positional correspondence.
+        while (result.replies.size() < factoryQueryCommands.size())
+            result.replies.push_back({});
+
+        result.handshakeConfirmed = anyAnswered; // direct-control response proves the function is alive
+        result.handshakeFailed = !anyAnswered;
+        result.success = anyAnswered && allAnswered;
+
+        if (!anyAnswered)
+        {
+            if (result.error.empty())
+                result.error = "ESC/P Remote query: the printer function returned no data.";
+        }
+        else if (!allAnswered && result.error.empty())
+        {
+            result.error = "ESC/P Remote query: the printer answered, but one or more queries were unanswered.";
+        }
+
+        return result;
+    }
+
     // ---- END4 direct-control fallback --------------------------------------
 
     std::vector<std::vector<unsigned char>> ExtractFactoryWriteCommands(

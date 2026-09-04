@@ -375,6 +375,7 @@ namespace ewr {
                     c.interfaceNumber = candidates_[i].interfaceNumber;
                     c.path = SummarizePath(candidates_[i]);
                     c.pid = FormatPid(candidates_[i].pid);
+                    c.role = ClassifyLibusbCandidateRole(candidates_[i].printerClass);
                     out.push_back(c);
                 }
                 return out;

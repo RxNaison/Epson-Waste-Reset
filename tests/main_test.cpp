@@ -17,6 +17,7 @@
 #include "ewr/log.h"
 #include "ewr/session.h"
 #include "ewr/usb_backend.h"
+#include "ewr/usb_role.h"
 
 namespace fs = std::filesystem;
 
@@ -109,6 +110,46 @@ namespace legacy {
     }
 
 } // namespace legacy
+
+static void test_windows_usb_role_classification()
+{
+    using ewr::UsbCandidateRole;
+
+    // Epson L3210 observed layout on Windows: MI_01 is the printer function
+    // even when the PnP class itself is generic USB; usbprint is the decisive
+    // service. MI_00 is the WIA scanner and must never receive maintenance
+    // writes automatically.
+    CHECK(ewr::ClassifyWindowsUsbCandidateRole("USB_DEVICE", "usbprint", "USB") == UsbCandidateRole::Printer);
+    CHECK(ewr::ClassifyWindowsUsbCandidateRole("USBPRINT", "", "USB") == UsbCandidateRole::Printer);
+    CHECK(ewr::ClassifyWindowsUsbCandidateRole("IMAGE", "usbscan", "Image") == UsbCandidateRole::Scanner);
+    CHECK(ewr::ClassifyWindowsUsbCandidateRole("USB_DEVICE", "", "USB") == UsbCandidateRole::Unknown);
+
+    // windows-libusb-backend deliberately adds Epson vendor-specific bulk
+    // interfaces as a second maintenance transport. They must stay eligible
+    // even when a normal USBPRINT function is also present.
+    CHECK(ewr::ClassifyLibusbCandidateRole(true) == UsbCandidateRole::Printer);
+    CHECK(ewr::ClassifyLibusbCandidateRole(false) == UsbCandidateRole::Maintenance);
+
+    CHECK(ewr::UsbCandidateRolePriority(UsbCandidateRole::Printer) <
+          ewr::UsbCandidateRolePriority(UsbCandidateRole::Maintenance));
+    CHECK(ewr::UsbCandidateRolePriority(UsbCandidateRole::Maintenance) <
+          ewr::UsbCandidateRolePriority(UsbCandidateRole::Unknown));
+    CHECK(ewr::UsbCandidateRolePriority(UsbCandidateRole::Unknown) <
+          ewr::UsbCandidateRolePriority(UsbCandidateRole::Scanner));
+
+    CHECK(ewr::IsAutomaticMaintenanceRole(UsbCandidateRole::Printer));
+    CHECK(ewr::IsAutomaticMaintenanceRole(UsbCandidateRole::Maintenance));
+    CHECK(ewr::IsAutomaticMaintenanceRole(UsbCandidateRole::Unknown));
+    CHECK(!ewr::IsAutomaticMaintenanceRole(UsbCandidateRole::Scanner));
+
+    // Once a positive maintenance function exists (L3210 MI_01 or the
+    // vendor-specific libusb rung from windows-libusb-backend), automatic
+    // maintenance must not fall through to a generic composite parent.
+    CHECK(ewr::IsAutomaticMaintenanceRole(UsbCandidateRole::Printer, true));
+    CHECK(ewr::IsAutomaticMaintenanceRole(UsbCandidateRole::Maintenance, true));
+    CHECK(!ewr::IsAutomaticMaintenanceRole(UsbCandidateRole::Unknown, true));
+    CHECK(!ewr::IsAutomaticMaintenanceRole(UsbCandidateRole::Scanner, true));
+}
 
 static ewr::DbPrinterModel MakeTestModel()
 {
@@ -4020,6 +4061,79 @@ static std::vector<unsigned char> BareOkAck()
     return std::vector<unsigned char>(ack.begin(), ack.end());
 }
 
+void test_esc_remote_query_sequence_verified()
+{
+    std::cout << "[TEST] test_esc_remote_query_sequence_verified" << std::endl;
+
+    const ewr::DbPrinterModel model = MakeTestModel();
+    std::vector<std::vector<unsigned char>> queries;
+    queries.push_back(ewr::UniversalGenerator::GenerateStatusQueryPacket());
+    queries.push_back(ewr::UniversalGenerator::GenerateReadPacket(model.rkey, 0x002F, model.ReadAddressLength()));
+
+    const auto commands = ewr::ExtractFactoryQueryCommands(queries);
+    CHECK(commands.size() == 2);
+    CHECK(commands[0].size() >= 2 && commands[0][0] == 's' && commands[0][1] == 't');
+    CHECK(commands[1].size() >= 2 && commands[1][0] == '|' && commands[1][1] == '|');
+
+    FakeTransport transport;
+    transport.replyFor = [](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
+        const std::string bytes(pkt.begin(), pkt.end());
+        if (bytes.find("st") != std::string::npos)
+        {
+            const std::string status = "@BDC ST2\\r\\nST:10;\\r\\n\\f";
+            return std::vector<unsigned char>(status.begin(), status.end());
+        }
+        if (bytes.find("||") != std::string::npos)
+        {
+            const std::string ee = "@BDC PS\\r\\nEE:002FCA;\\r\\n\\f";
+            return std::vector<unsigned char>(ee.begin(), ee.end());
+        }
+        return {};
+    };
+
+    ewr::ExecutorOptions options;
+    options.interPacketDelayMs = 0;
+    options.writeAckTimeoutMs = 10;
+    options.handshakeDrainTimeoutMs = 100;
+
+    ewr::log::Reporter reporter;
+    const ewr::QuerySessionResult result =
+        ewr::ExecuteEscRemoteQuerySequence(transport, commands, reporter, options);
+
+    CHECK(result.success);
+    CHECK(result.handshakeConfirmed);
+    CHECK(!result.handshakeFailed);
+    CHECK(result.replies.size() == 2);
+    CHECK(!result.replies[0].empty());
+    CHECK(!result.replies[1].empty());
+    CHECK(transport.sent.size() == 2);
+}
+
+void test_esc_remote_query_sequence_silent_fails()
+{
+    std::cout << "[TEST] test_esc_remote_query_sequence_silent_fails" << std::endl;
+
+    std::vector<std::vector<unsigned char>> queries;
+    queries.push_back(ewr::UniversalGenerator::GenerateStatusQueryPacket());
+    const auto commands = ewr::ExtractFactoryQueryCommands(queries);
+
+    FakeTransport transport;
+    ewr::ExecutorOptions options;
+    options.interPacketDelayMs = 0;
+    options.writeAckTimeoutMs = 10;
+    options.handshakeDrainTimeoutMs = 50;
+
+    ewr::log::Reporter reporter;
+    const ewr::QuerySessionResult result =
+        ewr::ExecuteEscRemoteQuerySequence(transport, commands, reporter, options);
+
+    CHECK(!result.success);
+    CHECK(!result.handshakeConfirmed);
+    CHECK(result.handshakeFailed);
+    CHECK(result.replies.size() == 1);
+    CHECK(result.replies[0].empty());
+}
+
 void test_esc_remote_sequence_verified()
 {
     std::cout << "[TEST] test_esc_remote_sequence_verified" << std::endl;
@@ -4808,6 +4922,7 @@ int main()
     std::cout << "========================================" << std::endl;
 
     test_scan_models();
+    test_windows_usb_role_classification();
     test_parser_dummy_dump();
     test_ack_predicates();
     test_write_packet_detection();
@@ -4897,6 +5012,8 @@ int main()
     test_end4_response_rejects_short_declared_length();
     test_end4_factory_command_extraction();
     test_end4_dds_parsing();
+    test_esc_remote_query_sequence_verified();
+    test_esc_remote_query_sequence_silent_fails();
     test_esc_remote_sequence_verified();
     test_esc_remote_sequence_silent_fails();
     test_esc_remote_alternate_key();

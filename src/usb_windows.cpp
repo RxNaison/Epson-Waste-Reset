@@ -13,6 +13,7 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #pragma comment(lib, "setupapi.lib")
@@ -78,31 +79,79 @@ namespace ewr {
             std::string className;
             int classPriority;
             int interfaceIndex;
+            UsbCandidateRole role = UsbCandidateRole::Unknown;
+            std::string serviceName;
+            std::string pnpClass;
+            std::string instanceId;
         };
 
         std::string DescribeCandidate(const DeviceCandidate& c)
         {
-            return "[" + c.className + " | mi_"
+            std::string text = "[" + c.className + " | " + UsbCandidateRoleName(c.role) + " | mi_"
                  + (c.interfaceIndex >= 0 ? std::to_string(c.interfaceIndex) : "N/A") + "] " + c.path;
+            if (!c.serviceName.empty())
+                text += " | service=" + c.serviceName;
+            if (!c.pnpClass.empty())
+                text += " | pnpClass=" + c.pnpClass;
+            if (!c.instanceId.empty())
+                text += " | instance=" + c.instanceId;
+            return text;
         }
 
         std::string ExtractPid(const std::string& devicePath)
         {
-            std::string lower = devicePath;
-            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            std::string lower = UsbAsciiLower(devicePath);
             size_t pidPos = lower.find("pid_");
             return (pidPos != std::string::npos && pidPos + 8 <= lower.length()) ? lower.substr(pidPos + 4, 4) : "UNKNOWN";
         }
 
+        std::string GetDeviceRegistryString(HDEVINFO hDevInfo,
+                                            SP_DEVINFO_DATA& devInfoData,
+                                            DWORD property)
+        {
+            DWORD dataType = 0;
+            DWORD required = 0;
+
+            SetupDiGetDeviceRegistryPropertyA(hDevInfo, &devInfoData, property,
+                                              &dataType, nullptr, 0, &required);
+            if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || required == 0)
+                return {};
+
+            std::vector<BYTE> buffer(required + 1, 0);
+            if (!SetupDiGetDeviceRegistryPropertyA(hDevInfo, &devInfoData, property,
+                                                   &dataType, buffer.data(),
+                                                   static_cast<DWORD>(buffer.size()), nullptr))
+                return {};
+
+            if (dataType != REG_SZ && dataType != REG_EXPAND_SZ)
+                return {};
+
+            return reinterpret_cast<const char*>(buffer.data());
+        }
+
+        std::string GetDeviceInstanceId(HDEVINFO hDevInfo, SP_DEVINFO_DATA& devInfoData)
+        {
+            DWORD required = 0;
+            SetupDiGetDeviceInstanceIdA(hDevInfo, &devInfoData, nullptr, 0, &required);
+            if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || required == 0)
+                return {};
+
+            std::vector<char> buffer(required + 1, '\0');
+            if (!SetupDiGetDeviceInstanceIdA(hDevInfo, &devInfoData, buffer.data(),
+                                             static_cast<DWORD>(buffer.size()), nullptr))
+                return {};
+
+            return buffer.data();
+        }
+
         // Interface enumeration priority (highest to lowest):
-        //   1. USBPRINT class + mi_00  (ideal: printer engine on primary interface)
-        //   2. USBPRINT class + any mi (printer engine on secondary interface, e.g. L3250)
-        //   3. USBPRINT class + non-composite (single-function printer)
-        //   4. Non-USBPRINT class + mi_00 (last resort: might be scanner - logs a warning)
-        //   5. Remaining detected paths (absolute fallback)
+        //   1. Positively identified printer functions (USBPRINT / usbprint)
+        //   2. Unknown Epson USB functions kept for compatibility fallback
+        //   3. Positively identified scanner functions (IMAGE / usbscan)
         //
-        // The caller walks the returned list in order: if the IEEE 1284.4
-        // handshake stays silent on one interface, the next one is tried.
+        // mi_XX is only a tiebreaker inside the same role. On L3210/ET-280x
+        // layouts the scanner may be mi_00 and the printer mi_01, so interface
+        // number must never outweigh OS-level role classification.
         std::vector<DeviceCandidate> EnumerateEpsonCandidates(std::ostream& trace)
         {
             struct GuidEntry
@@ -148,49 +197,86 @@ namespace ewr {
                 for (DWORD i = 0; SetupDiEnumDeviceInterfaces(hDevInfo, NULL, &entry.guid, i, &devInterfaceData); ++i)
                 {
                     DWORD requiredSize = 0;
-                    SetupDiGetDeviceInterfaceDetail(hDevInfo, &devInterfaceData, NULL, 0, &requiredSize, NULL);
+                    SetupDiGetDeviceInterfaceDetailA(hDevInfo, &devInterfaceData, NULL, 0, &requiredSize, NULL);
 
                     std::vector<BYTE> detailDataBuffer(requiredSize);
-                    PSP_DEVICE_INTERFACE_DETAIL_DATA detailData = (PSP_DEVICE_INTERFACE_DETAIL_DATA)detailDataBuffer.data();
-                    detailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+                    PSP_DEVICE_INTERFACE_DETAIL_DATA_A detailData =
+                        reinterpret_cast<PSP_DEVICE_INTERFACE_DETAIL_DATA_A>(detailDataBuffer.data());
+                    detailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A);
 
-                    if (SetupDiGetDeviceInterfaceDetail(hDevInfo, &devInterfaceData, detailData, requiredSize, NULL, NULL))
+                    SP_DEVINFO_DATA devInfoData = {};
+                    devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+
+                    if (SetupDiGetDeviceInterfaceDetailA(hDevInfo, &devInterfaceData, detailData, requiredSize, NULL, &devInfoData))
                     {
                         std::string devicePath = detailData->DevicePath;
-                        std::string devicePathLower = devicePath;
-                        std::transform(devicePathLower.begin(), devicePathLower.end(), devicePathLower.begin(), ::tolower);
+                        std::string devicePathLower = UsbAsciiLower(devicePath);
 
                         if (devicePathLower.find("vid_04b8") != std::string::npos)
                         {
-                            trace << "     -> Matches Epson Vendor ID (vid_04b8): " << devicePath << " [class: " << entry.name << "]\n";
+                            const std::string serviceName = GetDeviceRegistryString(hDevInfo, devInfoData, SPDRP_SERVICE);
+                            const std::string pnpClass = GetDeviceRegistryString(hDevInfo, devInfoData, SPDRP_CLASS);
+                            const std::string instanceId = GetDeviceInstanceId(hDevInfo, devInfoData);
+                            const UsbCandidateRole role = ClassifyWindowsUsbCandidateRole(entry.name, serviceName, pnpClass);
 
-                            bool alreadyKnown = false;
-                            for (const auto& c : candidates)
+                            trace << "     -> Matches Epson Vendor ID (vid_04b8): " << devicePath
+                                  << " [class: " << entry.name
+                                  << ", role: " << UsbCandidateRoleName(role);
+                            if (!serviceName.empty()) trace << ", service: " << serviceName;
+                            if (!pnpClass.empty()) trace << ", pnp: " << pnpClass;
+                            trace << "]\n";
+
+                            int ifaceIdx = -1;
+                            size_t miPos = devicePathLower.find("mi_");
+                            if (miPos != std::string::npos && miPos + 5 <= devicePathLower.length())
                             {
-                                if (c.path == devicePath)
+                                try
                                 {
-                                    alreadyKnown = true;
-                                    break;
+                                    ifaceIdx = std::stoi(devicePathLower.substr(miPos + 3, 2));
+                                }
+                                catch (...)
+                                {
+                                    ifaceIdx = -1;
                                 }
                             }
 
-                            if (!alreadyKnown)
-                            {
-                                int ifaceIdx = -1;
-                                size_t miPos = devicePathLower.find("mi_");
-                                if (miPos != std::string::npos && miPos + 5 <= devicePathLower.length())
-                                {
-                                    try
-                                    {
-                                        ifaceIdx = std::stoi(devicePathLower.substr(miPos + 3, 2));
-                                    }
-                                    catch (...)
-                                    {
-                                        ifaceIdx = -1;
-                                    }
-                                }
+                            DeviceCandidate incoming{ devicePath, entry.name, entry.classPriority, ifaceIdx,
+                                                      role, serviceName, pnpClass, instanceId };
 
-                                candidates.push_back({ devicePath, entry.name, entry.classPriority, ifaceIdx });
+                            // The same physical function can be exposed under
+                            // multiple interface GUIDs. Deduplicate by PnP
+                            // instance ID and retain the representation with the
+                            // strongest printer role / most specific class.
+                            auto existing = candidates.end();
+                            if (!instanceId.empty())
+                            {
+                                existing = std::find_if(candidates.begin(), candidates.end(),
+                                    [&](const DeviceCandidate& c)
+                                    {
+                                        return !c.instanceId.empty() && UsbEqualsNoCase(c.instanceId, instanceId);
+                                    });
+                            }
+                            else
+                            {
+                                existing = std::find_if(candidates.begin(), candidates.end(),
+                                    [&](const DeviceCandidate& c) { return UsbEqualsNoCase(c.path, devicePath); });
+                            }
+
+                            if (existing == candidates.end())
+                            {
+                                candidates.push_back(std::move(incoming));
+                            }
+                            else
+                            {
+                                const int incomingRole = UsbCandidateRolePriority(incoming.role);
+                                const int existingRole = UsbCandidateRolePriority(existing->role);
+                                if (incomingRole < existingRole ||
+                                    (incomingRole == existingRole && incoming.classPriority < existing->classPriority))
+                                {
+                                    trace << "        [i] Same PnP function already seen; keeping the stronger representation: "
+                                          << incoming.className << "/" << UsbCandidateRoleName(incoming.role) << "\n";
+                                    *existing = std::move(incoming);
+                                }
                             }
                         }
                     }
@@ -210,6 +296,11 @@ namespace ewr {
 
             std::sort(candidates.begin(), candidates.end(), [](const DeviceCandidate& a, const DeviceCandidate& b)
                 {
+                    const int aRole = UsbCandidateRolePriority(a.role);
+                    const int bRole = UsbCandidateRolePriority(b.role);
+                    if (aRole != bRole)
+                        return aRole < bRole;
+
                     if (a.classPriority != b.classPriority)
                         return a.classPriority < b.classPriority;
 
@@ -218,11 +309,14 @@ namespace ewr {
                     return aIdx < bIdx;
                 });
 
-            if (!candidates.empty() && candidates[0].classPriority > 0)
+            const bool hasPrinter = std::any_of(candidates.begin(), candidates.end(),
+                [](const DeviceCandidate& c) { return c.role == UsbCandidateRole::Printer; });
+            if (!hasPrinter && !candidates.empty())
             {
-                trace << "[WARNING] No USBPRINT class interface found. Using " << candidates[0].className << " class as fallback.\n";
-                trace << "          This may target the scanner instead of the printer maintenance engine.\n";
-                trace << "          Consider reinstalling official Epson printer drivers.\n";
+                trace << "[WARNING] No positively identified Epson printer function was found.\n";
+                trace << "          Unknown USB functions remain available as compatibility fallbacks,\n";
+                trace << "          but scanner functions are blocked from automatic maintenance writes.\n";
+                trace << "          Reinstall the official Epson printer driver if the print function is missing.\n";
             }
 
             return candidates;
@@ -635,6 +729,10 @@ namespace ewr {
                     c.interfaceNumber = candidates_[i].interfaceIndex;
                     c.path = candidates_[i].path;
                     c.pid = ExtractPid(candidates_[i].path);
+                    c.role = candidates_[i].role;
+                    c.serviceName = candidates_[i].serviceName;
+                    c.pnpClass = candidates_[i].pnpClass;
+                    c.instanceId = candidates_[i].instanceId;
                     out.push_back(c);
                 }
                 return out;

@@ -1,5 +1,6 @@
 #pragma once
 #include "ewr/executor.h"
+#include "ewr/usb_role.h"
 
 #include <cstddef>
 #include <memory>
@@ -23,6 +24,16 @@ namespace ewr {
         std::string path;
         // Four lowercase hex digits, or "UNKNOWN" when unparsable.
         std::string pid;
+        // Positive function classification. Printer and Maintenance are
+        // intentional write-capable candidates; Unknown is compatibility-only,
+        // while Scanner is survey/read-only material and is never selected
+        // automatically for maintenance writes.
+        UsbCandidateRole role = UsbCandidateRole::Unknown;
+        // Diagnostic metadata (Windows PnP service/class/instance ID). Empty
+        // on backends that do not expose an equivalent concept.
+        std::string serviceName;
+        std::string pnpClass;
+        std::string instanceId;
     };
 
     // Platform seam for the driver loop in usb_driver.cpp. The driver owns

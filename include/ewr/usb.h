@@ -58,6 +58,9 @@ namespace ewr {
         std::string path;
         // Printer-class interfaces only; empty when nothing answered.
         std::string deviceId;
+        // "printer", "unknown", or "scanner". Primarily diagnostic, so CLI
+        // users can see why an interface will or will not be auto-selected.
+        std::string role;
     };
 
     // Read-only survey, no D4 traffic. Powers --list, the multi-interface

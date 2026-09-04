@@ -160,6 +160,22 @@ namespace ewr {
                                            std::ostream& log,
                                            const ExecutorOptions& options = {});
 
+    // Extracts the factory-control payload (e.g. "st..." or "||...") from
+    // generated D4 query packets. This is the read-only counterpart to
+    // ExtractFactoryWriteCommands and powers the non-D4 query fallback.
+    std::vector<std::vector<unsigned char>> ExtractFactoryQueryCommands(
+        const std::vector<std::vector<unsigned char>>& queries);
+
+    // Read-only ESC/P Remote fallback for composite Epson MFPs whose printer
+    // function is reachable but does not answer D4 channel setup. Each query
+    // is sent as one self-contained REMOTE1 block; replies stay in their raw
+    // form so the existing status / EEPROM parsers can consume them.
+    QuerySessionResult ExecuteEscRemoteQuerySequence(
+        ITransport& transport,
+        const std::vector<std::vector<unsigned char>>& factoryQueryCommands,
+        log::Reporter& reporter,
+        const ExecutorOptions& options = {});
+
     // ---- END4 direct-control fallback --------------------------------------
     //
     // On some composite ET-2xxx units the IEEE 1284.4 handshake stays silent

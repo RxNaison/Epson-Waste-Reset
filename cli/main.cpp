@@ -496,6 +496,8 @@ int main(int argc, char* argv[])
         for (const auto& iface : interfaces)
         {
             std::cout << "\n  [" << iface.index << "] " << iface.className;
+            if (!iface.role.empty())
+                std::cout << " [" << iface.role << "]";
             if (iface.interfaceNumber >= 0)
                 std::cout << " mi_" << (iface.interfaceNumber < 10 ? "0" : "") << iface.interfaceNumber;
             std::cout << "\n      " << iface.path << std::endl;
@@ -688,6 +690,8 @@ int main(int argc, char* argv[])
         for (const auto& iface : interfaces)
         {
             std::cout << "      [" << iface.index << "] " << iface.className;
+            if (!iface.role.empty())
+                std::cout << " [" << iface.role << "]";
             if (iface.interfaceNumber >= 0)
                 std::cout << " mi_" << (iface.interfaceNumber < 10 ? "0" : "") << iface.interfaceNumber;
 

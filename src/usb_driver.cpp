@@ -4,6 +4,7 @@
 #include "ewr/log.h"
 #include "ewr/version.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -143,6 +144,32 @@ namespace ewr {
             trace << "==================================================\n\n";
         }
 
+        bool HasPositiveMaintenanceCandidate(const std::vector<UsbCandidate>& candidates)
+        {
+            return std::any_of(candidates.begin(), candidates.end(),
+                [](const UsbCandidate& cand)
+                {
+                    return cand.role == UsbCandidateRole::Printer
+                        || cand.role == UsbCandidateRole::Maintenance;
+                });
+        }
+
+        bool IsAutomaticMaintenanceCandidate(const UsbCandidate& cand,
+                                               const std::vector<UsbCandidate>& candidates)
+        {
+            return IsAutomaticMaintenanceRole(cand.role, HasPositiveMaintenanceCandidate(candidates));
+        }
+
+        std::size_t CountAutomaticMaintenanceCandidates(const std::vector<UsbCandidate>& candidates)
+        {
+            const bool hasPositiveRole = HasPositiveMaintenanceCandidate(candidates);
+            std::size_t count = 0;
+            for (const auto& cand : candidates)
+                if (IsAutomaticMaintenanceRole(cand.role, hasPositiveRole))
+                    ++count;
+            return count;
+        }
+
         // Enumeration plus pin validation, shared by the payload and query
         // runs. `error` carries the user-facing reason on false.
         bool PrepareCandidates(UsbBackend& backend,
@@ -194,7 +221,12 @@ namespace ewr {
             trace << "\n[Selection Decision]\n";
             trace << "  Candidate:     " << (idx + 1) << " of " << total << "\n";
             trace << "  Interface:     " << backend.Describe(cand.ordinal) << "\n";
-            trace << "  Product ID:    0x" << cand.pid << "\n\n";
+            trace << "  Product ID:    0x" << cand.pid << "\n";
+            trace << "  OS role:       " << UsbCandidateRoleName(cand.role) << "\n";
+            if (!cand.serviceName.empty()) trace << "  PnP service:   " << cand.serviceName << "\n";
+            if (!cand.pnpClass.empty()) trace << "  PnP class:     " << cand.pnpClass << "\n";
+            if (!cand.instanceId.empty()) trace << "  Instance ID:   " << cand.instanceId << "\n";
+            trace << "\n";
         }
 
         // Shared by ListPrinterInterfaces and QueryPrinterDeviceId so both
@@ -221,6 +253,7 @@ namespace ewr {
                 info.interfaceNumber = cand.interfaceNumber;
                 info.path = cand.path;
                 info.deviceId = backend.QueryDeviceId(cand.ordinal);
+                info.role = UsbCandidateRoleName(cand.role);
 
                 if (!info.deviceId.empty())
                 {
@@ -348,6 +381,86 @@ namespace ewr {
             return outcome;
         }
 
+        struct QueryFallbackAttempt
+        {
+            bool attempted = false;
+            QuerySessionResult result;
+        };
+
+        // Read-side counterpart to TryNonD4Fallback. Keep the ladder and all
+        // open / trace-sink / close ownership here so adding an END4 query
+        // executor later is one branch, not a second copy of this scaffolding.
+        QueryFallbackAttempt TryNonD4QueryFallback(UsbBackend& backend,
+                                                    const UsbCandidate& cand,
+                                                    const std::vector<std::vector<unsigned char>>& queries,
+                                                    const ExecutorOptions& options,
+                                                    std::ostream& trace,
+                                                    NonD4Path path)
+        {
+            QueryFallbackAttempt outcome;
+            outcome.result.handshakeFailed = true;
+
+            const std::vector<std::vector<unsigned char>> factoryCommands =
+                ExtractFactoryQueryCommands(queries);
+            if (factoryCommands.empty())
+            {
+                outcome.result.error = "No factory-control queries are available for the non-D4 read fallback.";
+                return outcome;
+            }
+
+            // END4 write fallback already exists, but there is no read/query
+            // executor for that framing yet. Deliberately keep it as a rung in
+            // this shared ladder: when END4 reads are implemented they belong
+            // in this function and inherit the same lifetime/trace handling.
+            if (path == NonD4Path::End4)
+            {
+                trace << "[END4 QUERY] Read-only END4 fallback is not implemented yet; "
+                         "continuing to the next non-D4 path.\n";
+                return outcome;
+            }
+
+            outcome.attempted = true;
+
+            trace << "[ESC/P QUERY] Reopening the same printer interface for a read-only direct-control fallback.\n";
+            log::Log(log::Level::Info, log::Stage::Handshake, "usb.esc_remote_query_attempt",
+                     "[!] D4 handshake silent - trying read-only ESC/P Remote on the same printer interface...");
+
+            ITransport* transport = backend.Open(cand.ordinal, options.usbSoftResetOnOpen);
+            if (!transport)
+            {
+                outcome.result.error = "Could not reopen the printer interface for the non-D4 query fallback.";
+                return outcome;
+            }
+
+            ScopedBackendClose closeGuard(backend);
+            log::Reporter& reporter = log::Default();
+            {
+                ScopedTraceSink traceSink(reporter, trace);
+
+                switch (path)
+                {
+                    case NonD4Path::EscRemote:
+                        outcome.result = ExecuteEscRemoteQuerySequence(
+                            *transport, factoryCommands, reporter, options);
+                        break;
+
+                    case NonD4Path::End4:
+                        // Kept unreachable until an END4 query executor exists;
+                        // the early return above prevents opening a handle for a
+                        // protocol we cannot execute yet.
+                        break;
+                }
+            }
+            closeGuard.Close();
+
+            trace << "[ESC/P QUERY] Result: "
+                  << (outcome.result.handshakeFailed ? "NO RESPONSE"
+                                                     : (outcome.result.success ? "SUCCESS" : "PARTIAL"))
+                  << (outcome.result.error.empty() ? "" : (" - " + outcome.result.error))
+                  << "\n\n";
+            return outcome;
+        }
+
     } // namespace
 
     ResetRunResult ExecutePayloadSequenceWithFallback(const std::vector<std::vector<unsigned char>>& sequence,
@@ -371,8 +484,20 @@ namespace ewr {
         // Once per run, on the first interface whose D4 handshake goes silent.
         bool fallbackAttempted = false;
 
-        log::Log(log::Level::Info, log::Stage::Detect, "usb.device_detected",
-                 "[SUCCESS] Auto-detected Epson Printer (PID: " + candidates[0].pid + ")");
+        const auto firstEligible = std::find_if(candidates.begin(), candidates.end(),
+            [&candidates](const UsbCandidate& cand) { return IsAutomaticMaintenanceCandidate(cand, candidates); });
+        if (firstEligible != candidates.end())
+        {
+            log::Log(log::Level::Info, log::Stage::Detect, "usb.device_detected",
+                     "[SUCCESS] Auto-detected Epson Printer (PID: " + firstEligible->pid + ")");
+        }
+        else
+        {
+            run.exec.error = "Only Epson scanner interfaces were found; no printer maintenance interface is available.";
+            log::Log(log::Level::Error, log::Stage::Detect, "usb.only_scanner",
+                     "[ERROR] Only Epson scanner interfaces were found. Reinstall the official Epson printer driver and reconnect USB.");
+            return run;
+        }
         log::Log(log::Level::Info, log::Stage::General, "usb.sequence_begin",
                  std::string("\nExecuting universal ") + backend->PlatformName() + " hardware state machine...");
         log::Log(log::Level::Info, log::Stage::General, "usb.trace_log",
@@ -384,6 +509,28 @@ namespace ewr {
 
             if (pinned >= 1 && static_cast<int>(idx) + 1 != pinned)
                 continue;
+
+            if (cand.role == UsbCandidateRole::Scanner && pinned >= 1)
+            {
+                run.exec.error = "The pinned USB interface is positively identified as a scanner; refusing EEPROM writes.";
+                trace << "[SAFETY] Refusing maintenance writes to pinned scanner interface #" << pinned
+                      << ". Use --list and select the printer/unknown function instead.\n";
+                log::Log(log::Level::Error, log::Stage::Detect, "usb.scanner_write_blocked",
+                         "[ERROR] Interface " + std::to_string(pinned) +
+                             " is the Epson scanner function. EWR will not send EEPROM writes to a scanner interface.");
+                break;
+            }
+
+            if (pinned < 1 && !IsAutomaticMaintenanceCandidate(cand, candidates))
+            {
+                trace << "[SAFETY] Skipping automatic maintenance candidate "
+                      << backend->Describe(cand.ordinal) << ": role="
+                      << UsbCandidateRoleName(cand.role)
+                      << (HasPositiveMaintenanceCandidate(candidates)
+                              ? " (a positively identified maintenance function is available).\n"
+                              : " (scanner functions are never auto-maintained).\n");
+                continue;
+            }
 
             WriteSelectionDecision(trace, *backend, cand, idx, candidates.size());
 
@@ -503,6 +650,15 @@ namespace ewr {
 
         if (run.candidatesTried == 0)
         {
+            if (!run.exec.error.empty())
+                return run;
+
+            if (CountAutomaticMaintenanceCandidates(candidates) == 0)
+            {
+                run.exec.error = "Only scanner interfaces were found; no safe printer maintenance interface is available.";
+                return run;
+            }
+
             run.exec.error = backend->DescribeOpenFailure(true);
             return run;
         }
@@ -541,6 +697,16 @@ namespace ewr {
 
             if (pinned >= 1 && static_cast<int>(idx) + 1 != pinned)
                 continue;
+
+            // Automatic read preflight must stay on the exact same role set
+            // that can later receive writes. A user may still pin a non-printer
+            // interface explicitly for read-only diagnostics.
+            if (pinned < 1 && !IsAutomaticMaintenanceCandidate(cand, candidates))
+            {
+                trace << "[SAFETY] Skipping non-maintenance interface during automatic query: "
+                      << backend->Describe(cand.ordinal) << "\n";
+                continue;
+            }
 
             WriteSelectionDecision(trace, *backend, cand, idx, candidates.size());
 
@@ -594,6 +760,32 @@ namespace ewr {
             run.candidatesTried++;
             run.query = result;
 
+            // L3210 / ET-28xx style MFPs can expose a perfectly valid printer
+            // function that stays silent to D4 while still accepting a non-D4
+            // direct-control protocol. Keep reads on the same ordered ladder as
+            // writes, and never let automatic preflight/read-back move onto the
+            // WIA scanner function.
+            if (result.handshakeFailed)
+            {
+                for (const NonD4Path path : { NonD4Path::End4, NonD4Path::EscRemote })
+                {
+                    QueryFallbackAttempt direct =
+                        TryNonD4QueryFallback(*backend, cand, queries, options, trace, path);
+                    if (!direct.attempted)
+                        continue;
+
+                    if (!direct.result.handshakeFailed)
+                    {
+                        result = std::move(direct.result);
+                        run.query = result;
+                        break;
+                    }
+
+                    if (!direct.result.error.empty())
+                        run.query.error = direct.result.error;
+                }
+            }
+
             if (result.handshakeFailed && pinned < 1 && idx + 1 < candidates.size())
             {
                 trace << "[!] Handshake silent on this interface. Falling back to the next candidate.\n\n";
@@ -607,7 +799,12 @@ namespace ewr {
         }
 
         if (run.candidatesTried == 0)
-            run.query.error = backend->DescribeOpenFailure(false);
+        {
+            if (pinned < 1 && CountAutomaticMaintenanceCandidates(candidates) == 0)
+                run.query.error = "Only scanner interfaces were found; no printer maintenance interface is available.";
+            else
+                run.query.error = backend->DescribeOpenFailure(false);
+        }
 
         return run;
     }

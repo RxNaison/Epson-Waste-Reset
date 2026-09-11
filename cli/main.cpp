@@ -11,11 +11,13 @@
 #include "ewr/generator.h"
 #include "ewr/status.h"
 #include "ewr/updater.h"
+#include "ewr/discover.h"
 #include "ewr/version.h"
 #include "ewr/log.h"
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
 #include <ctime>
 
 #ifdef _WIN32
@@ -49,6 +51,7 @@ struct CliOptions
     bool listOnly = false;       // --list: interface survey, then exit
     bool dryRun = false;         // --dry-run: everything except the writes
     bool dump = false;           // --dump: read-only EEPROM dump to a file
+    bool findAddresses = false;  // --find-addresses: repeated dumps around head cleanings
     bool noUpdate = false;       // --no-update: offline run, nothing checked or swapped
     int interfaceCandidate = 0;  // --interface <n>: 1-based pin, 0 = auto
     bool usbSoftReset = false;   // --usb-soft-reset: clear the channel on every open
@@ -126,6 +129,10 @@ static void PrintUsage()
               << "  --usb-soft-reset Clear the USB channel on every session open (Windows\n"
               << "                   only). Off by default: on ET-2xxx units it stalls the\n"
               << "                   next write. Diagnostic switch for hardware testing.\n"
+              << "  --find-addresses Find the waste counters on a model the database has no\n"
+              << "                   addresses for. Reads the EEPROM three times and asks you\n"
+              << "                   to run a head cleaning between reads; the bytes that rise\n"
+              << "                   every time are the counters. Read-only.\n"
               << "  --help, -h       Show this help.\n";
 }
 
@@ -409,6 +416,10 @@ int main(int argc, char* argv[])
         {
             cli.dump = true;
         }
+        else if (arg == "--find-addresses")
+        {
+            cli.findAddresses = true;
+        }
         else if (arg == "--no-update")
         {
             cli.noUpdate = true;
@@ -468,6 +479,8 @@ int main(int argc, char* argv[])
         std::cout << "[i] DRY RUN: EWR will detect, read and plan, but write nothing.\n" << std::endl;
     else if (cli.dump)
         std::cout << "[i] DUMP MODE: reading the EEPROM to a file, no writes will be sent.\n" << std::endl;
+    else if (cli.findAddresses)
+        std::cout << "[i] ADDRESS DISCOVERY: repeated read-only EEPROM dumps, no writes will be sent.\n" << std::endl;
 
     ewr::CleanupStaleTempFiles();
 
@@ -575,19 +588,22 @@ int main(int argc, char* argv[])
 
     for (const auto& sm : smartModels)
     {
-        // A model earns a menu slot for either reset: waste pads or ink map.
-        if (!sm.HasResettableCounters() && !sm.HasInkReset())
-        {
+        // No addresses yet, but the read key is enough to dump the EEPROM and
+        // go looking for them, so the entry is offered rather than hidden.
+        const bool resettable = sm.HasResettableCounters() || sm.HasInkReset();
+        if (!resettable)
             hiddenModels++;
-            continue;
-        }
-        options.push_back({ sm.name + " (Smart Protocol - Recommended)", false, {}, sm });
+
+        options.push_back({ sm.name + (resettable ? " (Smart Protocol - Recommended)"
+                                                  : " (no reset addresses yet - read-only)"),
+                            false, {}, sm });
     }
 
-    std::cout << "[i] Loaded " << (smartModels.size() - hiddenModels) << " Smart Protocol payloads." << std::endl;
+    std::cout << "[i] Loaded " << smartModels.size() << " Smart Protocol payloads." << std::endl;
 
     if (hiddenModels > 0)
-        std::cout << "[i] " << hiddenModels << " database entries have no USB-resettable counters and are hidden." << std::endl;
+        std::cout << "[i] " << hiddenModels << " of them have no reset addresses yet: readable, but"
+                  << " not resettable until the counters are found (--find-addresses)." << std::endl;
 
     std::cout << "[i] Loaded " << replayModels.size() << " Custom payloads." << std::endl;
 
@@ -1024,6 +1040,166 @@ int main(int argc, char* argv[])
         return FinishRun(0);
     }
 
+    // ---- Address discovery: three read-only passes around head cleanings. --
+    if (cli.findAddresses)
+    {
+        if (selected.isReplay)
+        {
+            std::cerr << "[!] --find-addresses needs a Smart Protocol model: it reads the EEPROM\n"
+                         "    with the database read key, and Replay dumps carry none." << std::endl;
+            return FinishRun(1);
+        }
+
+        const uint32_t end = std::min<uint32_t>(selected.smartModel.mem_high, 0xFF);
+        std::vector<uint16_t> addresses;
+        for (uint32_t a = 0; a <= end; ++a)
+            addresses.push_back(static_cast<uint16_t>(a));
+
+        std::cout << "\n[*] ADDRESS DISCOVERY for " << selected.smartModel.name << std::endl;
+        std::cout << "    EWR will read the EEPROM three times. Between reads you run a head" << std::endl;
+        std::cout << "    cleaning from the printer itself - that is the one action guaranteed to" << std::endl;
+        std::cout << "    move the waste counter. Bytes that rise after BOTH cleanings are the" << std::endl;
+        std::cout << "    counters; a byte that moves only once is a timer or a page count." << std::endl;
+        std::cout << "    Nothing is written to the printer at any point." << std::endl;
+        std::cout << "\n    A cleaning uses real ink and pushes the waste counter up, so this costs" << std::endl;
+        std::cout << "    a little of both. Two cleanings is the minimum that proves a trend.\n" << std::endl;
+
+        std::vector<ewr::EepromSnapshot> snapshots;
+        const int passes = 3;
+
+        for (int pass = 1; pass <= passes; ++pass)
+        {
+            std::cout << "[*] Reading the EEPROM, pass " << pass << " of " << passes << "..." << std::endl;
+
+            ewr::Session session(selected.smartModel, gateway, ewr::log::Default(), sessionOptions);
+            const ewr::StateSnapshot state = session.ReadAddresses(addresses);
+
+            if (!state.available)
+            {
+                std::cerr << "[ERROR] Could not read the printer on pass " << pass
+                          << ". Is it powered on and connected?" << std::endl;
+                std::cerr << "        See ewr_trace.log for the hardware trace." << std::endl;
+                return FinishRun(1);
+            }
+
+            size_t answered = 0;
+            for (const auto& v : state.values)
+                answered += (v.second >= 0) ? 1 : 0;
+
+            snapshots.push_back(state.values);
+            std::cout << "    Pass " << pass << ": " << answered << " of " << state.values.size()
+                      << " byte(s) answered." << std::endl;
+
+            if (pass == passes)
+                break;
+
+            std::cout << "\n    Dump " << pass << " is taken. Run a head cleaning cycle on the printer"
+                      << " now,\n    wait until it has completely finished, then press Enter for the"
+                      << " next dump." << std::endl;
+            std::cout << "    (or type 'exit' to stop here): ";
+
+            std::string line;
+            if (!std::getline(std::cin, line))
+            {
+                std::cerr << "\n[!] No input available; stopping." << std::endl;
+                return FinishRun(1);
+            }
+            if (toLower(line) == "exit" || toLower(line) == "quit")
+            {
+                std::cout << "[i] Stopped before pass " << (pass + 1) << ". Nothing was written." << std::endl;
+                return FinishRun(0);
+            }
+            std::cout << std::endl;
+        }
+
+        const std::vector<ewr::ByteTrend> trends = ewr::FindTrendingBytes(snapshots);
+
+        std::cout << "\n------------------------- BYTES THAT MOVED -------------------------" << std::endl;
+        if (trends.empty())
+        {
+            std::cout << "  None. No byte moved the same way after both cleanings." << std::endl;
+            std::cout << "\n  That usually means one of three things: the cleanings did not actually"
+                      << "\n  run, this model keeps its counters above 0x" << std::hex << end << std::dec
+                      << " (outside the range read here),"
+                      << "\n  or the counter lives on the maintenance box chip rather than in the"
+                      << "\n  printer's EEPROM, in which case no reset over USB can reach it." << std::endl;
+            return FinishRun(0);
+        }
+
+        std::cout << "  ADDRESS          WIDTH       DUMP 1   DUMP 2   DUMP 3   TREND" << std::endl;
+        for (const ewr::ByteTrend& t : trends)
+        {
+            std::string addr;
+            for (size_t i = 0; i < t.addresses.size(); ++i)
+            {
+                char one[12];
+                snprintf(one, sizeof(one), "0x%04X", t.addresses[i]);
+                addr += (i ? " " : "") + std::string(one);
+            }
+
+            char line[160];
+            snprintf(line, sizeof(line), "  %-16.16s %-9.9s", addr.c_str(),
+                     t.IsPair() ? "16-bit" : "8-bit");
+            std::cout << line;
+
+            for (uint32_t v : t.values)
+            {
+                snprintf(line, sizeof(line), "%9u", v);
+                std::cout << line;
+            }
+
+            snprintf(line, sizeof(line), "   %s (", t.rising ? "rising " : "falling");
+            std::cout << line;
+            for (size_t i = 0; i < t.deltas.size(); ++i)
+                std::cout << (i ? ", " : "") << (t.deltas[i] > 0 ? "+" : "") << t.deltas[i];
+            std::cout << ")" << std::endl;
+        }
+        std::cout << "--------------------------------------------------------------------" << std::endl;
+
+        std::cout << "\n  A waste counter only ever rises, so the rising rows are the candidates"
+                  << "\n  and the falling ones are something else - an ink level, a countdown."
+                  << "\n  Nothing here says what any of them should be reset TO." << std::endl;
+
+        // The model's own write path, so the saved file is a complete entry.
+        std::ostringstream body;
+        body << "            \"mem_high\": " << selected.smartModel.mem_high << ",\n";
+        body << "            \"rkey\": " << selected.smartModel.rkey << ",\n";
+        body << "            \"rlen\": " << selected.smartModel.rlen << ",\n";
+        body << "            \"wkey\": \"" << selected.smartModel.wkey << "\",\n";
+        if (!selected.smartModel.wkey1.empty())
+            body << "            \"wkey1\": \"" << selected.smartModel.wkey1 << "\",\n";
+        body << "            \"wlen\": " << selected.smartModel.wlen << ",\n";
+
+        std::string safeName;
+        for (char ch : selected.smartModel.name)
+            safeName += std::isalnum(static_cast<unsigned char>(ch)) ? ch : '_';
+
+        const std::string outPath = safeName + "-found-addresses.json";
+        std::ofstream out(outPath);
+        if (!out)
+        {
+            std::cerr << "[!] Found the candidates but could not write " << outPath << "." << std::endl;
+            return FinishRun(1);
+        }
+        out << ewr::FormatDiscoveryJson(selected.smartModel.name, body.str(), trends);
+        out.close();
+
+        size_t rising = 0;
+        for (const ewr::ByteTrend& t : trends)
+            rising += t.rising ? 1 : 0;
+
+        std::cout << "\n[SUCCESS] Wrote " << trends.size() << " reading(s) (" << rising
+                  << " rising) to " << outPath << "." << std::endl;
+        std::cout << "\n[!] That file records what was read, not a reset plan. Its 'pad_groups' is\n"
+                     "    empty on purpose: which of these is a waste counter, and what it resets\n"
+                     "    to, is a judgement no dump can make - some pad groups reset certain\n"
+                     "    bytes to 0x5E (94) rather than 0.\n"
+                     "\n    Please open an issue or a pull request with this file and your printer\n"
+                     "    model. Checking it against a known-good capture is what turns a reading\n"
+                     "    into a database entry that is safe to write." << std::endl;
+        return FinishRun(0);
+    }
+
     // ---- Dry run: everything except the writes. ---------------------------
     if (cli.dryRun)
     {
@@ -1135,6 +1311,25 @@ int main(int argc, char* argv[])
         std::cout << "    maintenance tank and CANNOT be reset over USB EEPROM." << std::endl;
         std::cout << "    To reset the Main Waste Ink Box, replace the maintenance box or use a physical chip resetter." << std::endl;
         std::cout << "================================================================================\n" << std::endl;
+    }
+
+    // No addresses and no ink map: the entry carries a working read key and
+    // nothing to write. Say so and point at discovery rather than running a
+    // reset that would send zero writes and report success.
+    if (!selected.smartModel.HasResettableCounters() && !selected.smartModel.HasInkReset())
+    {
+        std::cout << "\n================================================================================" << std::endl;
+        std::cout << "[!] " << selected.smartModel.name
+                  << " has no reset addresses in the database yet." << std::endl;
+        std::cout << "    Its read key works, so EWR can read this printer - it just does not know" << std::endl;
+        std::cout << "    which bytes hold the waste counter, and it will not guess." << std::endl;
+        std::cout << "\n    To find them, run:" << std::endl;
+        std::cout << "        ewr --model \"" << selected.smartModel.name << "\" --find-addresses" << std::endl;
+        std::cout << "\n    EWR will read the EEPROM three times and ask you to run a head cleaning" << std::endl;
+        std::cout << "    between reads. Nothing is written. The bytes that rise every time are the" << std::endl;
+        std::cout << "    counters, and the result is saved for a pull request." << std::endl;
+        std::cout << "================================================================================" << std::endl;
+        return FinishRun(0);
     }
 
     // ---- Cartridge ink reset choice: models with a per-color ink map offer

@@ -52,6 +52,7 @@ Running with no options is the supported path. These exist for diagnosis and for
 | `--interface <n>` | Pin the run to interface `<n>` from `--list` and disable the automatic fallback. |
 | `--dry-run` | Detect, read, and show exactly what a reset *would* write - then stop. |
 | `--dump` | Read the EEPROM into a timestamped file. Dump twice around a change and diff to map an unknown printer. |
+| `--find-addresses` | For a model with no reset addresses yet: read the EEPROM three times, asking you to run a head cleaning between reads, and report the bytes that rise every time. Read-only. |
 | `--no-update` | Fully offline: no update check, no download, no staged swap on exit. Use it while editing `database.json`. |
 | `--usb-soft-reset` | Diagnostic only, Windows. Off by default because it stalls the next write on ET-2xxx units. |
 | `--help`, `-h` | The same list, from the binary. |
@@ -102,21 +103,28 @@ If your model is missing entirely, its addresses have to be found. Start with th
 
 ### Finding the counters yourself (read-only)
 
-`--dump` reads the low EEPROM page into a timestamped text file. Take one dump before a change and one after; the bytes that moved are the counters.
+Around 113 database entries carry a working read key but no reset addresses - EWR can read those printers, it just does not know which bytes hold the waste counter. They appear in the menu as `(no reset addresses yet - read-only)`.
 
-1. Pick the closest existing entry for your family and take a baseline. Read keys are usually shared across a model line, so a sibling normally works:
-   ```
-   ewr --model L3150 --dump --no-update
-   ```
-   If every value comes back as `--`, that read key is wrong for your printer - try another sibling.
-2. Make the counter move. A head cleaning from the printer's own control panel is the usual way; printing a few pages also works.
-3. Dump again, then diff the two files:
-   ```
-   ewr --model L3150 --dump --no-update
-   diff ewr_dump_L3150_1736900000.txt ewr_dump_L3150_1736903600.txt
-   ```
+`--find-addresses` goes looking. It reads the EEPROM three times and asks you to run a head cleaning from the printer's own panel between reads, because a cleaning is the one action guaranteed to move the waste counter:
 
-The addresses whose values went **up** are waste counters. Little-endian pairs are common, so a byte that rolls over into its neighbour is one 16-bit counter rather than two separate ones.
+```
+ewr --model ET-M1180 --find-addresses --no-update
+```
+
+Bytes that move the **same way after both** cleanings are reported, rising or falling, with their three readings side by side; a byte that moves only once is a timer or a page count and is dropped. A waste counter only ever rises, so the rising rows are the candidates and a falling one is something else - an ink level, a countdown. Two intervals is the minimum that tells those apart, which is why it takes three reads. Little-endian pairs are handled, so a low byte rolling over into its neighbour is reported as one 16-bit counter rather than discarded for falling. Nothing is written to the printer at any point, and the result is saved as `<Model>-found-addresses.json`.
+
+Budget around twenty minutes: a full read of the low page takes a few minutes on older models, and you run it three times with two cleanings in between. A cleaning also uses real ink and pushes the waste counter up.
+
+**This records readings, not a reset plan.** The saved file's `pad_groups` is empty on purpose: which of these is a waste counter, and what it resets to, is a judgement no dump can make - some pad groups reset certain bytes to `0x5E` (94) rather than 0. Open an issue or a pull request with the file rather than writing anything back blind.
+
+If you would rather do it by hand, `--dump` writes a single timestamped snapshot you can `diff` yourself:
+
+```
+ewr --model L3150 --dump --no-update
+diff ewr_dump_L3150_1736900000.txt ewr_dump_L3150_1736903600.txt
+```
+
+If every value comes back as `--`, the read key is wrong for your printer - try a different sibling from the same model line.
 
 Mind the mirror trap: a byte that returns to its old value by itself after a power cycle is being rewritten by the firmware from the cartridge chip. That level lives on the chip and cannot be reset from the PC.
 

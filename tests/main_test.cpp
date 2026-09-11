@@ -17,6 +17,7 @@
 #include "ewr/log.h"
 #include "ewr/session.h"
 #include "ewr/usb_backend.h"
+#include "ewr/discover.h"
 
 namespace fs = std::filesystem;
 
@@ -4912,6 +4913,135 @@ void test_d4_session_reports_the_http_personality()
     CHECK(result.error == ewr::kHttpPersonalityError);
 }
 
+// ---------------------------------------------------------------------------
+// Address discovery (discover.cpp)
+// ---------------------------------------------------------------------------
+
+static ewr::EepromSnapshot Snap(std::initializer_list<std::pair<uint16_t, int>> v)
+{
+    return ewr::EepromSnapshot(v);
+}
+
+void test_discovery_needs_three_passes()
+{
+    std::cout << "[TEST] test_discovery_needs_three_passes" << std::endl;
+
+    // Two passes give one interval, and one interval cannot tell a counter
+    // from a byte that happened to move once.
+    const std::vector<ewr::EepromSnapshot> two = {
+        Snap({ {0x30, 10} }),
+        Snap({ {0x30, 11} }),
+    };
+    CHECK(ewr::FindTrendingBytes(two).empty());
+    CHECK(ewr::FindTrendingBytes({}).empty());
+}
+
+void test_discovery_keeps_only_what_moves_one_way_every_time()
+{
+    std::cout << "[TEST] test_discovery_keeps_only_what_moves_one_way_every_time" << std::endl;
+
+    const std::vector<ewr::EepromSnapshot> passes = {
+        Snap({ {0x30, 10}, {0x40, 5}, {0x50, 7}, {0x60, 9}, {0x70, 90} }),
+        Snap({ {0x30, 14}, {0x40, 9}, {0x50, 7}, {0x60, 3}, {0x70, 80} }),
+        Snap({ {0x30, 21}, {0x40, 9}, {0x50, 7}, {0x60, 8}, {0x70, 55} }),
+    };
+
+    const std::vector<ewr::ByteTrend> found = ewr::FindTrendingBytes(passes);
+
+    // 0x30 rises twice and 0x70 falls twice: both are trends. 0x40 rises then
+    // stalls, 0x50 never moves, 0x60 falls then rises - the noise to reject.
+    CHECK(found.size() == 2);
+
+    CHECK(found[0].addresses == std::vector<uint16_t>{ 0x30 });
+    CHECK(found[0].rising);
+    CHECK(found[0].values == std::vector<uint32_t>({ 10, 14, 21 }));
+    CHECK(found[0].deltas == std::vector<int64_t>({ 4, 7 }));
+
+    // A falling byte is reported too - it is not a waste counter, and saying
+    // so is the reader's job, not this function's.
+    CHECK(found[1].addresses == std::vector<uint16_t>{ 0x70 });
+    CHECK(!found[1].rising);
+    CHECK(found[1].values == std::vector<uint32_t>({ 90, 80, 55 }));
+    CHECK(found[1].deltas == std::vector<int64_t>({ -10, -25 }));
+}
+
+void test_discovery_reads_a_wrapping_low_byte_as_a_pair()
+{
+    std::cout << "[TEST] test_discovery_reads_a_wrapping_low_byte_as_a_pair" << std::endl;
+
+    // 0x0130 -> 0x0202 -> 0x02FE. The low byte goes 0x30, 0x02, 0xFE: it breaks
+    // its own run at the first interval. Judged alone it is discarded; judged
+    // as the pair it belongs to, it is a counter climbing through a rollover.
+    const std::vector<ewr::EepromSnapshot> passes = {
+        Snap({ {0x30, 0x30}, {0x31, 0x01} }),
+        Snap({ {0x30, 0x02}, {0x31, 0x02} }),
+        Snap({ {0x30, 0xFE}, {0x31, 0x02} }),
+    };
+
+    const std::vector<ewr::ByteTrend> found = ewr::FindTrendingBytes(passes);
+
+    CHECK(found.size() == 1);
+    CHECK(found[0].IsPair());
+    CHECK(found[0].rising);
+    CHECK(found[0].addresses == std::vector<uint16_t>({ 0x30, 0x31 }));
+    CHECK(found[0].values == std::vector<uint32_t>({ 0x0130, 0x0202, 0x02FE }));
+
+    // The high byte must not also surface on its own: it is spoken for.
+    for (const auto& t : found)
+        CHECK(!(t.addresses.size() == 1 && t.addresses[0] == 0x31));
+}
+
+void test_discovery_ignores_addresses_that_went_unanswered()
+{
+    std::cout << "[TEST] test_discovery_ignores_addresses_that_went_unanswered" << std::endl;
+
+    // A -1 is "the printer did not answer", not a low reading. Treating it as
+    // one would manufacture a trend out of a failed read.
+    const std::vector<ewr::EepromSnapshot> passes = {
+        Snap({ {0x30, -1}, {0x44, 1} }),
+        Snap({ {0x30, 50}, {0x44, 2} }),
+        Snap({ {0x30, 90}, {0x44, 3} }),
+    };
+
+    const std::vector<ewr::ByteTrend> found = ewr::FindTrendingBytes(passes);
+
+    CHECK(found.size() == 1);
+    CHECK(found[0].addresses == std::vector<uint16_t>{ 0x44 });
+}
+
+void test_discovery_json_records_readings_not_a_reset_plan()
+{
+    std::cout << "[TEST] test_discovery_json_records_readings_not_a_reset_plan" << std::endl;
+
+    const std::vector<ewr::EepromSnapshot> passes = {
+        Snap({ {0x30, 1}, {0x31, 0}, {0x70, 9} }),
+        Snap({ {0x30, 2}, {0x31, 0}, {0x70, 6} }),
+        Snap({ {0x30, 3}, {0x31, 0}, {0x70, 2} }),
+    };
+
+    const std::vector<ewr::ByteTrend> found = ewr::FindTrendingBytes(passes);
+    CHECK(found.size() == 2);
+
+    const std::string body = "            \"rkey\": 1304,\n";
+    const std::string doc = ewr::FormatDiscoveryJson("ET-M1180", body, found);
+
+    CHECK(doc.find("\"schema_version\": 4") != std::string::npos);
+    CHECK(doc.find("\"ET-M1180\"") != std::string::npos);
+    CHECK(doc.find("\"rkey\": 1304") != std::string::npos);
+
+    // Empty on purpose: nothing observed here is a reset plan, and a populated
+    // pad_groups would invite someone to paste it straight into the database.
+    CHECK(doc.find("\"pad_groups\": []") != std::string::npos);
+    CHECK(doc.find("no reset value") != std::string::npos);
+
+    // Both directions are recorded, with the three readings per address.
+    CHECK(doc.find("\"values\": [1, 2, 3]") != std::string::npos);
+    CHECK(doc.find("\"direction\": \"rising\"") != std::string::npos);
+    CHECK(doc.find("\"values\": [9, 6, 2]") != std::string::npos);
+    CHECK(doc.find("\"deltas\": [-3, -4]") != std::string::npos);
+    CHECK(doc.find("\"direction\": \"falling\"") != std::string::npos);
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -5026,6 +5156,11 @@ int main()
     test_end4_reports_the_http_personality();
     test_esc_remote_reports_the_http_personality();
     test_d4_session_reports_the_http_personality();
+    test_discovery_needs_three_passes();
+    test_discovery_keeps_only_what_moves_one_way_every_time();
+    test_discovery_reads_a_wrapping_low_byte_as_a_pair();
+    test_discovery_ignores_addresses_that_went_unanswered();
+    test_discovery_json_records_readings_not_a_reset_plan();
 
     std::cout << "\n----------------------------------------" << std::endl;
     if (g_failures == 0)

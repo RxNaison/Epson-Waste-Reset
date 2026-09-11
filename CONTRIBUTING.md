@@ -10,6 +10,32 @@ upstream source (reinkpy, ez-reset, reink, gutenprint) is merged *around*
 your values - the build only fills in fields you left out and appends models
 nobody has committed yet. A rebuild can never overwrite a hand edit.
 
+### The file layout
+
+`database.json` is a schema 4 envelope. Printers live under `"models"`, and
+models that share an identical body point at a shared block in `"specs"`
+instead of repeating it:
+
+```json
+{
+    "schema_version": 4,
+    "specs": {
+        "L3110-family": { "rkey": 1943, "wkey": "Nbsjcbzb", "pad_groups": [ ... ] }
+    },
+    "models": {
+        "L3110": { "spec": "L3110-family" },
+        "L3150": { "spec": "L3110-family" },
+        "R220":  { "rkey": 2000, "wkey": "Arkanoid", "pad_groups": [ ... ] }
+    }
+}
+```
+
+A key written on the model itself overrides the shared block, so to change one
+printer out of a family you add the field to its entry rather than editing the
+spec group everybody else rides. Spec groups are regenerated on every rebuild -
+never hand-name one; just write the fields you want and the build folds the
+duplicates back together.
+
 ### Fixing a value
 
 Change it in place. Your value is kept even when every upstream source
@@ -26,9 +52,13 @@ hand-edited `database.json` with the upstream one on exit - so keep passing
 
 ### Adding a model
 
-Add a new entry with at least:
+Add an entry under `"models"` with at least:
 
     "rkey", "wkey", "rlen", "wlen", "addresses", "reset"
+
+`addresses` is the flat list of EEPROM bytes to write and `reset` the value for
+each, positionally paired. That minimal shape is enough - the build turns it
+into the `pad_groups` the current format uses, and EWR reads it either way.
 
 `rlen`/`wlen` are the **address field** length in bytes - 1 for the old
 R220-class models, 2 for modern ones. `wkey` may need trailing `\u0000`

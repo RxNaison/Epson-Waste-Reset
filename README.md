@@ -162,7 +162,14 @@ EWR would not exist without the people who reverse-engineered these protocols fi
 * **[reink](https://github.com/lion-simba/reink)** - the original protocol work on the older Stylus generation.
 * **[Gutenprint](https://gutenprint.sourceforge.net/)** - model names and detection aliases.
 
-Thanks also to everyone who has run an unsigned test build against a printer they could not replace and sent back the trace log. Several of the hardest bugs in this project were found by users, not by me.
+## Support
+
+EWR is free and will stay free. If it saved you a paid reset key or a trip to the repair shop, you can support development:
+
+- USDT (TRC-20): `TXjUX9gCDjRUDU3L3HB3vfXbPdnTXiPzoR`
+- BTC: `1Ep5bY7xBaJpWnzEG4PCjq9hTEjms9J1SR`
+
+Not into donating? A ⭐ or a note in Discussions about which model worked helps just as much.
 
 ## ⚠️ Disclaimer
 Manipulating hardware via raw USB packets carries inherent risks. EWR is provided "as is" without warranty of any kind. By using this software, you accept full responsibility for your hardware.

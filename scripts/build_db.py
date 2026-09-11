@@ -1045,10 +1045,18 @@ def finalize_aliases(db, coverage):
 # ---------------------------------------------------------------------------
 
 def compact(db):
-    """Fold identical model bodies into shared spec groups (schema 4)."""
+    """Fold identical model bodies into shared spec groups (schema 4).
+
+    addresses/reset are dropped here: pad_groups carries the same bytes in the
+    order they are written, and the loader ignores the flat pair whenever
+    pad_groups is present. An entry that has no pad_groups is a hand-added one
+    in the documented minimal shape, so its flat pair is all it has and stays.
+    """
     grouped = {}
     for name in sorted(db):
-        body = {k: v for k, v in db[name].items() if k not in ("addresses", "reset")}
+        entry = db[name]
+        drop = ("addresses", "reset") if entry.get("pad_groups") else ()
+        body = {k: v for k, v in entry.items() if k not in drop}
         grouped.setdefault(json.dumps(body, sort_keys=True), []).append(name)
 
     specs = {}
@@ -1066,9 +1074,47 @@ def compact(db):
     return {"schema_version": SCHEMA_VERSION, "specs": specs, "models": models}
 
 
+def expand(payload):
+    """Schema 4 envelope -> {model: body}, the shape the merge works on.
+
+    Resolves spec inheritance and rebuilds the flat addresses/reset pair from
+    pad_groups, so a curated overlay and a write-path diff read the same fields
+    whichever form the committed file happens to be in.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    if "schema_version" not in payload:
+        return payload
+
+    specs = payload.get("specs") or {}
+    models = payload.get("models") or {}
+    out = {}
+
+    for name, body in models.items():
+        if not isinstance(body, dict):
+            continue
+
+        spec_name = body.get("spec")
+        if isinstance(spec_name, str) and isinstance(specs.get(spec_name), dict):
+            entry = copy.deepcopy(specs[spec_name])
+            entry.update({k: v for k, v in body.items() if k != "spec"})
+        else:
+            entry = copy.deepcopy(body)
+
+        groups = entry.get("pad_groups")
+        if groups:
+            entry["addresses"] = [a for g in groups for a in g.get("addresses", [])]
+            entry["reset"] = [r for g in groups for r in g.get("reset", [])]
+
+        out[name] = entry
+
+    return out
+
+
 def diff_summary(old, new_db):
-    if not isinstance(old, dict) or "schema_version" in old:
-        return ["existing output is compact form; field diff skipped"]
+    old = expand(old)
+    if not isinstance(old, dict) or not old:
+        return ["existing output unreadable; field diff skipped"]
     added = sorted(set(new_db) - set(old))
     removed = sorted(set(old) - set(new_db))
     changed = {}
@@ -1097,8 +1143,9 @@ def load_committed(out_path):
     except Exception as e:
         print(f"[-] {out_path.name} unreadable ({e}); building from sources only")
         return {}
-    if not isinstance(data, dict) or "schema_version" in data:
-        print(f"[-] {out_path.name} is not flat form; curated overlay skipped")
+    data = expand(data)
+    if not isinstance(data, dict) or not data:
+        print(f"[-] {out_path.name} held no readable models; curated overlay skipped")
         return {}
     return data
 
@@ -1234,11 +1281,13 @@ def cmd_build(args):
     coverage["with_recovery"] = sum(1 for e in db.values() if e.get("recovery"))
     coverage["with_ink"] = sum(1 for e in db.values() if e.get("ink_groups"))
 
-    payload = compact(db) if args.compact else db
+    payload = db if args.flat else compact(db)
     new_text = json.dumps(payload, indent=4, sort_keys=True, ensure_ascii=True) + "\n"
 
+    # Runs against either form: diff_summary expands the envelope first, so the
+    # write-path guard keeps comparing addresses/reset whatever is on disk.
     diff = []
-    if out_path.exists() and not args.compact:
+    if out_path.exists():
         try:
             diff = diff_summary(json.loads(out_path.read_text(encoding="utf-8")), db)
         except Exception:
@@ -1282,11 +1331,12 @@ def cmd_build(args):
         print(f"    coverage: reink ink/waste data for "
               f"{len(coverage['reink_models_unmatched'])} printer(s) has no model "
               f"entry yet: " + ", ".join(coverage["reink_models_unmatched"]))
-    if args.compact:
-        print(f"    Compact form: {len(payload['specs'])} spec groups, "
-              f"{len(payload['models'])} model entries.")
+    if args.flat:
+        print("    Flat form: every model expanded, with the duplicated "
+              "top-level addresses/reset pair.")
     else:
-        print("    Flat form: still readable by old clients in the field.")
+        print(f"    Schema {SCHEMA_VERSION} envelope: {len(payload['specs'])} spec "
+              f"group(s), {len(payload['models'])} model entries.")
     return 0
 
 
@@ -1299,9 +1349,10 @@ def main():
     b = sub.add_parser("build", help="fetch all upstream sources and merge them "
                        "around the committed database.json (which always wins)")
     b.add_argument("--output", default=str(REPO_ROOT / "database.json"))
-    b.add_argument("--compact", action="store_true",
-                   help="schema 4 envelope with shared spec groups "
-                        "(not readable by clients older than 1.2.3)")
+    b.add_argument("--flat", action="store_true",
+                   help="emit the pre-schema-4 flat form instead of the "
+                        "envelope: every model expanded, with the duplicated "
+                        "top-level addresses/reset pair")
     b.set_defaults(func=cmd_build)
 
     args = ap.parse_args()

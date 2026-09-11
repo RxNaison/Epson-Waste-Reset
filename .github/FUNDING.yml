@@ -1,0 +1,4 @@
+# GitHub has no field for a wallet address - every supported key is a hosted
+# platform, and `custom` accepts URLs only - so the Sponsor button points at
+# the README's Support section, which carries the USDT and BTC addresses.
+custom: ["https://github.com/RxNaison/Epson-Waste-Reset#support"]

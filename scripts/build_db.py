@@ -637,6 +637,18 @@ def _counter_addrs(counter):
     return out
 
 
+def _counter_bytes(counter):
+    """(address, mask) per byte read. Sharing an address does not make two
+    counters the same one: L3110 splits 0x2F between two, a nibble each."""
+    out = set()
+    for b in counter.get("bytes", []):
+        if isinstance(b, dict):
+            out.add((b["addr"], b.get("mask", 0xFF)))
+        else:
+            out.add((b, 0xFF))
+    return out
+
+
 def _attach_counters(entry, counters):
     """Attach ez-reset counter specs to the pad group sharing their bytes.
 
@@ -661,8 +673,9 @@ def _attach_counters(entry, counters):
         if "max" in c:
             new_c["max"] = c["max"]
         replaced = False
+        new_bytes = _counter_bytes(new_c)
         for i, old in enumerate(existing):
-            if _counter_addrs(old) & addrs:
+            if _counter_bytes(old) & new_bytes:
                 new_c["desc"] = old.get("desc", "Waste counter")
                 if "max" not in new_c and "max" in old:
                     new_c["max"] = old["max"]

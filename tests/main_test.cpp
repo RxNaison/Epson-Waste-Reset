@@ -5042,6 +5042,50 @@ void test_discovery_json_records_readings_not_a_reset_plan()
     CHECK(doc.find("\"direction\": \"falling\"") != std::string::npos);
 }
 
+// Issue #35. The L3110 splits 0x2F between two counters, one per nibble, and
+// the database build used to treat that shared byte as "the same counter" and
+// keep only the second. These are the reporter's own bytes.
+void test_l3110_shows_both_counters_sharing_a_byte()
+{
+    std::cout << "[TEST] test_l3110_shows_both_counters_sharing_a_byte" << std::endl;
+
+    ewr::UniversalGenerator gen;
+    CHECK(gen.LoadDatabase("database.json"));
+
+    const ewr::DbPrinterModel* l3110 = nullptr;
+    const std::vector<ewr::DbPrinterModel> models = gen.GetAvailableModels();
+    for (const auto& m : models)
+    {
+        if (m.name == "L3110")
+            l3110 = &m;
+    }
+    CHECK(l3110 != nullptr);
+    if (!l3110)
+        return;
+
+    const std::vector<std::pair<uint16_t, int>> dump = {
+        { 0x1C, 0x00 }, { 0x2F, 0x00 }, { 0x30, 0x4D }, { 0x31, 0x02 },
+        { 0x32, 0x00 }, { 0x33, 0x00 }, { 0x34, 0x82 }, { 0x35, 0x04 },
+        { 0x36, 0x5E }, { 0x37, 0x5E },
+    };
+
+    const auto specs = l3110->GetAllCounters();
+    CHECK(specs.size() == 2);
+
+    bool sawLoaded = false, sawEmpty = false;
+    for (const auto& spec : specs)
+    {
+        const ewr::CounterReading r = ewr::EvaluateCounter(spec, dump);
+        CHECK(r.complete);
+        if (r.max_value == 6346 && r.value == 589)
+            sawLoaded = true;      // 0x30/0x31 + low nibble of 0x2F: 77 + 2*256
+        if (r.max_value == 3416 && r.value == 0)
+            sawEmpty = true;       // 0x32/0x33 + high nibble of 0x2F
+    }
+    CHECK(sawLoaded);
+    CHECK(sawEmpty);
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -5161,6 +5205,7 @@ int main()
     test_discovery_reads_a_wrapping_low_byte_as_a_pair();
     test_discovery_ignores_addresses_that_went_unanswered();
     test_discovery_json_records_readings_not_a_reset_plan();
+    test_l3110_shows_both_counters_sharing_a_byte();
 
     std::cout << "\n----------------------------------------" << std::endl;
     if (g_failures == 0)

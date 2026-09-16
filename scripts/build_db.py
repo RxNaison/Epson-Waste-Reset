@@ -407,9 +407,13 @@ def extract_ezreset(raw_bytes):
             query = waste.find("query")
             if query is not None:
                 counters = []
-                for c_el in query.findall("counter"):
+                elements = query.findall("counter")
+                for slot, c_el in enumerate(elements):
                     c = _parse_counter(c_el, notes, name)
                     if c:
+                        # A lone counter's position says nothing about its pad.
+                        if len(elements) > 1:
+                            c["slot"] = slot
                         counters.append(c)
                 if counters:
                     spec["counters"] = counters
@@ -637,6 +641,20 @@ def _counter_addrs(counter):
     return out
 
 
+# WicReset lists a model's waste counters in pad order but never names them.
+# Position 0 is the main pad and position 1 the platen pad: EP-708A, EP-808A
+# and XP-630, the one family whose pads reinkpy labels, bear that out. Past
+# that nothing is known, so the rest are numbered rather than guessed.
+_SLOT_LABELS = ("Main Pad Counter", "Platen Pad Counter")
+
+# Labels this build has generated. Anything else was written by a person.
+_GENERATED_LABEL = re.compile(r"(Main Pad|Platen Pad|Waste) Counter( \d+)?$", re.IGNORECASE)
+
+
+def _slot_label(slot):
+    return _SLOT_LABELS[slot] if slot < len(_SLOT_LABELS) else f"Waste Counter {slot + 1}"
+
+
 def _counter_bytes(counter):
     """(address, mask) per byte read. Sharing an address does not make two
     counters the same one: L3110 splits 0x2F between two, a nibble each."""
@@ -672,6 +690,8 @@ def _attach_counters(entry, counters):
         new_c = {"bytes": copy.deepcopy(c["bytes"])}
         if "max" in c:
             new_c["max"] = c["max"]
+        if "slot" in c:
+            new_c["slot"] = c["slot"]
         replaced = False
         new_bytes = _counter_bytes(new_c)
         for i, old in enumerate(existing):
@@ -685,6 +705,8 @@ def _attach_counters(entry, counters):
         if not replaced:
             new_c["desc"] = best.get("desc") or "Waste counter"
             existing.append(new_c)
+        if "slot" in new_c:
+            new_c["desc"] = _slot_label(new_c["slot"])
         attached += 1
     return attached
 
@@ -1208,6 +1230,42 @@ def _curated_merge(ours, theirs, diverged, path):
     return copy.deepcopy(ours)
 
 
+def order_counters_by_slot(db):
+    """Draw pad counters in pad order. The overlay keeps the committed order,
+    and a counter restored later lands at the end, after the ones it precedes.
+    Counters without a position keep their place, after the positioned ones."""
+    for entry in db.values():
+        for group in entry.get("pad_groups") or []:
+            counters = group.get("counters")
+            if counters:
+                counters.sort(key=lambda c: c.get("slot", len(counters)))
+
+
+def release_generated_labels(db, ours):
+    """Drop committed counter labels this build generated itself, where the
+    upstream counter now carries a pad position.
+
+    Without this the overlay keeps the old label, and every later build counts
+    the difference as a hand edit. Returns how many were released.
+    """
+    released = 0
+    for model, body in ours.items():
+        entry = db.get(model)
+        if not isinstance(body, dict) or not entry:
+            continue
+        upstream = {json.dumps(c["bytes"]): c
+                    for g in entry.get("pad_groups", []) for c in g.get("counters", [])}
+        for group in body.get("pad_groups") or []:
+            for counter in group.get("counters") or []:
+                theirs = upstream.get(json.dumps(counter.get("bytes")))
+                label = counter.get("desc", "")
+                if (theirs and "slot" in theirs and label != theirs["desc"]
+                        and _GENERATED_LABEL.match(label)):
+                    del counter["desc"]
+                    released += 1
+    return released
+
+
 def overlay_curated(db, ours, prov_models, coverage):
     """database.json is the database: whatever is committed there, wins.
 
@@ -1283,7 +1341,10 @@ def cmd_build(args):
     finalize_aliases(db, coverage)
 
     out_path = Path(args.output)
-    overlay_curated(db, load_committed(out_path), prov_models, coverage)
+    committed = load_committed(out_path)
+    coverage["labels_released"] = release_generated_labels(db, committed)
+    overlay_curated(db, committed, prov_models, coverage)
+    order_counters_by_slot(db)
 
     coverage["models_total"] = len(db)
     coverage["with_counters"] = sum(
@@ -1313,6 +1374,9 @@ def cmd_build(args):
           f"{coverage['with_close']} with a commit step, "
           f"{coverage['with_aliases']} with aliases, "
           f"{coverage['with_conflicts']} flagged 'conflict'")
+    if coverage.get("labels_released"):
+        print(f"    relabelled {coverage['labels_released']} counter(s) by pad position, "
+              f"replacing labels this build had generated")
     if coverage.get("curated_override_models"):
         print(f"    curated: kept {coverage['curated_overrides_fields']} hand-edited "
               f"value(s) on {coverage['curated_override_models']} model(s) from the "

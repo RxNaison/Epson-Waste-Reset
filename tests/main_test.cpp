@@ -5084,6 +5084,83 @@ void test_l3110_shows_both_counters_sharing_a_byte()
     }
     CHECK(sawLoaded);
     CHECK(sawEmpty);
+
+    // What the reporter actually asked about: two gauges, named apart, main
+    // first. The loaded one is the main pad and the empty one the platen pad.
+    if (specs.size() == 2)
+    {
+        CHECK(specs[0].description == "Main Pad Counter");
+        CHECK(specs[0].max_value == 6346);
+        CHECK(specs[1].description == "Platen Pad Counter");
+        CHECK(specs[1].max_value == 3416);
+    }
+}
+
+// WicReset never names its counters; EWR names them by position. EP-708A,
+// EP-808A and XP-630 are the only models where an upstream source labels the
+// pads outright, so they are the check that position really means pad.
+void test_counter_names_follow_wicreset_pad_order()
+{
+    std::cout << "[TEST] test_counter_names_follow_wicreset_pad_order" << std::endl;
+
+    ewr::UniversalGenerator gen;
+    CHECK(gen.LoadDatabase("database.json"));
+
+    const std::vector<ewr::DbPrinterModel> models = gen.GetAvailableModels();
+    for (const std::string name : { "EP-708A", "EP-808A", "XP-630" })
+    {
+        const ewr::DbPrinterModel* model = nullptr;
+        for (const auto& m : models)
+        {
+            if (m.name == name)
+                model = &m;
+        }
+        CHECK(model != nullptr);
+        if (!model)
+            continue;
+
+        const auto specs = model->GetAllCounters();
+        CHECK(specs.size() == 2);
+        if (specs.size() != 2)
+            continue;
+
+        // reinkpy: 0x10/0x11 is the main pad, 0x12/0x13 the platen pad.
+        CHECK(specs[0].description == "Main Pad Counter");
+        CHECK(!specs[0].bytes.empty() && specs[0].bytes[0].address == 0x10);
+        CHECK(specs[1].description == "Platen Pad Counter");
+        CHECK(!specs[1].bytes.empty() && specs[1].bytes[0].address == 0x12);
+    }
+}
+
+// 489 models used to draw the same label on two to five gauges.
+void test_no_model_repeats_a_gauge_label()
+{
+    std::cout << "[TEST] test_no_model_repeats_a_gauge_label" << std::endl;
+
+    ewr::UniversalGenerator gen;
+    CHECK(gen.LoadDatabase("database.json"));
+
+    size_t repeating = 0;
+    std::string firstOffender;
+    for (const auto& model : gen.GetAvailableModels())
+    {
+        std::vector<std::string> seen;
+        bool repeats = false;
+        for (const auto& spec : model.GetAllCounters())
+        {
+            repeats = repeats || std::find(seen.begin(), seen.end(), spec.description) != seen.end();
+            seen.push_back(spec.description);
+        }
+        if (repeats)
+        {
+            if (repeating++ == 0)
+                firstOffender = model.name;
+        }
+    }
+
+    if (repeating)
+        std::cout << "  first model repeating a label: " << firstOffender << std::endl;
+    CHECK(repeating == 0);
 }
 
 int main()
@@ -5206,6 +5283,8 @@ int main()
     test_discovery_ignores_addresses_that_went_unanswered();
     test_discovery_json_records_readings_not_a_reset_plan();
     test_l3110_shows_both_counters_sharing_a_byte();
+    test_counter_names_follow_wicreset_pad_order();
+    test_no_model_repeats_a_gauge_label();
 
     std::cout << "\n----------------------------------------" << std::endl;
     if (g_failures == 0)

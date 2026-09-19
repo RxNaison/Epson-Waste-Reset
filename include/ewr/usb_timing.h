@@ -35,6 +35,13 @@ namespace ewr::usb_timing {
     // Windows: completion budget for IOCTL_USBPRINT_SOFT_RESET.
     inline constexpr int kSoftResetTimeoutMs = 1000;
 
+    // How long the printer may take to re-initialize after a soft reset
+    // before the run goes ahead regardless. An R220 needs about 38 s.
+    inline constexpr int kSoftResetSettleTimeoutMs = 90000;
+
+    // Pause between two status sessions while waiting that out.
+    inline constexpr int kSoftResetPollIntervalMs = 1000;
+
     // Linux: budget for the IEEE 1284 GET_DEVICE_ID control transfer.
     inline constexpr int kDeviceIdTimeoutMs = 1000;
 

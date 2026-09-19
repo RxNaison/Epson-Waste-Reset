@@ -1,7 +1,10 @@
 #include "ewr/usb.h"
 #include "ewr/usb_backend.h"
+#include "ewr/usb_timing.h"
 #include "ewr/executor.h"
+#include "ewr/generator.h"
 #include "ewr/log.h"
+#include "ewr/status.h"
 #include "ewr/version.h"
 
 #include <chrono>
@@ -11,6 +14,7 @@
 #include <ostream>
 #include <streambuf>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Platform-neutral driver loop for every USB entry point in usb.h.
@@ -314,7 +318,7 @@ namespace ewr {
                   << "; attempting a non-D4 direct-control fallback on this interface.\n";
             log::Log(log::Level::Info, log::Stage::Handshake, labels.attemptCode, labels.announce);
 
-            ITransport* transport = backend.Open(cand.ordinal, options.usbSoftResetOnOpen);
+            ITransport* transport = backend.Open(cand.ordinal);
             if (!transport)
             {
                 outcome.error = "Could not reopen the interface for the fallback.";
@@ -346,6 +350,95 @@ namespace ewr {
                   << "\n\n";
 
             return outcome;
+        }
+
+        // The printer has finished initializing: it is ready, or reporting
+        // the error it is really in.
+        bool IsRestingState(const PrinterStatus& status)
+        {
+            constexpr int kStateError = 0x00;
+            constexpr int kStateIdle = 0x04;
+            return status.valid && (status.stateCode == kStateError || status.stateCode == kStateIdle);
+        }
+
+        // --usb-soft-reset. The printer answers the reset by re-running its
+        // initialization: an R220 reports BUSY, then WAITING, and its real
+        // state (INK OUT) only ~38 s later, with the active error missing from
+        // every report until then. Earlier builds sent the handshake in the
+        // same millisecond as the reset, and reset again on every reopen,
+        // restarting that initialization each time. So: reset once, on a
+        // handle of its own, then poll '@BDC ST2' on fresh sessions until the
+        // printer reports a resting state.
+        void SoftResetAndSettle(UsbBackend& backend, const UsbCandidate& cand,
+                                const ExecutorOptions& options, std::ostream& trace)
+        {
+            if (!backend.Open(cand.ordinal))
+                return;
+
+            bool reset = false;
+            {
+                ScopedBackendClose closeGuard(backend);
+                reset = backend.SoftReset();
+            }
+
+            if (!reset)
+                return;
+
+            const int limitMs = usb_timing::kSoftResetSettleTimeoutMs;
+            log::Log(log::Level::Info, log::Stage::Detect, "usb.soft_reset_wait",
+                     "[i] USB soft reset sent. Waiting for the printer to finish initializing (up to "
+                         + std::to_string(limitMs / 1000) + " s)...");
+
+            // Trace only: finding the printer mid-initialization is the
+            // expected answer here, not something to show the user.
+            log::Reporter pollReporter;
+            pollReporter.AddSink(log::OStreamSink(trace, log::Level::Trace));
+
+            // ST2 is generated, not replayed, so the session core is safe
+            // even on a replay run.
+            ExecutorOptions pollOptions = options;
+            pollOptions.useSessionLayer = true;
+
+            const auto start = std::chrono::steady_clock::now();
+            for (int poll = 1;; ++poll)
+            {
+                PrinterStatus status;
+                if (ITransport* transport = backend.Open(cand.ordinal))
+                {
+                    ScopedBackendClose closeGuard(backend);
+                    const QuerySessionResult result = ExecuteQuerySession(*transport,
+                        UniversalGenerator::GenerateHandshake(),
+                        { UniversalGenerator::GenerateStatusQueryPacket() },
+                        pollReporter, pollOptions);
+
+                    if (!result.replies.empty())
+                        status = ParseStatusReply(result.replies[0]);
+                }
+
+                const long long elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+
+                trace << "[RESET] Settle poll " << poll << " at +" << elapsedMs << " ms: "
+                      << (status.valid ? status.stateName : std::string("no status reply"))
+                      << (status.hasError ? " / " + status.errorName : std::string()) << "\n";
+
+                if (IsRestingState(status))
+                {
+                    log::Log(log::Level::Info, log::Stage::Detect, "usb.soft_reset_settled",
+                             "[i] Printer finished initializing after " + std::to_string(elapsedMs / 1000) + " s.");
+                    return;
+                }
+
+                if (elapsedMs >= limitMs)
+                {
+                    log::Log(log::Level::Warning, log::Stage::Detect, "usb.soft_reset_settle_timeout",
+                             "[!] The printer was still initializing after " + std::to_string(limitMs / 1000)
+                                 + " s. Continuing, but its status report may not show an active error yet.");
+                    return;
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(usb_timing::kSoftResetPollIntervalMs));
+            }
         }
 
     } // namespace
@@ -387,6 +480,9 @@ namespace ewr {
 
             WriteSelectionDecision(trace, *backend, cand, idx, candidates.size());
 
+            if (options.usbSoftReset)
+                SoftResetAndSettle(*backend, cand, options, trace);
+
             // A silent handshake is never repaired on a live handle: the retry
             // is a brand-new session that inherits nothing from the failed one.
             ExecutionResult result;
@@ -398,7 +494,7 @@ namespace ewr {
                       << ", attempt " << (attempt + 1) << " of " << attempts
                       << ": starting a fresh session.\n";
 
-                ITransport* transport = backend->Open(cand.ordinal, options.usbSoftResetOnOpen);
+                ITransport* transport = backend->Open(cand.ordinal);
                 if (!transport)
                     break;
 
@@ -434,7 +530,7 @@ namespace ewr {
                     break;
 
                 if (attempt + 1 < attempts)
-                    trace << "[!] Handshake silent - retrying this interface with a brand-new session (fresh open + session-start reset).\n";
+                    trace << "[!] Handshake silent - retrying this interface with a brand-new session (fresh open).\n";
             }
 
             if (!opened)
@@ -544,6 +640,9 @@ namespace ewr {
 
             WriteSelectionDecision(trace, *backend, cand, idx, candidates.size());
 
+            if (options.usbSoftReset)
+                SoftResetAndSettle(*backend, cand, options, trace);
+
             QuerySessionResult result;
             bool opened = false;
             const int attempts = backend->AttemptsPerCandidate(cand.ordinal);
@@ -553,7 +652,7 @@ namespace ewr {
                       << ", attempt " << (attempt + 1) << " of " << attempts
                       << ": starting a fresh session.\n";
 
-                ITransport* transport = backend->Open(cand.ordinal, options.usbSoftResetOnOpen);
+                ITransport* transport = backend->Open(cand.ordinal);
                 if (!transport)
                     break;
 
@@ -585,7 +684,7 @@ namespace ewr {
                     break;
 
                 if (attempt + 1 < attempts)
-                    trace << "[!] Handshake silent - retrying this interface with a brand-new session (fresh open + session-start reset).\n";
+                    trace << "[!] Handshake silent - retrying this interface with a brand-new session (fresh open).\n";
             }
 
             if (!opened)

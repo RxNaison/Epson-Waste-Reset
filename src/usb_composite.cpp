@@ -118,7 +118,7 @@ namespace ewr {
                      + members_[slot.member].backend->Describe(slot.local);
             }
 
-            ITransport* Open(std::size_t ordinal, bool softReset) override
+            ITransport* Open(std::size_t ordinal) override
             {
                 if (ordinal >= slots_.size())
                     return nullptr;
@@ -126,13 +126,18 @@ namespace ewr {
                 // Before the open, not after: a failure still has to route
                 // Close() and the diagnosis to the transport that tried.
                 activeMember_ = slots_[ordinal].member;
-                return members_[activeMember_].backend->Open(slots_[ordinal].local, softReset);
+                return members_[activeMember_].backend->Open(slots_[ordinal].local);
             }
 
             void Close() override
             {
                 if (activeMember_ < members_.size())
                     members_[activeMember_].backend->Close();
+            }
+
+            bool SoftReset() override
+            {
+                return activeMember_ < members_.size() && members_[activeMember_].backend->SoftReset();
             }
 
             int AttemptsPerCandidate(std::size_t ordinal) const override

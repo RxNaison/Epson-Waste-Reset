@@ -57,7 +57,7 @@ struct CliOptions
     bool forceYes = false;       // --force-yes: also overrule the gates that would stop it
     bool cartridge = false;      // --cartridge: reset ink levels instead of the waste pads
     int interfaceCandidate = 0;  // --interface <n>: 1-based pin, 0 = auto
-    bool usbSoftReset = false;   // --usb-soft-reset: clear the channel on every open
+    bool usbSoftReset = false;   // --usb-soft-reset: reset the USB channel once, then wait
     std::string modelOverride;   // --model <name>: skip the menu
 };
 
@@ -144,9 +144,10 @@ static void PrintUsage()
               << "  --no-update      Fully offline run: no update check, no download, no\n"
               << "                   staged swap on exit. For testing local database edits\n"
               << "                   (custom addresses, new models) before a pull request.\n"
-              << "  --usb-soft-reset Clear the USB channel on every session open (Windows\n"
-              << "                   only). Off by default: on ET-2xxx units it stalls the\n"
-              << "                   next write. Diagnostic switch for hardware testing.\n"
+              << "  --usb-soft-reset Reset the USB channel once, before the run's first\n"
+              << "                   session, then wait (up to 90 s) for the printer to\n"
+              << "                   finish the re-initialization it starts (Windows only).\n"
+              << "                   Diagnostic switch for hardware testing.\n"
               << "  --find-addresses Find the waste counters on a model the database has no\n"
               << "                   addresses for. Reads the EEPROM three times and asks you\n"
               << "                   to run a head cleaning between reads; the bytes that rise\n"
@@ -389,9 +390,14 @@ static std::string WriteEepromDump(const ewr::DbPrinterModel& model,
     if (!out)
         return "";
 
+    size_t answered = 0;
+    for (const auto& v : values)
+        answered += (v.second >= 0) ? 1 : 0;
+
     out << "# EWR EEPROM dump\n";
     out << "# model: " << model.name << "\n";
-    out << "# address,value,note ('--' = no reply)\n";
+    out << "# answered: " << answered << " of " << values.size() << "\n";
+    out << "# address,value,note ('--' = no reply: unknown, not unchanged)\n";
     for (const auto& v : values)
     {
         char line[24];
@@ -1064,10 +1070,11 @@ int main(int argc, char* argv[])
     }
 
     // One object for every device session this run, so the --interface pin
-    // and the soft-reset switch reach queries, writes and replays alike.
+    // and the soft-reset switch reach queries, writes and replays alike. The
+    // gateway spends the soft reset on the first of them.
     ewr::ExecutorOptions sessionOptions = ewr::DefaultQueryOptions();
     sessionOptions.interfaceCandidate = cli.interfaceCandidate;
-    sessionOptions.usbSoftResetOnOpen = cli.usbSoftReset;
+    sessionOptions.usbSoftReset = cli.usbSoftReset;
 
     if (statusOnly)
     {
@@ -1145,6 +1152,23 @@ int main(int argc, char* argv[])
         if (path.empty())
         {
             std::cerr << "[ERROR] Read the EEPROM, but could not write the dump file." << std::endl;
+            return FinishRun(1);
+        }
+
+        // A diff reads '--' on both sides as "unchanged" when it means
+        // "unknown", so a short dump must not look like a backup (#39).
+        if (answered < state.values.size())
+        {
+            std::cerr << "\n[ERROR] Incomplete dump: the printer answered " << answered << " of "
+                      << state.values.size() << " EEPROM byte(s). Saved to " << path << ",\n"
+                      << "        but it is NOT a backup and must not be diffed: a '--' line is a\n"
+                      << "        byte that was never read, not one that did not change." << std::endl;
+            if (answered == 0)
+                std::cerr << "        No byte answered at all: the read key is likely wrong for this\n"
+                             "        printer - try a sibling model from the same line." << std::endl;
+            else
+                std::cerr << "        Run --dump again; if it comes back short twice, power-cycle the\n"
+                             "        printer first. See ewr_trace.log for the hardware trace." << std::endl;
             return FinishRun(1);
         }
 
@@ -1418,7 +1442,7 @@ int main(int argc, char* argv[])
         replayOptions.verifyWrites = false;
         replayOptions.useSessionLayer = false;
         replayOptions.interfaceCandidate = cli.interfaceCandidate;
-        replayOptions.usbSoftResetOnOpen = cli.usbSoftReset;
+        replayOptions.usbSoftReset = cli.usbSoftReset;
 
         const ewr::ResetRunResult run = gateway.RunReset(executionSequence, replayOptions);
 

@@ -4567,13 +4567,19 @@ public:
         return name_ + " candidate " + std::to_string(ordinal);
     }
 
-    ewr::ITransport* Open(std::size_t ordinal, bool) override
+    ewr::ITransport* Open(std::size_t ordinal) override
     {
         opened.push_back(ordinal);
         return openSucceeds ? &transport : nullptr;
     }
 
     void Close() override { ++closes; }
+
+    bool SoftReset() override
+    {
+        ++softResets;
+        return softResetSucceeds;
+    }
 
     int AttemptsPerCandidate(std::size_t ordinal) const override
     {
@@ -4590,9 +4596,11 @@ public:
     FakeTransport transport;
     std::vector<std::size_t> opened;
     int closes = 0;
+    int softResets = 0;
     int enumerations = 0;
     int attemptsBase = 1;
     bool openSucceeds = true;
+    bool softResetSucceeds = true;
 
 private:
     std::string name_;
@@ -4745,23 +4753,30 @@ void test_composite_routes_every_call_to_the_owning_member()
     CHECK(composite->AttemptsPerCandidate(2) == 1); // 1 + local ordinal 0
     CHECK(composite->AttemptsPerCandidate(1) == 3); // 2 + local ordinal 1
 
-    CHECK(composite->Open(3, false) == &secondaryRaw->transport);
+    CHECK(composite->Open(3) == &secondaryRaw->transport);
     CHECK(secondaryRaw->opened == std::vector<std::size_t>{ 1 });
     CHECK(primaryRaw->opened.empty());
+
+    // The reset goes to the transport holding the handle, and its "nothing
+    // was reset" answer comes back unchanged.
+    secondaryRaw->softResetSucceeds = false;
+    CHECK(!composite->SoftReset());
+    CHECK(secondaryRaw->softResets == 1);
+    CHECK(primaryRaw->softResets == 0);
 
     composite->Close();
     CHECK(secondaryRaw->closes == 1);
     CHECK(primaryRaw->closes == 0);
 
     // Refused, not routed to member zero.
-    CHECK(composite->Open(99, false) == nullptr);
+    CHECK(composite->Open(99) == nullptr);
     CHECK(composite->Describe(99) == "<invalid candidate>");
     CHECK(composite->QueryDeviceId(99).empty());
     CHECK(secondaryRaw->opened.size() == 1);
 
     // A failed open still leaves the diagnosis with the transport that tried.
     secondaryRaw->openSucceeds = false;
-    CHECK(composite->Open(2, false) == nullptr);
+    CHECK(composite->Open(2) == nullptr);
     CHECK(composite->DescribeOpenFailure(true) == "libusb could not open.");
 }
 

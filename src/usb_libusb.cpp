@@ -395,9 +395,7 @@ namespace ewr {
                 return text.str();
             }
 
-            // softReset is a usbprint.sys concept; claiming the interface
-            // already gives libusb an exclusive, clean pipe.
-            ITransport* Open(std::size_t ordinal, bool /*softReset*/) override
+            ITransport* Open(std::size_t ordinal) override
             {
                 if (ordinal >= candidates_.size())
                     return nullptr;
@@ -416,6 +414,14 @@ namespace ewr {
             {
                 transport_.reset();
                 CloseCandidate(open_);
+            }
+
+            // The soft reset is a usbprint.sys concept; claiming the interface
+            // already gives libusb an exclusive, clean pipe.
+            bool SoftReset() override
+            {
+                trace_ << "[i] Soft reset skipped: libusb claims the interface exclusively, there is no usbprint.sys channel to clear.\n";
+                return false;
             }
 
             // libusb reads block properly, so a silent handshake here means

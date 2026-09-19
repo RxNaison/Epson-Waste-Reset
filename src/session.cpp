@@ -117,19 +117,28 @@ namespace ewr {
         return ListPrinterInterfaces(NextCallAppends());
     }
 
+    ExecutorOptions UsbDeviceGateway::SoftResetOnce(ExecutorOptions options)
+    {
+        if (m_softResetSent)
+            options.usbSoftReset = false;
+
+        m_softResetSent = m_softResetSent || options.usbSoftReset;
+        return options;
+    }
+
     QueryRunResult UsbDeviceGateway::RunQuery(
         const std::vector<std::vector<unsigned char>>& handshake,
         const std::vector<std::vector<unsigned char>>& queries,
         const ExecutorOptions& options)
     {
-        return ExecuteQuerySessionWithFallback(handshake, queries, options, NextCallAppends());
+        return ExecuteQuerySessionWithFallback(handshake, queries, SoftResetOnce(options), NextCallAppends());
     }
 
     ResetRunResult UsbDeviceGateway::RunReset(
         const std::vector<std::vector<unsigned char>>& sequence,
         const ExecutorOptions& options)
     {
-        return ExecutePayloadSequenceWithFallback(sequence, options, NextCallAppends());
+        return ExecutePayloadSequenceWithFallback(sequence, SoftResetOnce(options), NextCallAppends());
     }
 
     // ------------------------------------------------------------------

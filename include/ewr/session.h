@@ -110,6 +110,8 @@ namespace ewr {
 
     // The first device call of a run starts ewr_trace.log fresh and every
     // later one appends, so a program run yields one coherent trace file.
+    // The --usb-soft-reset switch follows the same lifecycle: only the first
+    // session that asks for it gets it.
     class UsbDeviceGateway final : public IDeviceGateway
     {
     public:
@@ -132,7 +134,13 @@ namespace ewr {
         // False exactly once: the call that must start the trace file fresh.
         bool NextCallAppends();
 
+        // A soft reset re-initializes the printer. Between the preflight read
+        // and the writes, or the writes and the read-back, that would reset
+        // the very state the run just read or wrote.
+        ExecutorOptions SoftResetOnce(ExecutorOptions options);
+
         bool m_traceStarted = false;
+        bool m_softResetSent = false;
     };
 
     // Read-only session defaults: the IEEE 1284.4 session core is the

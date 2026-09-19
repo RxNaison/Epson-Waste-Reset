@@ -57,7 +57,7 @@ Running with no options is the supported path. These exist for diagnosis and for
 | `--force-yes` | `--yes`, and overrule the gates that would stop it: a model mismatch, a printer error, a database conflict. Last resort. |
 | `--cartridge`, `-c` | Reset the cartridge ink levels instead of the waste ink pads, on models that carry a per-color ink map. |
 | `--no-update` | Fully offline: no update check, no download, no staged swap on exit. Use it while editing `database.json`. |
-| `--usb-soft-reset` | Diagnostic only, Windows. Off by default because it stalls the next write on ET-2xxx units. |
+| `--usb-soft-reset` | Diagnostic only, Windows. Resets the USB channel once at the start of the run, then waits (up to 90 s) for the printer to finish the re-initialization the reset starts. |
 | `--help`, `-h` | The same list, from the binary. |
 
 ### Unattended runs: `--yes`
@@ -190,7 +190,7 @@ ewr --model L3150 --dump --no-update
 diff ewr_dump_L3150_1736900000.txt ewr_dump_L3150_1736903600.txt
 ```
 
-If every value comes back as `--`, the read key is wrong for your printer - try a different sibling from the same model line.
+A `--` is a byte the printer never answered: unknown, not unchanged, so a diff that lines up two of them is not telling you anything. A dump with any `--` is reported as incomplete and exits `1` instead of `0`; run it again rather than keeping it as a backup. If every value comes back as `--`, the read key is wrong for your printer - try a different sibling from the same model line.
 
 Mind the mirror trap: a byte that returns to its old value by itself after a power cycle is being rewritten by the firmware from the cartridge chip. That level lives on the chip and cannot be reset from the PC.
 

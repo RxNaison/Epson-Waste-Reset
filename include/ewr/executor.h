@@ -54,10 +54,11 @@ namespace ewr {
         // shows). Disables the automatic fallback. <= 0 means automatic.
         int interfaceCandidate = 0;
 
-        // --usb-soft-reset (Windows: IOCTL_USBPRINT_SOFT_RESET). Off by
-        // default: on ET-2xxx units the reset stalls the next bulk-OUT write
-        // and the stall survives close/reopen. A switch so testers can A/B it.
-        bool usbSoftResetOnOpen = false;
+        // --usb-soft-reset (Windows: IOCTL_USBPRINT_SOFT_RESET), once per
+        // candidate before its first session, followed by a wait until the
+        // printer has re-initialized. UsbDeviceGateway forwards it to the
+        // run's first device session only. A diagnostic switch, off by default.
+        bool usbSoftReset = false;
 
         // Some models carry a second write keyword ('wkey1'). ':42:NG;' means
         // the keyword did not match, so the executor retries that one write

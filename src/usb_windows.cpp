@@ -549,16 +549,15 @@ namespace ewr {
             return id;
         }
 
-        // Opt-in (--usb-soft-reset): on ET-2xxx units this reset leaves the
-        // bulk-OUT pipe unable to accept a write, and the stall outlives the
-        // handle. A failure is logged but never aborts the attempt - the
-        // handshake renders the verdict either way.
-        void SoftResetOnOpen(HANDLE hPrinter, const DeviceCandidate& cand, std::ostream& trace)
+        // Opt-in (--usb-soft-reset). The request itself completes at once;
+        // what it starts in the printer does not - see SoftResetAndSettle in
+        // usb_driver.cpp.
+        bool SoftResetHandle(HANDLE hPrinter, const DeviceCandidate& cand, std::ostream& trace)
         {
             if (cand.className != "USBPRINT")
             {
-                trace << "[i] Session-start soft reset skipped: class " << cand.className << " is not driven by usbprint.sys.\n";
-                return;
+                trace << "[i] Soft reset skipped: class " << cand.className << " is not driven by usbprint.sys.\n";
+                return false;
             }
 
             const ULONGLONG start = GetTickCount64();
@@ -568,8 +567,8 @@ namespace ewr {
             ov.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
             if (!ov.hEvent)
             {
-                trace << "[!] Session-start soft reset: CreateEvent failed. " << GetWindowsErrorString(GetLastError()) << "\n";
-                return;
+                trace << "[!] Soft reset: CreateEvent failed. " << GetWindowsErrorString(GetLastError()) << "\n";
+                return false;
             }
 
             unsigned char outBuffer[1024] = { 0 };
@@ -599,16 +598,16 @@ namespace ewr {
 
             if (ok)
             {
-                trace << "[RESET] Session-start USB pipe soft reset OK (" << mode << ", "
-                      << (GetTickCount64() - start) << " ms, " << bytes
-                      << " bytes returned). Building the D4 session on a clean channel.\n";
+                trace << "[RESET] USB soft reset OK (" << mode << ", "
+                      << (GetTickCount64() - start) << " ms, " << bytes << " bytes returned).\n";
             }
             else
             {
-                trace << "[!] Session-start USB pipe soft reset FAILED (" << mode << ", "
-                      << (GetTickCount64() - start) << " ms). " << GetWindowsErrorString(lastError)
-                      << " Continuing anyway.\n";
+                trace << "[!] USB soft reset FAILED (" << mode << ", "
+                      << (GetTickCount64() - start) << " ms). " << GetWindowsErrorString(lastError) << "\n";
             }
+
+            return ok != FALSE;
         }
 
         class WindowsUsbBackend final : public UsbBackend
@@ -645,7 +644,7 @@ namespace ewr {
                 return (ordinal < candidates_.size()) ? DescribeCandidate(candidates_[ordinal]) : std::string("<invalid candidate>");
             }
 
-            ITransport* Open(std::size_t ordinal, bool softReset) override
+            ITransport* Open(std::size_t ordinal) override
             {
                 if (ordinal >= candidates_.size())
                     return nullptr;
@@ -671,9 +670,7 @@ namespace ewr {
                 trace_ << "[SUCCESS] Hardware lock acquired successfully (open #" << openCount_
                        << ", flags OVERLAPPED|WRITE_THROUGH, " << (GetTickCount64() - start) << " ms).\n";
 
-                if (softReset)
-                    SoftResetOnOpen(handle, candidates_[ordinal], trace_);
-
+                openOrdinal_ = ordinal;
                 handle_ = handle;
                 transport_ = std::make_unique<WindowsUsbTransport>(handle_, trace_);
                 return transport_.get();
@@ -688,6 +685,14 @@ namespace ewr {
                 CloseHandle(handle_);
                 handle_ = INVALID_HANDLE_VALUE;
                 trace_ << "[SUCCESS] Hardware lock released via CloseHandle.\n";
+            }
+
+            bool SoftReset() override
+            {
+                if (handle_ == INVALID_HANDLE_VALUE || openOrdinal_ >= candidates_.size())
+                    return false;
+
+                return SoftResetHandle(handle_, candidates_[openOrdinal_], trace_);
             }
 
             // A silent handshake earns one more session on a fresh handle
@@ -736,6 +741,7 @@ namespace ewr {
             std::string initError_;
             std::vector<DeviceCandidate> candidates_;
             HANDLE handle_ = INVALID_HANDLE_VALUE;
+            std::size_t openOrdinal_ = 0;
             std::unique_ptr<WindowsUsbTransport> transport_;
             DWORD lastOpenError_ = ERROR_SUCCESS;
             unsigned openCount_ = 0;

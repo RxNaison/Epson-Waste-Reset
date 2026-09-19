@@ -48,14 +48,16 @@ namespace ewr {
 
         // Opens candidate `ordinal` and returns its transport, or nullptr
         // after tracing the failure. The transport stays valid until Close().
-        //
-        // softReset asks the backend to clear the channel on the fresh handle
-        // before any handshake byte (Windows: IOCTL_USBPRINT_SOFT_RESET). It
-        // is off by default: on ET-2xxx units the reset leaves the bulk-OUT
-        // pipe unable to accept a write, and the stall outlives the handle.
-        virtual ITransport* Open(std::size_t ordinal, bool softReset) = 0;
+        virtual ITransport* Open(std::size_t ordinal) = 0;
 
         virtual void Close() = 0;
+
+        // USB printer-class SOFT_RESET on the open interface (Windows:
+        // IOCTL_USBPRINT_SOFT_RESET). The printer answers it by re-running
+        // its own initialization, so the driver waits that out before the
+        // next session. False when nothing was reset: this candidate's driver
+        // has no such request, or it failed.
+        virtual bool SoftReset() = 0;
 
         // Full sessions (Open -> handshake -> Close) on candidate `ordinal`
         // before the driver falls through to the next. usbprint: 2, libusb: 1,

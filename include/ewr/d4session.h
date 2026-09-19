@@ -69,6 +69,8 @@ namespace ewr {
 
         bool HasBufferedData() const { return !m_buffer.empty(); }
 
+        void DiscardBuffered() { m_buffer.clear(); }
+
         // Sticky for the life of the framer: the resync below would otherwise
         // discard the status line as unframed junk before anyone saw it.
         bool SawHttpReply() const { return m_sawHttpReply; }
@@ -91,6 +93,10 @@ namespace ewr {
         int fragmentTimeoutMs = 250;
         // Bounds a firmware that never sets end-of-message.
         int maxReplyFragments = 16;
+        // How long a fresh session waits, after granting its first credit,
+        // for a reply held over from an earlier one. Such a reply comes in the
+        // same burst as the credit acknowledgement.
+        int heldReplyWindowMs = 250;
         std::string serviceName = "EPSON-CTRL";
     };
 
@@ -113,6 +119,12 @@ namespace ewr {
         // Best-effort CloseChannel + Exit. Idempotent, and inert on a session
         // that never started, so it is safe to call from a scope guard.
         void Close();
+        // Close, forget every credit count, Start again. The only repair for
+        // an exchange that drew no reply: the printer may have spent its
+        // credit on a reply that never arrived (another process reading the
+        // shared usbprint handle takes it), and then neither side will grant
+        // the other more. Only a fresh Init resets both books.
+        bool Restart();
 
         bool ChannelOpen() const { return m_channelOpen; }
         uint8_t Socket() const { return m_socket; }
@@ -134,6 +146,7 @@ namespace ewr {
         void Absorb(const D4Packet& pkt);
         bool EnsureSendCredit(int timeoutMs);
         bool EnsurePrinterCredit();
+        void DiscardHeldReplies();
         bool Fail(const std::string& error);
 
         ITransport& m_transport;

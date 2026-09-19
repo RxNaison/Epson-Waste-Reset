@@ -2468,6 +2468,279 @@ void test_d4_sequence_write_verified()
     CHECK(result.error.empty());
 }
 
+// A D4 printer that keeps real credit books on both sides (issue #39). A reply
+// goes out only against credit the host granted, a data packet is accepted
+// only against credit the printer granted, and Init resets both - so a reply
+// that vanishes on the way, the way one does when another process reads the
+// shared usbprint handle first, leaves the books as wrong as on hardware.
+// Like an R220, Init does not drop a reply still waiting for credit: the next
+// session that grants some gets it.
+class CreditBookPrinter
+{
+public:
+    // A reply left over from an earlier session, waiting for credit.
+    void HoldOver(std::vector<unsigned char> reply) { held_.push_back(std::move(reply)); }
+
+    std::function<std::vector<unsigned char>(const std::vector<unsigned char>&)> answer;
+    // 1-based counts of data replies / credit-request replies that the
+    // printer sends but the host never receives.
+    std::vector<int> lostDataReplies;
+    std::vector<int> lostCreditReplies;
+    // After this many data replies the printer never answers data again,
+    // not even on a fresh session. 0 = never.
+    int silentAfter = 0;
+
+    int inits = 0;
+    int dataReplies = 0;
+    int creditReplies = 0;
+
+    std::vector<unsigned char> operator()(const std::vector<unsigned char>& sent)
+    {
+        if (sent.size() < 7)
+            return {};
+
+        if (sent[0] == 0x00 && sent[1] == 0x00 && sent[6] == '@')
+            return D4Frame(0x00, 0x00, { 0xC5, 0x00 }, 0x01);
+
+        if (sent[0] == 0x00 && sent[1] == 0x00)
+        {
+            switch (sent[6])
+            {
+                case 0x00:
+                    ++inits;
+                    printerCredit_ = 0;
+                    hostCredit_ = 0;
+                    return D4Frame(0x00, 0x00, { 0x80, 0x00, 0x10 }, 0x01);
+                case 0x09: return D4Frame(0x00, 0x00, { 0x89, 0x00, 0x02 }, 0x01);
+                case 0x01:
+                    return D4Frame(0x00, 0x00, { 0x81, 0x00, 0x02, 0x02, 0x00, 0x40, 0x01, 0x00, 0x00, 0x00 }, 0x01);
+                case 0x03:
+                {
+                    printerCredit_ += (sent.size() >= 11) ? ((sent[9] << 8) | sent[10]) : 0;
+                    std::vector<unsigned char> out = D4Frame(0x00, 0x00, { 0x83, 0x00, 0x02, 0x02 }, 0x01);
+                    SendHeld(out);
+                    return out;
+                }
+                case 0x04:
+                {
+                    // The host asks with a maximum outstanding credit of one.
+                    const unsigned char granted = (hostCredit_ < 1) ? 1 : 0;
+                    hostCredit_ += granted;
+                    ++creditReplies;
+                    if (Contains(lostCreditReplies, creditReplies))
+                        return {};
+                    return D4Frame(0x00, 0x00, { 0x84, 0x00, 0x02, 0x02, 0x00, granted }, 0x01);
+                }
+                case 0x02: return D4Frame(0x00, 0x00, { 0x82, 0x00, 0x02, 0x02 }, 0x01);
+                case 0x08: return D4Frame(0x00, 0x00, { 0x88, 0x00 }, 0x01);
+                default:   return {};
+            }
+        }
+
+        if (hostCredit_ <= 0)
+            return {};
+        --hostCredit_;
+
+        if (silentAfter > 0 && dataReplies >= silentAfter)
+            return {};
+
+        held_.push_back(answer(sent));
+        std::vector<unsigned char> out;
+        SendHeld(out);
+        return out;
+    }
+
+private:
+    static bool Contains(const std::vector<int>& list, int n)
+    {
+        return std::find(list.begin(), list.end(), n) != list.end();
+    }
+
+    void SendHeld(std::vector<unsigned char>& out)
+    {
+        while (!held_.empty() && printerCredit_ > 0)
+        {
+            --printerCredit_;
+            ++dataReplies;
+            if (!Contains(lostDataReplies, dataReplies))
+                out.insert(out.end(), held_.front().begin(), held_.front().end());
+            held_.erase(held_.begin());
+        }
+    }
+
+    int printerCredit_ = 0; // granted by the host, spent on replies
+    int hostCredit_ = 0;    // granted to the host, spent on its data
+    std::vector<std::vector<unsigned char>> held_;
+};
+
+// Reads of 0x10..0x15 on a 1-byte-address model, each answered with its own
+// address echoed and value 0x40 + address.
+static std::vector<std::vector<unsigned char>> LostReplyQueries()
+{
+    std::vector<std::vector<unsigned char>> queries;
+    for (uint8_t addr = 0x10; addr <= 0x15; ++addr)
+        queries.push_back(ewr::UniversalGenerator::GenerateReadPacket(0x0008, addr, 1));
+    return queries;
+}
+
+static std::vector<unsigned char> EchoReadReply(const std::vector<unsigned char>& sent)
+{
+    const uint8_t addr = sent.back();
+    return MakeEepromReadReplyEE(addr, static_cast<uint8_t>(0x40 + addr));
+}
+
+static ewr::ExecutorOptions LostReplyOptions()
+{
+    ewr::ExecutorOptions options = FastOptions();
+    options.useSessionLayer = true;
+    options.handshakeDrainTimeoutMs = 40;
+    options.writeAckTimeoutMs = 20;
+    return options;
+}
+
+static int CountAnsweredReads(const ewr::QuerySessionResult& result)
+{
+    int answered = 0;
+    for (size_t i = 0; i < result.replies.size(); ++i)
+    {
+        uint8_t value = 0;
+        const int addr = 0x10 + static_cast<int>(i);
+        if (ewr::ParseEepromReadReply(result.replies[i], value, addr) && value == 0x40 + addr)
+            ++answered;
+    }
+    return answered;
+}
+
+// One lost reply used to end every read after it: the host still counted the
+// credit the printer had spent on it and never granted another, so the printer
+// could not answer again. That is the contiguous-then-'--' dump of issue #39.
+void test_d4_query_session_survives_a_lost_reply()
+{
+    std::cout << "[TEST] test_d4_query_session_survives_a_lost_reply" << std::endl;
+
+    CreditBookPrinter printer;
+    printer.answer = EchoReadReply;
+    printer.lostDataReplies = { 3 };
+
+    FakeTransport t;
+    t.replyFor = std::ref(printer);
+
+    ewr::log::Reporter reporter;
+    const ewr::QuerySessionResult result =
+        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, LostReplyOptions());
+
+    CHECK(result.success);
+    CHECK(result.replies.size() == 6);
+    CHECK(CountAnsweredReads(result) == 6);
+    CHECK(printer.inits == 2); // the lost reply cost one fresh session, no more
+}
+
+// The trace in issue #39 itself: credit-request replies lost as well, after
+// which the printer answered every request with zero credit - it counted the
+// host as already holding the credit it had granted.
+void test_d4_query_session_survives_a_lost_credit_reply()
+{
+    std::cout << "[TEST] test_d4_query_session_survives_a_lost_credit_reply" << std::endl;
+
+    CreditBookPrinter printer;
+    printer.answer = EchoReadReply;
+    printer.lostCreditReplies = { 3 };
+
+    FakeTransport t;
+    t.replyFor = std::ref(printer);
+
+    ewr::log::Reporter reporter;
+    const ewr::QuerySessionResult result =
+        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, LostReplyOptions());
+
+    CHECK(result.success);
+    CHECK(CountAnsweredReads(result) == 6);
+    CHECK(printer.inits == 2);
+}
+
+// A printer that stays silent even on a fresh session has not lost a reply, it
+// has stopped answering. The run ends there instead of spending three sessions
+// on every address left, and the replies stay one-for-one with the queries.
+void test_d4_query_session_stops_when_a_fresh_session_stays_silent()
+{
+    std::cout << "[TEST] test_d4_query_session_stops_when_a_fresh_session_stays_silent" << std::endl;
+
+    CreditBookPrinter printer;
+    printer.answer = EchoReadReply;
+    printer.silentAfter = 2;
+
+    FakeTransport t;
+    t.replyFor = std::ref(printer);
+
+    ewr::log::Reporter reporter;
+    const ewr::QuerySessionResult result =
+        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, LostReplyOptions());
+
+    CHECK(!result.success);
+    CHECK(!result.error.empty());
+    CHECK(result.replies.size() == 6);
+    CHECK(CountAnsweredReads(result) == 2);
+    for (size_t i = 2; i < result.replies.size(); ++i)
+        CHECK(result.replies[i].empty());
+
+    // Nothing was asked past the address that went silent.
+    int laterReads = 0;
+    for (const auto& sent : t.sent)
+    {
+        if (sent.size() > 7 && sent[0] == 0x02 && sent[6] == 0x7c && sent.back() > 0x12)
+            ++laterReads;
+    }
+    CHECK(laterReads == 0);
+}
+
+// A reply held over from an earlier session - a deadlocked one, or a killed
+// run - used to answer the next session's first query and shift every answer
+// after it by one, which the address echo then rejected as '--'.
+void test_d4_session_discards_replies_held_from_an_earlier_session()
+{
+    std::cout << "[TEST] test_d4_session_discards_replies_held_from_an_earlier_session" << std::endl;
+
+    CreditBookPrinter printer;
+    printer.answer = EchoReadReply;
+    printer.HoldOver(MakeEepromReadReplyEE(0x2B, 0x00));
+    printer.HoldOver(MakeEepromReadReplyEE(0x3E, 0x00));
+
+    FakeTransport t;
+    t.replyFor = std::ref(printer);
+
+    ewr::log::Reporter reporter;
+    const ewr::QuerySessionResult result =
+        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, LostReplyOptions());
+
+    CHECK(result.success);
+    CHECK(CountAnsweredReads(result) == 6);
+    CHECK(printer.inits == 1);
+}
+
+// The same loss on a write acknowledgement. A write is idempotent, so it is
+// sent again on the fresh session and every write still ends up verified.
+void test_d4_sequence_survives_a_lost_write_ack()
+{
+    std::cout << "[TEST] test_d4_sequence_survives_a_lost_write_ack" << std::endl;
+
+    CreditBookPrinter printer;
+    printer.answer = [](const std::vector<unsigned char>&) { return OkAck(); };
+    printer.lostDataReplies = { 1 };
+
+    FakeTransport t;
+    t.replyFor = std::ref(printer);
+
+    std::ofstream log = NullLog();
+    std::ostringstream out;
+    const ewr::ExecutionResult result =
+        ewr::ExecuteSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, LostReplyOptions());
+
+    CHECK(result.success);
+    CHECK(result.writesTotal == 2);
+    CHECK(result.writesVerified == 2);
+    CHECK(printer.inits == 2);
+}
+
 void test_d4_sequence_na_fails_fast()
 {
     std::cout << "[TEST] test_d4_sequence_na_fails_fast" << std::endl;
@@ -2703,8 +2976,9 @@ void test_d4_short_reply_costs_no_extra_round_trip()
         CHECK(session.Exchange({ 's', 't' }, reply));
         CHECK(reply.size() == 7);
 
-        // Credit grant, credit request, the data packet - and nothing more.
-        CHECK(t.sent.size() - afterStart == 3);
+        // The credit grant already went out in Start (DiscardHeldReplies):
+        // the credit request, the data packet - and nothing more.
+        CHECK(t.sent.size() - afterStart == 2);
 
         session.Close();
     }
@@ -5249,6 +5523,11 @@ int main()
     test_d4_session_credit_gating_and_chunking();
     test_d4_query_session_layer();
     test_d4_sequence_write_verified();
+    test_d4_query_session_survives_a_lost_reply();
+    test_d4_query_session_survives_a_lost_credit_reply();
+    test_d4_query_session_stops_when_a_fresh_session_stays_silent();
+    test_d4_session_discards_replies_held_from_an_earlier_session();
+    test_d4_sequence_survives_a_lost_write_ack();
     test_d4_sequence_na_fails_fast();
     test_d4_recovery_channel_wraps_writes();
     test_d4_recovery_absent_is_silent();

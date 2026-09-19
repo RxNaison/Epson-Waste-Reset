@@ -456,8 +456,62 @@ namespace ewr {
                   + " to host, initial send credit " + std::to_string(m_sendCredit));
         }
 
+        // Data set aside before the channel opened answers nothing this session
+        // asked: a late reply to an earlier session, or to a killed run.
+        m_pendingData.clear();
+
         m_started = true;
+
+        DiscardHeldReplies();
         return true;
+    }
+
+    // A printer that could not send a reply keeps it - through CloseChannel,
+    // Exit and Init alike, on an R220 - and hands it over the moment any later
+    // session grants credit, where it would pass for the answer to that
+    // session's first query and shift every answer after it by one. Nothing
+    // has been asked yet, so whatever arrives now is such a leftover. With
+    // nothing held, the credit granted here simply buys the first real reply.
+    void D4Session::DiscardHeldReplies()
+    {
+        constexpr int kMaxHeldReplies = 32;
+
+        for (int discarded = 0; discarded < kMaxHeldReplies; ++discarded)
+        {
+            // Best-effort: the first exchange asks for the same credit and
+            // fails on its own if the printer really will not grant it.
+            if (!EnsurePrinterCredit())
+            {
+                m_lastError.clear();
+                return;
+            }
+
+            D4Packet stale;
+            if (!WaitForData(stale, m_options.heldReplyWindowMs))
+                return;
+
+            EmitTrace(m_reporter, "d4.held_reply_discarded", "[!] Discarded a reply held over from an earlier session ("
+                + std::to_string(stale.payload.size()) + " bytes) - it answers nothing this session asked.");
+        }
+    }
+
+    bool D4Session::Restart()
+    {
+        EmitTrace(m_reporter, "d4.restart", "[!] An exchange drew no reply, so neither side's credit count can be"
+            " trusted. Starting a fresh D4 session: its Init resets both.");
+
+        Close();
+
+        m_started = false;
+        m_closed = false;
+        m_channelOpen = false;
+        m_sendCredit = 0;
+        m_printerCredit = 0;
+        m_pendingData.clear();
+        m_framer.DiscardBuffered();
+        m_lastError.clear();
+
+        return Start();
     }
 
     bool D4Session::EnsurePrinterCredit()
@@ -781,6 +835,11 @@ namespace ewr {
                 items.push_back({ std::move(payload), IsWritePacket(pkt) });
         }
 
+        // Set by an exchange that drew no reply; the next one runs on a fresh
+        // session (see D4Session::Restart). A write is idempotent, so sending
+        // it again after a lost acknowledgement is safe.
+        bool restartNeeded = false;
+
         for (size_t i = 0; i < items.size(); ++i)
         {
             const bool isWrite = items[i].isWrite;
@@ -810,6 +869,19 @@ namespace ewr {
                         std::this_thread::sleep_for(std::chrono::milliseconds(options.retryDelayMs));
                 }
 
+                if (restartNeeded)
+                {
+                    if (!session.Restart())
+                    {
+                        result.error = "A packet went unacknowledged and a fresh D4 session could not be started ("
+                                     + session.LastError() + ")";
+                        EmitTrace(reporter, "exec.trace_fatal", "[FATAL] " + result.error + "\n");
+                        return result;
+                    }
+
+                    restartNeeded = false;
+                }
+
                 std::vector<unsigned char> reply;
                 const bool answered = session.Exchange(payload, reply);
 
@@ -821,6 +893,9 @@ namespace ewr {
                     result.error = session.LastError();
                     return result;
                 }
+
+                if (!answered)
+                    restartNeeded = true;
 
                 if (!reply.empty())
                     result.ackCount++;
@@ -984,10 +1059,14 @@ namespace ewr {
 
         bool allAnswered = true;
 
-        for (const auto& queryPacket : queries)
+        // Set by an exchange that drew no reply; the next one runs on a fresh
+        // session (see D4Session::Restart).
+        bool restartNeeded = false;
+
+        for (size_t q = 0; q < queries.size(); ++q)
         {
             std::vector<unsigned char> payload;
-            if (!ExtractDataPayload(queryPacket, payload))
+            if (!ExtractDataPayload(queries[q], payload))
             {
                 EmitTrace(reporter, "exec.query_skipped", "[WARNING] Skipping a query packet that is not a D4 data packet");
                 result.replies.push_back({});
@@ -1008,6 +1087,18 @@ namespace ewr {
                         std::this_thread::sleep_for(std::chrono::milliseconds(options.retryDelayMs));
                 }
 
+                if (restartNeeded)
+                {
+                    if (!session.Restart())
+                    {
+                        result.error = "A query went unanswered and a fresh D4 session could not be started ("
+                                     + session.LastError() + ")";
+                        break;
+                    }
+
+                    restartNeeded = false;
+                }
+
                 result.packetsSent++;
 
                 reply.clear();
@@ -1021,12 +1112,24 @@ namespace ewr {
                 }
 
                 EmitTrace(reporter, "exec.query_unanswered", "[WARNING] Query drew no reply");
+                restartNeeded = true;
             }
 
             if (reply.empty())
             {
-                allAnswered = false;
-                result.replies.push_back({});
+                // Every retry ran on a fresh session, so this is no lost reply:
+                // the printer stopped answering. Asking each remaining address
+                // three more times would only add minutes to a failed run.
+                if (result.error.empty())
+                {
+                    result.error = "The printer stopped answering at query " + std::to_string(q + 1) + " of "
+                                 + std::to_string(queries.size()) + " (" + std::to_string(maxAttempts)
+                                 + " attempt(s), each retry on a fresh D4 session).";
+                }
+
+                EmitTrace(reporter, "exec.query_stopped", "[FATAL] " + result.error);
+                result.replies.resize(queries.size());
+                return result;
             }
             else
             {

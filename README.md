@@ -53,9 +53,75 @@ Running with no options is the supported path. These exist for diagnosis and for
 | `--dry-run` | Detect, read, and show exactly what a reset *would* write - then stop. |
 | `--dump` | Read the EEPROM into a timestamped file. Dump twice around a change and diff to map an unknown printer. |
 | `--find-addresses` | For a model with no reset addresses yet: read the EEPROM three times, asking you to run a head cleaning between reads, and report the bytes that rise every time. Read-only. |
+| `--yes`, `-y` | Answer the reset confirmation with yes, for callers driving EWR non-interactively. See below. |
+| `--force-yes` | `--yes`, and overrule the gates that would stop it: a model mismatch, a printer error, a database conflict. Last resort. |
+| `--cartridge`, `-c` | Reset the cartridge ink levels instead of the waste ink pads, on models that carry a per-color ink map. |
 | `--no-update` | Fully offline: no update check, no download, no staged swap on exit. Use it while editing `database.json`. |
 | `--usb-soft-reset` | Diagnostic only, Windows. Off by default because it stalls the next write on ET-2xxx units. |
 | `--help`, `-h` | The same list, from the binary. |
+
+### Unattended runs: `--yes`
+
+```bash
+ewr --yes                      # reset the printer that answers, unattended
+ewr --model L3150 --yes        # ... or name the model yourself
+```
+
+`--yes` answers one question: the final *"Reset the waste ink pad counters now?"*. Everything
+else about the run is unchanged - the preflight read, the read-back verification, and every
+gate that can stop it.
+
+Without `--model` it takes the model the printer reports over IEEE 1284, the same entry the
+menu offers on Enter, and stops if the printer names nothing the database recognises. So the
+model it writes to is the one the printer identified itself as - never a guess and never a
+menu default. What it deliberately does **not** do:
+
+* **It does not overrule the detected model.** If `--model` names something other than the
+  printer that answered, the run stops instead of writing. A wrong-model write is the hazard
+  the confirmation exists for, and no flag should be able to cause one.
+* **It does not push past a printer error or a database conflict.** Those gates report what
+  the printer said, not what you intended, so `--yes` declines them and exits non-zero.
+* **It never arms the cartridge ink reset by itself.** On a model that offers both, `--yes`
+  takes the waste ink pads. Reaching the ink reset takes `--cartridge`, named explicitly.
+* **It does not search the menu for you.** It takes the detected model or it stops; it never
+  falls back to picking an entry from a list.
+
+Exit status is `0` when the reset completed and verified, `1` when it was stopped or failed,
+`2` for a bad command line.
+
+### Choosing the target: `--cartridge`
+
+Some models carry a per-color cartridge ink map as well as waste pad counters, and a run
+without flags offers the choice. `--cartridge` makes that choice on the command line instead:
+
+```bash
+ewr --model R220 --cartridge              # ask, then reset the ink levels
+ewr --model R220 --cartridge --yes        # ... without asking
+ewr --model R220 --cartridge --dry-run    # show the ink writes, send nothing
+```
+
+It selects the target and nothing else - it is not a confirmation. On its own the reset still
+arms on the word `reset` typed at the keyboard; `--yes` is what answers that. `--dry-run`
+follows it, so the printed plan is the plan of the run you asked for.
+
+EWR cannot refill ink. This reset rewrites the printer's accounting, so a genuinely empty
+cartridge will report full and can run dry mid-print, which damages the print head. It also
+only holds on printers that keep ink levels in their own EEPROM: where the cartridge carries a
+smart chip, the firmware treats the chip as the truth and writes the EEPROM back from it.
+
+### Overriding the gates: `--force-yes`
+
+`--force-yes` is `--yes` plus the two refusals above: it writes to a model the printer did not
+report as itself, and it writes while the printer objects with an error or the database
+disagrees with itself about this model's write path.
+
+That is the combination this tool spends most of its code preventing, and every reason those
+gates exist still applies when you pass it - a wrong-model write can misconfigure a printer
+you cannot replace. It is here for the case where you know the detection is wrong and the
+printer is right, not as an automation default. Prefer `--model` over forcing a mismatch.
+
+What it does **not** touch: the preflight read, the address-width encoding guards, and the
+read-back verification. Those are not prompts, they are the write path, and no flag skips them.
 
 ## When something goes wrong
 

@@ -53,6 +53,9 @@ struct CliOptions
     bool dump = false;           // --dump: read-only EEPROM dump to a file
     bool findAddresses = false;  // --find-addresses: repeated dumps around head cleanings
     bool noUpdate = false;       // --no-update: offline run, nothing checked or swapped
+    bool assumeYes = false;      // --yes: answer the write confirmation, nothing else
+    bool forceYes = false;       // --force-yes: also overrule the gates that would stop it
+    bool cartridge = false;      // --cartridge: reset ink levels instead of the waste pads
     int interfaceCandidate = 0;  // --interface <n>: 1-based pin, 0 = auto
     bool usbSoftReset = false;   // --usb-soft-reset: clear the channel on every open
     std::string modelOverride;   // --model <name>: skip the menu
@@ -123,6 +126,21 @@ static void PrintUsage()
               << "                   timestamped file next to ewr. Read-only. Dump twice\n"
               << "                   around a change and diff the files to map a printer\n"
               << "                   the ink database does not know yet.\n"
+              << "  --yes, -y        Answer the reset confirmation with yes, for callers that\n"
+              << "                   drive EWR non-interactively. It confirms the waste ink pad\n"
+              << "                   reset and nothing else: on a model that also offers the\n"
+              << "                   cartridge ink reset it picks the waste pads, and it still\n"
+              << "                   stops on a printer error, a database conflict or a model\n"
+              << "                   mismatch instead of writing. Without --model it uses the\n"
+              << "                   model the printer reports, and stops if there is none.\n"
+              << "  --force-yes      --yes, and overrule the two gates that would stop it: a\n"
+              << "                   model mismatch and a printer error or database conflict.\n"
+              << "                   This writes another model's values, or writes while the\n"
+              << "                   printer objects. Last resort, not an automation default.\n"
+              << "  --cartridge, -c  Reset the cartridge ink levels instead of the waste ink\n"
+              << "                   pad counters, on models that carry a per-color ink map.\n"
+              << "                   Chooses the target only - it confirms nothing, and it\n"
+              << "                   cannot refill ink: an empty cartridge will report full.\n"
               << "  --no-update      Fully offline run: no update check, no download, no\n"
               << "                   staged swap on exit. For testing local database edits\n"
               << "                   (custom addresses, new models) before a pull request.\n"
@@ -424,6 +442,21 @@ int main(int argc, char* argv[])
         {
             cli.noUpdate = true;
         }
+        else if (arg == "--yes" || arg == "-y")
+        {
+            cli.assumeYes = true;
+        }
+        else if (arg == "--force-yes")
+        {
+            // Forcing without confirming is meaningless: it answers the same
+            // prompt --yes does, then overrules the gates that would stop it.
+            cli.forceYes = true;
+            cli.assumeYes = true;
+        }
+        else if (arg == "--cartridge" || arg == "-c")
+        {
+            cli.cartridge = true;
+        }
         else if (arg == "--usb-soft-reset")
         {
             cli.usbSoftReset = true;
@@ -466,7 +499,9 @@ int main(int argc, char* argv[])
     }
 
     const bool statusOnly = cli.statusOnly;
-    g_exitPause = !(cli.statusOnly || cli.listOnly || cli.dryRun || cli.dump);
+    // --yes means nobody is at the keyboard, so the closing "press Enter" read
+    // would block the caller after the reset it just asked for.
+    g_exitPause = !(cli.statusOnly || cli.listOnly || cli.dryRun || cli.dump || cli.assumeYes);
 
     std::cout << "========================================" << std::endl;
     std::cout << "       EWR - Epson Waste Reset          " << std::endl;
@@ -481,6 +516,12 @@ int main(int argc, char* argv[])
         std::cout << "[i] DUMP MODE: reading the EEPROM to a file, no writes will be sent.\n" << std::endl;
     else if (cli.findAddresses)
         std::cout << "[i] ADDRESS DISCOVERY: repeated read-only EEPROM dumps, no writes will be sent.\n" << std::endl;
+    else if (cli.forceYes)
+        std::cout << "[!] --force-yes: the confirmation is answered AND the gates that would stop\n"
+                     "    this run are overruled. A wrong-model write can misconfigure the printer.\n" << std::endl;
+    else if (cli.assumeYes)
+        std::cout << "[i] --yes: the reset confirmation is answered automatically. Every other gate\n"
+                     "    still stops the run before any write.\n" << std::endl;
 
     ewr::CleanupStaleTempFiles();
 
@@ -835,6 +876,38 @@ int main(int argc, char* argv[])
             std::cout << "\n[i] --model: using " << selected.displayName << "." << std::endl;
     }
 
+    // --yes with no --model: the printer named itself, so take that entry
+    // instead of opening a menu nobody is there to answer. It is also why
+    // --yes cannot write to the wrong model on its own - the selection and
+    // the detection are then the same answer.
+    if (!hasSelected && cli.assumeYes)
+    {
+        if (detectedMatch.empty())
+        {
+            std::cerr << "\n[!] --yes needs a model and the printer did not supply one." << std::endl;
+            if (!detectedMdl.empty())
+                std::cerr << "    It reports \"" << detectedMdl
+                          << "\", which matches no database entry." << std::endl;
+            else
+                std::cerr << "    No Epson interface answered the device ID query." << std::endl;
+            std::cerr << "    Pass --model <name>, or run 'ewr --list' to see what is connected."
+                      << std::endl;
+            return FinishRun(1);
+        }
+
+        for (const auto& opt : options)
+        {
+            if (!opt.isReplay && opt.smartModel.name == detectedMatch)
+            {
+                selected = opt;
+                hasSelected = true;
+                std::cout << "\n[i] --yes: using the detected model " << opt.smartModel.name << "."
+                          << std::endl;
+                break;
+            }
+        }
+    }
+
     while (!hasSelected)
     {
         if (!detectedMatch.empty())
@@ -923,23 +996,69 @@ int main(int argc, char* argv[])
     }
 
     // The top cause of wrong-model writes, so it needs an explicit yes.
-    // Read-only status mode is exempt.
-    if (!statusOnly && !cli.dryRun && !cli.dump && !selected.isReplay
+    // The read-only modes are exempt: they send no writes to misplace.
+    if (!statusOnly && !cli.dryRun && !cli.dump && !cli.findAddresses && !selected.isReplay
         && !detectedMatch.empty() && selected.smartModel.name != detectedMatch)
     {
         std::cout << "\n[!] WARNING: the connected printer reports \"" << detectedMdl << "\""
                   << " (database entry: " << detectedMatch << ")," << std::endl;
         std::cout << "    but you selected " << selected.smartModel.name << "." << std::endl;
         std::cout << "    Writing another model's reset values into the EEPROM can misconfigure the printer." << std::endl;
-        std::cout << "\nContinue with " << selected.smartModel.name << " anyway? [y/N]: ";
 
-        std::string answer;
-        std::getline(std::cin, answer);
-        const std::string a = toLower(answer);
-        if (a != "y" && a != "yes")
+        // A wrong-model write is the one hazard --yes must never produce, so
+        // here it stops the run instead of standing in for the answer.
+        // --force-yes is the explicit opt-out, and says so in the trace.
+        if (cli.forceYes)
         {
-            std::cout << "[i] Aborted before any EEPROM write. Re-run and press Enter to use the" << std::endl;
-            std::cout << "    detected model." << std::endl;
+            std::cout << "\n[!] --force-yes: proceeding with " << selected.smartModel.name
+                      << " against a printer that reports \"" << detectedMdl << "\"." << std::endl;
+        }
+        else if (cli.assumeYes)
+        {
+            std::cerr << "\n[!] --yes confirms a reset, it does not overrule the detected model."
+                      << std::endl;
+            std::cerr << "    Drop --model to use " << detectedMatch
+                      << ", re-run without --yes to confirm the mismatch yourself, or pass"
+                      << std::endl;
+            std::cerr << "    --force-yes if you really mean to write " << selected.smartModel.name
+                      << " values to it." << std::endl;
+            return FinishRun(1);
+        }
+        else
+        {
+            std::cout << "\nContinue with " << selected.smartModel.name << " anyway? [y/N]: ";
+
+            std::string answer;
+            std::getline(std::cin, answer);
+            const std::string a = toLower(answer);
+            if (a != "y" && a != "yes")
+            {
+                std::cout << "[i] Aborted before any EEPROM write. Re-run and press Enter to use the" << std::endl;
+                std::cout << "    detected model." << std::endl;
+                return FinishRun(1);
+            }
+        }
+    }
+
+    // Fail before any device I/O: the session would only reach the same
+    // conclusion after opening a channel to the printer.
+    if (cli.cartridge)
+    {
+        if (selected.isReplay)
+        {
+            std::cerr << "\n[!] --cartridge needs a Smart Protocol model: it writes the per-color ink"
+                      << std::endl;
+            std::cerr << "    addresses from the database, and a Replay dump carries none." << std::endl;
+            return FinishRun(1);
+        }
+
+        if (!selected.smartModel.HasInkReset())
+        {
+            std::cerr << "\n[!] --cartridge: " << selected.smartModel.name
+                      << " has no cartridge ink map in the database," << std::endl;
+            std::cerr << "    so there are no ink addresses to write. Its waste ink pad reset is"
+                      << std::endl;
+            std::cerr << "    unaffected - run without --cartridge for that." << std::endl;
             return FinishRun(1);
         }
     }
@@ -1238,10 +1357,16 @@ int main(int argc, char* argv[])
             std::cout << "[i] The printer did not answer the read-only query - showing the plan anyway." << std::endl;
         }
 
-        const std::vector<uint16_t> planAddresses = selected.smartModel.GetAllAddresses();
-        const std::vector<uint8_t> planValues = selected.smartModel.GetAllResetValues();
+        // The plan has to be the plan of the run --cartridge would perform,
+        // or the dry run describes a reset nobody asked for.
+        const std::vector<uint16_t> planAddresses = cli.cartridge
+            ? selected.smartModel.GetInkAddresses() : selected.smartModel.GetAllAddresses();
+        const std::vector<uint8_t> planValues = cli.cartridge
+            ? selected.smartModel.GetInkResetValues() : selected.smartModel.GetAllResetValues();
 
-        std::cout << "\nA real run would write " << planAddresses.size() << " EEPROM byte(s):" << std::endl;
+        std::cout << "\nA real run would reset the "
+                  << (cli.cartridge ? "cartridge ink levels" : "waste ink pad counters")
+                  << ", writing " << planAddresses.size() << " EEPROM byte(s):" << std::endl;
         for (size_t i = 0; i < planAddresses.size(); ++i)
         {
             char line[64];
@@ -1250,12 +1375,17 @@ int main(int argc, char* argv[])
             std::cout << line << std::endl;
         }
 
-        for (const auto& op : selected.smartModel.close_ops)
+        // The schema-4 close step belongs to the waste-pad reset; the ink
+        // lifecycle has no commit.
+        if (!cli.cartridge)
         {
-            char line[96];
-            snprintf(line, sizeof(line), "    commit: read 0x%04X, apply AND 0x%02X / OR 0x%02X, write back",
-                     op.address, op.and_mask, op.or_mask);
-            std::cout << line << std::endl;
+            for (const auto& op : selected.smartModel.close_ops)
+            {
+                char line[96];
+                snprintf(line, sizeof(line), "    commit: read 0x%04X, apply AND 0x%02X / OR 0x%02X, write back",
+                         op.address, op.and_mask, op.or_mask);
+                std::cout << line << std::endl;
+            }
         }
 
         if (!selected.smartModel.wkey1.empty())
@@ -1332,16 +1462,49 @@ int main(int argc, char* argv[])
         return FinishRun(0);
     }
 
-    // ---- Cartridge ink reset choice: models with a per-color ink map offer
-    // it; everything else goes straight to the classic waste-pad reset.
-    bool resetInk = false;
-    if (selected.smartModel.HasInkReset() && !selected.smartModel.HasResettableCounters())
+    // ---- Cartridge ink reset choice: --cartridge names it outright, models
+    // with a per-color ink map offer it, everything else goes straight to the
+    // classic waste-pad reset.
+    bool resetInk = cli.cartridge;
+    if (cli.cartridge)
+    {
+        // Named the target explicitly, so there is no menu and no default.
+        std::cout << "\n[i] --cartridge: resetting the cartridge ink levels of "
+                  << selected.smartModel.name << ", not its waste ink pads." << std::endl;
+    }
+    else if (selected.smartModel.HasInkReset() && !selected.smartModel.HasResettableCounters())
     {
         // Ink map but no waste-pad addresses: the ink reset is the only path.
+        // --yes answers for the waste pads only, so here it has nothing to
+        // answer - reaching the ink reset takes --cartridge, deliberately.
+        if (cli.assumeYes)
+        {
+            std::cerr << "\n[!] --yes has nothing to confirm on " << selected.smartModel.name << "."
+                      << std::endl;
+            std::cerr << "    This model has no USB-resettable waste pad counters, only a cartridge"
+                      << std::endl;
+            std::cerr << "    ink map, and --yes alone never arms the cartridge ink reset: it can"
+                      << std::endl;
+            std::cerr << "    make an empty cartridge report full and run the head dry. Add"
+                      << std::endl;
+            std::cerr << "    --cartridge to mean it, or drop --yes to confirm at the keyboard."
+                      << std::endl;
+            return FinishRun(1);
+        }
+
         std::cout << "\n" << selected.smartModel.name
                   << " has a cartridge ink map but no USB-resettable waste pad counters," << std::endl;
         std::cout << "    so the cartridge ink level reset is the available path." << std::endl;
         resetInk = true;
+    }
+    else if (selected.smartModel.HasInkReset() && cli.assumeYes)
+    {
+        // Both paths exist, so this menu would otherwise block a caller that
+        // has no keyboard. --yes is a yes to the reset EWR is named after;
+        // --cartridge is how the other one gets chosen.
+        std::cout << "\n[i] " << selected.smartModel.name
+                  << " also offers a cartridge ink reset; --yes takes the waste ink pad" << std::endl;
+        std::cout << "    counters. Pass --cartridge to reset the ink levels instead." << std::endl;
     }
     else if (selected.smartModel.HasInkReset())
     {
@@ -1370,8 +1533,9 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Arms only on a typed word; Enter alone must never write. On chipped
-    // cartridges the EEPROM bytes mirror the chip, so the reset will not hold.
+    // Arms only on a typed word or an explicit --yes; Enter alone must never
+    // write. On chipped cartridges the EEPROM bytes mirror the chip, so the
+    // reset will not hold.
     if (resetInk)
     {
         std::cout << "\n[!] Cartridge ink reset rewrites the printer's per-color ink accounting." << std::endl;
@@ -1382,14 +1546,24 @@ int main(int argc, char* argv[])
         std::cout << "    the firmware treats the chip as the truth and rewrites the EEPROM from" << std::endl;
         std::cout << "    it, so on those models the reset cannot stick (the R220 generation is" << std::endl;
         std::cout << "    like this - verified on hardware)." << std::endl;
-        std::cout << "\nType 'reset' to zero every color's ink counter, anything else to abort: ";
 
-        std::string confirm;
-        std::getline(std::cin, confirm);
-        if (toLower(confirm) != "reset")
+        // --cartridge chose this reset and --yes confirms it, so the typed
+        // word has already been said twice on the command line.
+        if (cli.assumeYes)
         {
-            std::cout << "[i] Aborted before any EEPROM write. Nothing was changed." << std::endl;
-            return FinishRun(0);
+            std::cout << "\n[i] --yes: zeroing every color's ink counter without asking." << std::endl;
+        }
+        else
+        {
+            std::cout << "\nType 'reset' to zero every color's ink counter, anything else to abort: ";
+
+            std::string confirm;
+            std::getline(std::cin, confirm);
+            if (toLower(confirm) != "reset")
+            {
+                std::cout << "[i] Aborted before any EEPROM write. Nothing was changed." << std::endl;
+                return FinishRun(0);
+            }
         }
     }
 
@@ -1413,7 +1587,7 @@ int main(int argc, char* argv[])
     };
 
     // Anything but an explicit yes aborts before any write.
-    handlers.onBlocker = [](const ewr::Blocker& blocker)
+    handlers.onBlocker = [&](const ewr::Blocker& blocker)
     {
         if (blocker.errorCode >= 0)
             std::cout << "\n[!] WARNING: the printer reports an active error: "
@@ -1423,6 +1597,25 @@ int main(int argc, char* argv[])
 
         if (!blocker.explanation.empty())
             std::cout << "    " << blocker.explanation << std::endl;
+
+        // The blocker gate is the printer's own objection, not the ask-once
+        // confirmation, so --yes declines it rather than answering it.
+        if (cli.forceYes)
+        {
+            std::cout << "\n[!] --force-yes: continuing past that objection." << std::endl;
+            return true;
+        }
+
+        if (cli.assumeYes)
+        {
+            std::cout << "\n[i] --yes does not push past this: it answers the reset confirmation,"
+                      << std::endl;
+            std::cout << "    not a state the printer reports. Clear the condition, re-run without"
+                      << std::endl;
+            std::cout << "    --yes to decide at the keyboard, or pass --force-yes to overrule it."
+                      << std::endl;
+            return false;
+        }
 
         std::cout << "\nTry the reset anyway? [y/N]: ";
 
@@ -1439,6 +1632,14 @@ int main(int argc, char* argv[])
     {
         if (resetInk)
             return true;
+
+        // The one prompt --yes exists to answer.
+        if (cli.assumeYes)
+        {
+            std::cout << "\n[i] --yes: resetting the waste ink pad counters of "
+                      << selected.smartModel.name << " without asking." << std::endl;
+            return true;
+        }
 
         std::cout << "\nReset the waste ink pad counters of " << selected.smartModel.name
                   << " now? [y/N]: ";

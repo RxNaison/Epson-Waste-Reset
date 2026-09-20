@@ -54,6 +54,15 @@ namespace ewr {
         // shows). Disables the automatic fallback. <= 0 means automatic.
         int interfaceCandidate = 0;
 
+        // A printer can stop answering its EPSON-CTRL service for seconds at a
+        // time while its D4 core still answers Init and Exit - an L365 ignored
+        // GetSocketID and OpenChannel for over eight seconds mid-dump, then
+        // recovered by itself (issue #39). So a session that cannot be rebuilt
+        // is tried again this many times, waiting sessionRestartBackoffMs
+        // before the second attempt and doubling it after each one.
+        int sessionRestartAttempts = 4;
+        int sessionRestartBackoffMs = 2000;
+
         // --usb-soft-reset (Windows: IOCTL_USBPRINT_SOFT_RESET), once per
         // candidate before its first session, followed by a wait until the
         // printer has re-initialized. UsbDeviceGateway forwards it to the

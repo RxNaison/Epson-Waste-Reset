@@ -2489,6 +2489,10 @@ public:
     // After this many data replies the printer never answers data again,
     // not even on a fresh session. 0 = never.
     int silentAfter = 0;
+    // Sessions after the first whose GetSocketID and OpenChannel go
+    // unanswered: the L365's control service busy while its D4 core still
+    // answers Init and Exit.
+    int sessionsWithSilentService = 0;
 
     int inits = 0;
     int dataReplies = 0;
@@ -2510,9 +2514,15 @@ public:
                     ++inits;
                     printerCredit_ = 0;
                     hostCredit_ = 0;
+                    serviceSilent_ = (inits > 1) && (sessionsWithSilentService-- > 0);
                     return D4Frame(0x00, 0x00, { 0x80, 0x00, 0x10 }, 0x01);
-                case 0x09: return D4Frame(0x00, 0x00, { 0x89, 0x00, 0x02 }, 0x01);
+                case 0x09:
+                    if (serviceSilent_)
+                        return {};
+                    return D4Frame(0x00, 0x00, { 0x89, 0x00, 0x02 }, 0x01);
                 case 0x01:
+                    if (serviceSilent_)
+                        return {};
                     return D4Frame(0x00, 0x00, { 0x81, 0x00, 0x02, 0x02, 0x00, 0x40, 0x01, 0x00, 0x00, 0x00 }, 0x01);
                 case 0x03:
                 {
@@ -2568,6 +2578,7 @@ private:
         }
     }
 
+    bool serviceSilent_ = false;
     int printerCredit_ = 0; // granted by the host, spent on replies
     int hostCredit_ = 0;    // granted to the host, spent on its data
     std::vector<std::vector<unsigned char>> held_;
@@ -2595,6 +2606,7 @@ static ewr::ExecutorOptions LostReplyOptions()
     options.useSessionLayer = true;
     options.handshakeDrainTimeoutMs = 40;
     options.writeAckTimeoutMs = 20;
+    options.sessionRestartBackoffMs = 1; // the wait itself is not what is under test
     return options;
 }
 
@@ -2715,6 +2727,58 @@ void test_d4_session_discards_replies_held_from_an_earlier_session()
     CHECK(result.success);
     CHECK(CountAnsweredReads(result) == 6);
     CHECK(printer.inits == 1);
+}
+
+// The printer that lost the reply may still be busy: an L365 answered Exit,
+// EJL and Init while ignoring GetSocketID and OpenChannel for over eight
+// seconds, then came back by itself. One immediate attempt gave up on it.
+void test_d4_session_restart_waits_for_a_busy_control_service()
+{
+    std::cout << "[TEST] test_d4_session_restart_waits_for_a_busy_control_service" << std::endl;
+
+    CreditBookPrinter printer;
+    printer.answer = EchoReadReply;
+    printer.lostDataReplies = { 3 };
+    printer.sessionsWithSilentService = 2; // two fresh sessions refused, the third opens
+
+    FakeTransport t;
+    t.replyFor = std::ref(printer);
+
+    ewr::log::Reporter reporter;
+    const ewr::QuerySessionResult result =
+        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, LostReplyOptions());
+
+    CHECK(result.success);
+    CHECK(CountAnsweredReads(result) == 6);
+    CHECK(printer.inits == 4); // the first session plus three restart attempts
+}
+
+// Giving up is still bounded: a control service that never comes back ends the
+// run after the configured attempts rather than hanging on it.
+void test_d4_session_restart_gives_up_after_its_attempts()
+{
+    std::cout << "[TEST] test_d4_session_restart_gives_up_after_its_attempts" << std::endl;
+
+    CreditBookPrinter printer;
+    printer.answer = EchoReadReply;
+    printer.lostDataReplies = { 3 };
+    printer.sessionsWithSilentService = 99;
+
+    FakeTransport t;
+    t.replyFor = std::ref(printer);
+
+    ewr::ExecutorOptions options = LostReplyOptions();
+    options.sessionRestartAttempts = 3;
+
+    ewr::log::Reporter reporter;
+    const ewr::QuerySessionResult result =
+        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, options);
+
+    CHECK(!result.success);
+    CHECK(result.error.find("would not open a fresh D4 session") != std::string::npos);
+    CHECK(result.replies.size() == 6);
+    CHECK(CountAnsweredReads(result) == 2);
+    CHECK(printer.inits == 4); // the first session plus three refused attempts
 }
 
 // The same loss on a write acknowledgement. A write is idempotent, so it is
@@ -5527,6 +5591,8 @@ int main()
     test_d4_query_session_survives_a_lost_credit_reply();
     test_d4_query_session_stops_when_a_fresh_session_stays_silent();
     test_d4_session_discards_replies_held_from_an_earlier_session();
+    test_d4_session_restart_waits_for_a_busy_control_service();
+    test_d4_session_restart_gives_up_after_its_attempts();
     test_d4_sequence_survives_a_lost_write_ack();
     test_d4_sequence_na_fails_fast();
     test_d4_recovery_channel_wraps_writes();

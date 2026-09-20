@@ -750,6 +750,44 @@ namespace ewr {
             return acknowledged;
         }
 
+        // A fresh session is not always there for the asking: the printer that
+        // lost the reply may still be busy. An L365 answered Exit, EJL and
+        // Init throughout while ignoring GetSocketID and OpenChannel, and one
+        // immediate attempt (about 4 s of timeouts) declared the run dead while
+        // the printer needed longer and then came back on its own. Retries are
+        // spaced by a doubling wait rather than fired back to back.
+        bool RestartWithBackoff(D4Session& session, log::Reporter& reporter, const ExecutorOptions& options)
+        {
+            const int attempts = (options.sessionRestartAttempts > 0) ? options.sessionRestartAttempts : 1;
+            int waitMs = (options.sessionRestartBackoffMs > 0) ? options.sessionRestartBackoffMs : 0;
+
+            for (int attempt = 1; attempt <= attempts; ++attempt)
+            {
+                if (attempt > 1)
+                {
+                    if (attempt == 2)
+                    {
+                        reporter.Log(log::Level::Info, log::Stage::Handshake, "d4.session_recovering",
+                                     "[!] The printer stopped answering - waiting for it to come back...");
+                    }
+
+                    EmitTrace(reporter, "d4.restart_wait", "[!] No channel yet (" + session.LastError() + "). Waiting "
+                        + std::to_string(waitMs) + " ms before fresh session attempt " + std::to_string(attempt)
+                        + " of " + std::to_string(attempts) + ".");
+
+                    if (waitMs > 0)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+
+                    waitMs *= 2;
+                }
+
+                if (session.Restart())
+                    return true;
+            }
+
+            return false;
+        }
+
         // Closes the D4 channel however the session ends. Declared after the
         // recovery guard so it destructs first: the channel is closed before
         // any RCMODE leave opens a second session on the same transport.
@@ -871,9 +909,9 @@ namespace ewr {
 
                 if (restartNeeded)
                 {
-                    if (!session.Restart())
+                    if (!RestartWithBackoff(session, reporter, options))
                     {
-                        result.error = "A packet went unacknowledged and a fresh D4 session could not be started ("
+                        result.error = "A packet went unacknowledged and the printer would not open a fresh D4 session ("
                                      + session.LastError() + ")";
                         EmitTrace(reporter, "exec.trace_fatal", "[FATAL] " + result.error + "\n");
                         return result;
@@ -1089,9 +1127,9 @@ namespace ewr {
 
                 if (restartNeeded)
                 {
-                    if (!session.Restart())
+                    if (!RestartWithBackoff(session, reporter, options))
                     {
-                        result.error = "A query went unanswered and a fresh D4 session could not be started ("
+                        result.error = "A query went unanswered and the printer would not open a fresh D4 session ("
                                      + session.LastError() + ")";
                         break;
                     }

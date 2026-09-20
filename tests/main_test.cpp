@@ -19,6 +19,8 @@
 #include "ewr/usb_backend.h"
 #include "ewr/run_lock.h"
 #include "ewr/json_out.h"
+#include "ewr/ewr_c.h"
+#include "ewr/version.h"
 #include "ewr/discover.h"
 
 namespace fs = std::filesystem;
@@ -4876,6 +4878,119 @@ void test_end4_sequence_alternate_key()
     CHECK(result.writesVerified == 2);
 }
 
+// The C ABI is what another language links against, so the test is the
+// promise: codes keep their numbers, an unknown one still answers, and the
+// parts that need no printer work without one.
+void test_c_abi_constants_and_status_names()
+{
+    std::cout << "[TEST] test_c_abi_constants_and_status_names" << std::endl;
+
+    CHECK(ewr_abi_version() == 1);
+    CHECK(ewr_json_contract_version() == ewr::JsonEmitter::kContractVersion);
+    CHECK(std::string(ewr_version()) == EWR_VERSION);
+
+    // Renumbering these would silently change what a caller's constant means.
+    CHECK(EWR_OK == 0);
+    CHECK(EWR_ERR_FAILED == 1);
+    CHECK(EWR_ERR_INVALID_ARGUMENT == 2);
+    CHECK(EWR_ERR_ANOTHER_RUN == 3);
+    CHECK(EWR_ERR_DEVICE_NOT_FOUND == 4);
+    CHECK(EWR_ERR_BLOCKED == 10);
+    CHECK(EWR_ERR_WRITE_UNVERIFIED == 12);
+
+    CHECK(std::string(ewr_status_name(EWR_OK)) == "ok");
+    CHECK(std::string(ewr_status_name(EWR_ERR_BLOCKED)) == "blocked");
+    CHECK(std::string(ewr_status_name(EWR_ERR_INCOMPLETE_DUMP)) == "incomplete_dump");
+    CHECK(std::string(ewr_status_name(EWR_ERR_MODEL_MISMATCH)) == "model_mismatch");
+    // A caller compiled against a newer header must still get an answer.
+    CHECK(std::string(ewr_status_name(9999)) == "unknown");
+
+    // Freeing nothing is not an error, so a caller need not guard its cleanup.
+    ewr_string_free(nullptr);
+
+    // A null out-parameter is refused rather than dereferenced.
+    CHECK(ewr_session_open("database.json", nullptr) == EWR_ERR_INVALID_ARGUMENT);
+    CHECK(ewr_list_models(nullptr, nullptr) == EWR_ERR_INVALID_ARGUMENT);
+    CHECK(std::string(ewr_session_last_error(nullptr)).empty());
+}
+
+// The database-only calls: no printer, no hardware, still useful - this is
+// what a host uses to populate a model list and show what a reset would do.
+void test_c_abi_database_calls_need_no_printer()
+{
+    std::cout << "[TEST] test_c_abi_database_calls_need_no_printer" << std::endl;
+
+    ewr_session* session = nullptr;
+    const int opened = ewr_session_open("database.json", &session);
+
+    // Another EWR holding the printer is not a test failure, just nothing to
+    // test against here.
+    if (opened == EWR_ERR_ANOTHER_RUN)
+    {
+        std::cout << "  [skip] another EWR run holds the printer" << std::endl;
+        ewr_session_close(session);
+        return;
+    }
+
+    CHECK(opened == EWR_OK);
+    CHECK(session != nullptr);
+    CHECK(std::string(ewr_session_last_error(session)).empty());
+
+    char* json = nullptr;
+    CHECK(ewr_list_models(session, &json) == EWR_OK);
+    const nlohmann::json models = nlohmann::json::parse(json);
+    ewr_string_free(json);
+    CHECK(models["models"].is_array());
+    CHECK(models["models"].size() > 1000);
+    CHECK(models["models"][0].contains("name"));
+    CHECK(models["models"][0].contains("resettable"));
+
+    json = nullptr;
+    CHECK(ewr_plan(session, "R220", 0, &json) == EWR_OK);
+    const nlohmann::json plan = nlohmann::json::parse(json);
+    ewr_string_free(json);
+    CHECK(plan["model"] == "R220");
+    CHECK(plan["target"] == "waste");
+    CHECK(plan["planned_writes"].size() == 5);
+    // Numbers, not "0x0C" strings: the contract's rule.
+    CHECK(plan["planned_writes"][0]["address"].is_number());
+    CHECK(plan["planned_writes"][0]["value"].is_number());
+
+    json = nullptr;
+    CHECK(ewr_plan(session, "no such printer", 0, &json) == EWR_ERR_MODEL_UNKNOWN);
+    CHECK(json == nullptr);
+    CHECK(!std::string(ewr_session_last_error(session)).empty());
+
+    ewr_session_close(session);
+}
+
+// A database that is not there fails as a database problem, with the handle
+// still returned so the caller can read why.
+void test_c_abi_reports_a_missing_database()
+{
+    std::cout << "[TEST] test_c_abi_reports_a_missing_database" << std::endl;
+
+    ewr_session* session = nullptr;
+    const int opened = ewr_session_open("no-such-database.json", &session);
+
+    if (opened == EWR_ERR_ANOTHER_RUN)
+    {
+        std::cout << "  [skip] another EWR run holds the printer" << std::endl;
+        ewr_session_close(session);
+        return;
+    }
+
+    CHECK(opened == EWR_ERR_DATABASE);
+    CHECK(session != nullptr);
+    CHECK(!std::string(ewr_session_last_error(session)).empty());
+
+    char* json = nullptr;
+    CHECK(ewr_list_models(session, &json) == EWR_ERR_DATABASE);
+    CHECK(json == nullptr);
+
+    ewr_session_close(session);
+}
+
 // The --json contract (docs/json-output.md) is what a caller's program is
 // written against, so the shape is the test: an envelope on every line, one
 // hello first, one result last, and a line that stays one line whatever the
@@ -5748,6 +5863,9 @@ int main()
     test_end4_sequence_verified();
     test_end4_sequence_silent_fails();
     test_end4_sequence_alternate_key();
+    test_c_abi_constants_and_status_names();
+    test_c_abi_database_calls_need_no_printer();
+    test_c_abi_reports_a_missing_database();
     test_json_contract_envelope_and_order();
     test_json_contract_reports_absent_progress_as_null();
     test_run_lock_admits_one_run_at_a_time();

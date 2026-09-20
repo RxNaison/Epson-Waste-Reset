@@ -1,9 +1,12 @@
 #pragma once
 #include "ewr/log.h"
+#include "ewr/session.h"
 
 #include <chrono>
 #include <ostream>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -60,5 +63,33 @@ namespace ewr {
     // with it.
     const char* JsonLevelName(log::Level level);
     const char* JsonStageName(log::Stage stage);
+
+    // ------------------------------------------------------------------
+    //  The `data` objects of docs/json-output.md
+    // ------------------------------------------------------------------
+    //
+    // Here rather than in the CLI because the C API answers with the same
+    // shapes: one definition, so a caller that moves from spawning ewr to
+    // linking against it reads the same JSON.
+
+    // [{"address": 12, "value": 0}, ...]; an unread byte has a null value.
+    nlohmann::json JsonCounterValues(const std::vector<std::pair<uint16_t, int>>& values);
+
+    // [{"name": ..., "used": ..., "max": ..., "percent": ...}, ...]. A pad
+    // group that could not be read whole is left out.
+    nlohmann::json JsonPadUsage(const DbPrinterModel& model,
+                                const std::vector<std::pair<uint16_t, int>>& values);
+
+    // The '@BDC ST2' report, or null when nothing parsed.
+    nlohmann::json JsonPrinterStatus(const PrinterStatus& status);
+
+    // model / printer / counters / pads, as `status` and `dry-run` carry them.
+    nlohmann::json JsonStateData(const DbPrinterModel& model, const StateSnapshot& state);
+
+    // What a reset ended up doing: phase, writes, verification, before/after.
+    nlohmann::json JsonResetData(const DbPrinterModel& model, bool ink, const ResetOutcome& outcome);
+
+    // The contract's spelling for a reset phase.
+    const char* JsonResetPhaseName(ResetPhase phase);
 
 } // namespace ewr

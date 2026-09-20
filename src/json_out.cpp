@@ -33,6 +33,119 @@ namespace ewr {
         return "general";
     }
 
+    nlohmann::json JsonCounterValues(const std::vector<std::pair<uint16_t, int>>& values)
+    {
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto& value : values)
+        {
+            nlohmann::json entry;
+            entry["address"] = value.first;
+            entry["value"] = (value.second >= 0) ? nlohmann::json(value.second) : nlohmann::json(nullptr);
+            out.push_back(std::move(entry));
+        }
+        return out;
+    }
+
+    nlohmann::json JsonPadUsage(const DbPrinterModel& model,
+                                const std::vector<std::pair<uint16_t, int>>& values)
+    {
+        nlohmann::json out = nlohmann::json::array();
+
+        for (const auto& spec : model.GetAllCounters())
+        {
+            const CounterReading reading = EvaluateCounter(spec, values);
+            if (!reading.complete)
+                continue;
+
+            const int percent = reading.Percent();
+
+            nlohmann::json pad;
+            pad["name"] = reading.description.empty() ? std::string("Counter") : reading.description;
+            pad["used"] = static_cast<unsigned>(reading.value);
+            pad["max"] = (reading.max_value > 0) ? nlohmann::json(static_cast<unsigned>(reading.max_value))
+                                                 : nlohmann::json(nullptr);
+            pad["percent"] = (percent >= 0) ? nlohmann::json(percent) : nlohmann::json(nullptr);
+            out.push_back(std::move(pad));
+        }
+
+        return out;
+    }
+
+    nlohmann::json JsonPrinterStatus(const PrinterStatus& status)
+    {
+        if (!status.valid)
+            return nullptr;
+
+        nlohmann::json inks = nlohmann::json::array();
+        for (const InkReading& ink : status.inks)
+        {
+            nlohmann::json one;
+            one["color"] = ink.colorName;
+            one["code"] = ink.colorCode;
+            one["level"] = (ink.level >= 0) ? nlohmann::json(ink.level) : nlohmann::json(nullptr);
+            one["status"] = ink.statusText;
+            inks.push_back(std::move(one));
+        }
+
+        nlohmann::json out;
+        out["state"] = status.stateName;
+        out["state_code"] = status.stateCode;
+        out["error"] = status.hasError ? nlohmann::json(status.errorName) : nlohmann::json(nullptr);
+        out["error_code"] = status.hasError ? nlohmann::json(status.errorCode) : nlohmann::json(nullptr);
+        out["truncated"] = status.truncated;
+        out["serial"] = status.serial.empty() ? nlohmann::json(nullptr) : nlohmann::json(status.serial);
+        out["maintenance_box"] = (status.maintenanceBoxLevel >= 0)
+            ? nlohmann::json(status.maintenanceBoxLevel) : nlohmann::json(nullptr);
+        out["inks"] = std::move(inks);
+        return out;
+    }
+
+    nlohmann::json JsonStateData(const DbPrinterModel& model, const StateSnapshot& state)
+    {
+        nlohmann::json out;
+        out["model"] = model.name;
+        out["printer"] = state.available ? JsonPrinterStatus(state.status) : nlohmann::json(nullptr);
+        out["counters"] = state.available ? JsonCounterValues(state.values) : nlohmann::json::array();
+        out["pads"] = state.available ? JsonPadUsage(model, state.values) : nlohmann::json::array();
+        return out;
+    }
+
+    const char* JsonResetPhaseName(ResetPhase phase)
+    {
+        switch (phase)
+        {
+            case ResetPhase::NotStarted:     return "not_started";
+            case ResetPhase::Aborted:        return "aborted";
+            case ResetPhase::DeviceNotFound: return "device_not_found";
+            case ResetPhase::WriteFailed:    return "write_failed";
+            case ResetPhase::Done:           return "done";
+        }
+
+        return "not_started";
+    }
+
+    nlohmann::json JsonResetData(const DbPrinterModel& model, bool ink, const ResetOutcome& outcome)
+    {
+        nlohmann::json out;
+        out["model"] = model.name;
+        out["target"] = ink ? "ink" : "waste";
+        out["phase"] = JsonResetPhaseName(outcome.phase);
+        out["writes"] = {
+            { "verified", outcome.writesVerified },
+            { "total", outcome.writesTotal },
+        };
+        out["alternate_key_used"] = outcome.alternateKeyUsed;
+        out["committed"] = outcome.committed;
+        out["verification"] = {
+            { "ran", outcome.verificationRan },
+            { "mismatches", outcome.verifyMismatches },
+            { "unread", outcome.verifyUnread },
+        };
+        out["before"] = JsonCounterValues(outcome.before.values);
+        out["after"] = JsonCounterValues(outcome.after.values);
+        return out;
+    }
+
     void JsonEmitter::Write(const char* type, nlohmann::json line)
     {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(

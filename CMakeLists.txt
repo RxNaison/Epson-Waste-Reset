@@ -13,7 +13,7 @@ configure_file(
     @ONLY
 )
 
-set(LIB_SOURCES src/run_lock.cpp src/json_out.cpp src/parser.cpp src/generator.cpp src/executor.cpp src/d4session.cpp src/session.cpp src/status.cpp src/deviceid.cpp src/updater_common.cpp src/usb_driver.cpp src/end4.cpp src/usb_composite.cpp src/discover.cpp)
+set(LIB_SOURCES src/run_lock.cpp src/json_out.cpp src/ewr_c.cpp src/parser.cpp src/generator.cpp src/executor.cpp src/d4session.cpp src/session.cpp src/status.cpp src/deviceid.cpp src/updater_common.cpp src/usb_driver.cpp src/end4.cpp src/usb_composite.cpp src/discover.cpp)
 
 if(WIN32)
     list(APPEND LIB_SOURCES src/usb_windows.cpp src/usb_libusb.cpp src/updater_windows.cpp)
@@ -73,6 +73,23 @@ set_target_properties(ewr PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_SOURCE_DIR}"
     RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_CURRENT_SOURCE_DIR}"
 )
+
+# The C ABI (include/ewr/ewr_c.h) is in ewr_core for anyone linking
+# statically; this builds it as a shared library for the callers that cannot -
+# Python, C#, Rust, anything with an FFI. Only the ewr_* symbols are exported.
+option(EWR_BUILD_C_SHARED "Build the C ABI as a shared library" ON)
+if(EWR_BUILD_C_SHARED)
+    set_property(TARGET ewr_core PROPERTY POSITION_INDEPENDENT_CODE ON)
+
+    add_library(ewrc SHARED src/ewr_c.cpp)
+    target_link_libraries(ewrc PRIVATE ewr_core)
+    target_compile_definitions(ewrc PRIVATE EWR_C_BUILD_SHARED)
+    set_target_properties(ewrc PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+        VERSION ${PROJECT_VERSION}
+    )
+endif()
 
 option(EWR_BUILD_TESTS "Build EWR unit tests" ON)
 if(EWR_BUILD_TESTS)

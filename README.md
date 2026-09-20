@@ -130,6 +130,11 @@ else:
 menu, `--yes` for the reset confirmation, `--force-yes` to overrule a printer error as
 well. A run that would need an answer stops with `error_code: "blocked"` and writes nothing.
 
+To put the reset *inside* your program instead of spawning it - a GUI, a service, a
+language binding - there is a C ABI in `include/ewr/ewr_c.h`, built as `ewrc.dll` /
+`libewrc.so` alongside the CLI, with the same JSON coming back:
+[docs/c-api.md](docs/c-api.md).
+
 ### Choosing the target: `--cartridge`
 
 Some models carry a per-color cartridge ink map as well as waste pad counters, and a run

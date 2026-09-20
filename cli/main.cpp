@@ -137,75 +137,6 @@ namespace {
         g_jsonErrorText = detail;
     }
 
-    nlohmann::json JsonCounters(const std::vector<std::pair<uint16_t, int>>& values)
-    {
-        nlohmann::json out = nlohmann::json::array();
-        for (const auto& v : values)
-        {
-            nlohmann::json entry;
-            entry["address"] = v.first;
-            entry["value"] = (v.second >= 0) ? nlohmann::json(v.second) : nlohmann::json(nullptr);
-            out.push_back(std::move(entry));
-        }
-        return out;
-    }
-
-    // The same counters the gauge bars render, as numbers: a pad group that
-    // could not be read whole is left out, exactly as it is on screen.
-    nlohmann::json JsonPads(const ewr::DbPrinterModel& model,
-                            const std::vector<std::pair<uint16_t, int>>& values)
-    {
-        nlohmann::json out = nlohmann::json::array();
-
-        for (const auto& spec : model.GetAllCounters())
-        {
-            const ewr::CounterReading reading = ewr::EvaluateCounter(spec, values);
-            if (!reading.complete)
-                continue;
-
-            const int percent = reading.Percent();
-
-            nlohmann::json pad;
-            pad["name"] = reading.description.empty() ? std::string("Counter") : reading.description;
-            pad["used"] = static_cast<unsigned>(reading.value);
-            pad["max"] = (reading.max_value > 0) ? nlohmann::json(static_cast<unsigned>(reading.max_value))
-                                                 : nlohmann::json(nullptr);
-            pad["percent"] = (percent >= 0) ? nlohmann::json(percent) : nlohmann::json(nullptr);
-            out.push_back(std::move(pad));
-        }
-
-        return out;
-    }
-
-    nlohmann::json JsonPrinterStatus(const ewr::PrinterStatus& status)
-    {
-        if (!status.valid)
-            return nullptr;
-
-        nlohmann::json inks = nlohmann::json::array();
-        for (const ewr::InkReading& ink : status.inks)
-        {
-            nlohmann::json one;
-            one["color"] = ink.colorName;
-            one["code"] = ink.colorCode;
-            one["level"] = (ink.level >= 0) ? nlohmann::json(ink.level) : nlohmann::json(nullptr);
-            one["status"] = ink.statusText;
-            inks.push_back(std::move(one));
-        }
-
-        nlohmann::json out;
-        out["state"] = status.stateName;
-        out["state_code"] = status.stateCode;
-        out["error"] = status.hasError ? nlohmann::json(status.errorName) : nlohmann::json(nullptr);
-        out["error_code"] = status.hasError ? nlohmann::json(status.errorCode) : nlohmann::json(nullptr);
-        out["truncated"] = status.truncated;
-        out["serial"] = status.serial.empty() ? nlohmann::json(nullptr) : nlohmann::json(status.serial);
-        out["maintenance_box"] = (status.maintenanceBoxLevel >= 0)
-            ? nlohmann::json(status.maintenanceBoxLevel) : nlohmann::json(nullptr);
-        out["inks"] = std::move(inks);
-        return out;
-    }
-
 } // namespace
 
 static void SetWorkingDirectoryToExecutable()
@@ -1424,10 +1355,10 @@ int main(int argc, char* argv[])
             std::cout << "[i] Counter values are not available for Replay models (no read key in the dump)." << std::endl;
 
         g_jsonData["model"] = selected.isReplay ? selected.replayModel.name : selected.smartModel.name;
-        g_jsonData["printer"] = JsonPrinterStatus(state.status);
-        g_jsonData["counters"] = JsonCounters(state.values);
+        g_jsonData["printer"] = ewr::JsonPrinterStatus(state.status);
+        g_jsonData["counters"] = ewr::JsonCounterValues(state.values);
         g_jsonData["pads"] = selected.isReplay ? nlohmann::json::array()
-                                               : JsonPads(selected.smartModel, state.values);
+                                               : ewr::JsonPadUsage(selected.smartModel, state.values);
         g_jsonData["planned_writes"] = nullptr;
         return FinishRun(0);
     }
@@ -1474,7 +1405,7 @@ int main(int argc, char* argv[])
         g_jsonData["model"] = selected.smartModel.name;
         g_jsonData["answered"] = answered;
         g_jsonData["total"] = state.values.size();
-        g_jsonData["values"] = JsonCounters(state.values);
+        g_jsonData["values"] = ewr::JsonCounterValues(state.values);
         g_jsonData["file"] = nullptr;
 
         const std::string path = WriteEepromDump(selected.smartModel, state.values);
@@ -1804,9 +1735,9 @@ int main(int argc, char* argv[])
 
         g_jsonData["model"] = selected.smartModel.name;
         g_jsonData["target"] = cli.cartridge ? "ink" : "waste";
-        g_jsonData["printer"] = state.available ? JsonPrinterStatus(state.status) : nlohmann::json(nullptr);
-        g_jsonData["counters"] = state.available ? JsonCounters(state.values) : nlohmann::json::array();
-        g_jsonData["pads"] = state.available ? JsonPads(selected.smartModel, state.values)
+        g_jsonData["printer"] = state.available ? ewr::JsonPrinterStatus(state.status) : nlohmann::json(nullptr);
+        g_jsonData["counters"] = state.available ? ewr::JsonCounterValues(state.values) : nlohmann::json::array();
+        g_jsonData["pads"] = state.available ? ewr::JsonPadUsage(selected.smartModel, state.values)
                                              : nlohmann::json::array();
         g_jsonData["planned_writes"] = std::move(planned);
         return FinishRun(0);
@@ -2139,8 +2070,8 @@ int main(int argc, char* argv[])
         { "mismatches", outcome.verifyMismatches },
         { "unread", outcome.verifyUnread },
     };
-    g_jsonData["before"] = JsonCounters(outcome.before.values);
-    g_jsonData["after"] = JsonCounters(outcome.after.values);
+    g_jsonData["before"] = ewr::JsonCounterValues(outcome.before.values);
+    g_jsonData["after"] = ewr::JsonCounterValues(outcome.after.values);
 
     if (!outcome.success && !outcome.error.empty())
     {

@@ -2,11 +2,13 @@
 #include "ewr/executor.h"
 #include "ewr/generator.h"
 #include "ewr/log.h"
+#include "ewr/run_lock.h"
 #include "ewr/status.h"
 #include "ewr/usb.h"
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -130,6 +132,13 @@ namespace ewr {
             const std::vector<std::vector<unsigned char>>& sequence,
             const ExecutorOptions& options) override;
 
+        // Taken on the first device call and held for the life of the
+        // gateway. False means another EWR run already has the printer; see
+        // ewr/run_lock.h for why that must not become two runs on one handle.
+        // Public so a host can claim before it prints anything and say so in
+        // its own words; every device call claims anyway.
+        bool ClaimPrinter();
+
     private:
         // False exactly once: the call that must start the trace file fresh.
         bool NextCallAppends();
@@ -141,6 +150,7 @@ namespace ewr {
 
         bool m_traceStarted = false;
         bool m_softResetSent = false;
+        std::unique_ptr<RunLock> m_runLock;
     };
 
     // Read-only session defaults: the IEEE 1284.4 session core is the

@@ -100,6 +100,13 @@ namespace ewr {
     //  UsbDeviceGateway
     // ------------------------------------------------------------------
 
+    namespace {
+
+        const char* const kAnotherRunError =
+            "Another EWR run is already driving a printer on this machine.";
+
+    } // namespace
+
     bool UsbDeviceGateway::NextCallAppends()
     {
         const bool append = m_traceStarted;
@@ -107,13 +114,37 @@ namespace ewr {
         return append;
     }
 
+    // Two runs share one usbprint handle and take each other's replies, and
+    // the loser may be the one mid-write, so the second run does not start.
+    bool UsbDeviceGateway::ClaimPrinter()
+    {
+        if (!m_runLock)
+            m_runLock = std::make_unique<RunLock>();
+
+        if (m_runLock->Held())
+            return true;
+
+        log::Log(log::Level::Error, log::Stage::Detect, "usb.another_run",
+                 "[!] Another EWR run is already driving a printer on this machine.\n"
+                 "    Two runs share one USB handle and take each other's replies, so this one\n"
+                 "    stops here. Close the other run - or look for a leftover ewr process\n"
+                 "    waiting at a prompt - and try again.");
+        return false;
+    }
+
     DeviceIdQueryResult UsbDeviceGateway::QueryDeviceId()
     {
+        if (!ClaimPrinter())
+            return {};
+
         return QueryPrinterDeviceId(NextCallAppends());
     }
 
     std::vector<InterfaceInfo> UsbDeviceGateway::ListInterfaces()
     {
+        if (!ClaimPrinter())
+            return {};
+
         return ListPrinterInterfaces(NextCallAppends());
     }
 
@@ -131,6 +162,13 @@ namespace ewr {
         const std::vector<std::vector<unsigned char>>& queries,
         const ExecutorOptions& options)
     {
+        if (!ClaimPrinter())
+        {
+            QueryRunResult busy;
+            busy.query.error = kAnotherRunError;
+            return busy;
+        }
+
         return ExecuteQuerySessionWithFallback(handshake, queries, SoftResetOnce(options), NextCallAppends());
     }
 
@@ -138,6 +176,13 @@ namespace ewr {
         const std::vector<std::vector<unsigned char>>& sequence,
         const ExecutorOptions& options)
     {
+        if (!ClaimPrinter())
+        {
+            ResetRunResult busy;
+            busy.exec.error = kAnotherRunError;
+            return busy;
+        }
+
         return ExecutePayloadSequenceWithFallback(sequence, SoftResetOnce(options), NextCallAppends());
     }
 

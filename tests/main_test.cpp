@@ -17,6 +17,7 @@
 #include "ewr/log.h"
 #include "ewr/session.h"
 #include "ewr/usb_backend.h"
+#include "ewr/run_lock.h"
 #include "ewr/discover.h"
 
 namespace fs = std::filesystem;
@@ -4874,6 +4875,28 @@ void test_end4_sequence_alternate_key()
     CHECK(result.writesVerified == 2);
 }
 
+// Two EWR runs on one printer take each other's replies, and the one that
+// loses a reply may be the one mid-write (issue #39). The second run is meant
+// to find the lock taken and stop, and a run that ends must leave it free -
+// including one that was killed, which is why it is an OS lock and not a file
+// anybody has to clean up.
+void test_run_lock_admits_one_run_at_a_time()
+{
+    std::cout << "[TEST] test_run_lock_admits_one_run_at_a_time" << std::endl;
+
+    {
+        ewr::RunLock first;
+        CHECK(first.Held());
+
+        ewr::RunLock second;
+        CHECK(!second.Held());
+    }
+
+    // Both are gone: the next run gets it.
+    ewr::RunLock afterwards;
+    CHECK(afterwards.Held());
+}
+
 // ---------------------------------------------------------------------------
 // Composite backend (usb_composite.cpp)
 // ---------------------------------------------------------------------------
@@ -5629,6 +5652,7 @@ int main()
     test_end4_sequence_verified();
     test_end4_sequence_silent_fails();
     test_end4_sequence_alternate_key();
+    test_run_lock_admits_one_run_at_a_time();
     test_composite_merges_candidates_in_member_order();
     test_composite_identifies_a_shared_interface_by_number();
     test_composite_routes_every_call_to_the_owning_member();

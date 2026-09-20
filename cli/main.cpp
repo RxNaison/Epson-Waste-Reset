@@ -22,6 +22,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <io.h>
 #else
 #include <unistd.h>
 #include <climits>
@@ -281,6 +282,20 @@ static void PrintCounterSummary(const ewr::DbPrinterModel& model,
 // Diagnostic runs are often piped, so they skip the interactive pause.
 static bool g_exitPause = true;
 
+// The pause exists for the Windows user who ran ewr.exe by double-clicking and
+// would otherwise watch the window vanish. A caller that pipes stdin has no
+// keyboard behind it: a pipe that stays open never delivers the Enter, and the
+// run hangs forever holding the printer (issue #39 found one sitting for seven
+// hours). Piped answers still work - only the final keypress is skipped.
+static bool StdinIsInteractive()
+{
+#ifdef _WIN32
+    return _isatty(_fileno(stdin)) != 0;
+#else
+    return isatty(fileno(stdin)) != 0;
+#endif
+}
+
 // Every exit path funnels through here so a staged update always applies.
 static int FinishRun(int exitCode)
 {
@@ -507,7 +522,8 @@ int main(int argc, char* argv[])
     const bool statusOnly = cli.statusOnly;
     // --yes means nobody is at the keyboard, so the closing "press Enter" read
     // would block the caller after the reset it just asked for.
-    g_exitPause = !(cli.statusOnly || cli.listOnly || cli.dryRun || cli.dump || cli.assumeYes);
+    g_exitPause = StdinIsInteractive()
+        && !(cli.statusOnly || cli.listOnly || cli.dryRun || cli.dump || cli.assumeYes);
 
     std::cout << "========================================" << std::endl;
     std::cout << "       EWR - Epson Waste Reset          " << std::endl;
@@ -673,6 +689,11 @@ int main(int argc, char* argv[])
     // One per run: it owns the ewr_trace.log lifecycle, so the first device
     // call starts the file fresh and every later session appends.
     ewr::UsbDeviceGateway gateway;
+
+    // Before any device call, so a second run says why it stopped instead of
+    // reporting a printer that cannot be read. The gateway logs the reason.
+    if (!gateway.ClaimPrinter())
+        return FinishRun(1);
 
     // Once per run: powers detection, the banner and --interface validation.
     std::string detectedMdl;

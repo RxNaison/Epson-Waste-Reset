@@ -144,6 +144,38 @@ jobs:
         esac
         ls -l dist
 
+    # The C ABI ships on its own, not beside ewr.exe: a user resetting a
+    # printer needs one self-contained binary and would rightly wonder what a
+    # DLL next to it is for. Embedders take this archive instead - the shared
+    # library, the header they include, and the two contracts they code
+    # against.
+    - name: Package the C API SDK
+      shell: bash
+      run: |
+        mkdir -p stage/EWR-SDK/include/ewr stage/EWR-SDK/lib stage/EWR-SDK/docs
+        cp include/ewr/ewr_c.h stage/EWR-SDK/include/ewr/
+        cp docs/c-api.md docs/json-output.md stage/EWR-SDK/docs/
+
+        case "${{ runner.os }}" in
+          Windows)
+            # The .lib is the import library a C or C++ caller links against;
+            # ctypes and friends need only the DLL.
+            cp build/Release/ewrc.dll build/Release/ewrc.lib stage/EWR-SDK/lib/
+            (cd stage && 7z a "../dist/EWR-SDK-${GITHUB_REF_NAME}-win.zip" EWR-SDK)
+            ;;
+          macOS)
+            # -a keeps the libewrc.dylib -> libewrc.<version>.dylib symlink,
+            # which is what a caller opens.
+            cp -a build/libewrc*.dylib stage/EWR-SDK/lib/
+            tar -czf "dist/EWR-SDK-${GITHUB_REF_NAME}-macos-$(uname -m).tar.gz" -C stage EWR-SDK
+            ;;
+          *)
+            cp -a build/libewrc.so* stage/EWR-SDK/lib/
+            tar -czf "dist/EWR-SDK-${GITHUB_REF_NAME}-linux.tar.gz" -C stage EWR-SDK
+            ;;
+        esac
+        ls -l dist
+
     - name: Upload artifacts to draft release
       uses: softprops/action-gh-release@v2
       with:

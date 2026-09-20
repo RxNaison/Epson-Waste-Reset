@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
-project(EWR VERSION 1.3.1 LANGUAGES CXX)
+# C is here for tests/c_header_check.c: the C ABI header has to keep
+# compiling as C, and only a C compiler can say so.
+project(EWR VERSION 1.3.1 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -94,6 +96,12 @@ endif()
 option(EWR_BUILD_TESTS "Build EWR unit tests" ON)
 if(EWR_BUILD_TESTS)
     enable_testing()
+    # Guards include/ewr/ewr_c.h against C++-only syntax: it is compiled as C
+    # and linked against the same library a caller would link.
+    add_executable(ewr_c_header_check tests/c_header_check.c)
+    target_link_libraries(ewr_c_header_check PRIVATE ewr_core)
+    add_test(NAME CApiHeader COMMAND ewr_c_header_check)
+
     add_executable(ewr_tests tests/main_test.cpp)
     target_link_libraries(ewr_tests PRIVATE ewr_core)
     # Tests read database.json and the models/ folder, so they must run

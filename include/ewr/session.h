@@ -73,6 +73,9 @@ namespace ewr {
         ResetPhase phase = ResetPhase::NotStarted;
 
         bool success = false;
+        // What the write session acknowledged. Both stay 0 when it never ran.
+        size_t writesVerified = 0;
+        size_t writesTotal = 0;
         // The database's primary keyword was rejected and 'wkey1' worked -
         // a reportable database fix.
         bool alternateKeyUsed = false;

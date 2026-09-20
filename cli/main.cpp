@@ -14,8 +14,13 @@
 #include "ewr/discover.h"
 #include "ewr/version.h"
 #include "ewr/log.h"
+#include "ewr/json_out.h"
 #include <cstdint>
 #include <cstdio>
+#include <memory>
+#include <streambuf>
+#include <utility>
+#include <vector>
 #include <fstream>
 #include <sstream>
 #include <ctime>
@@ -59,8 +64,149 @@ struct CliOptions
     bool cartridge = false;      // --cartridge: reset ink levels instead of the waste pads
     int interfaceCandidate = 0;  // --interface <n>: 1-based pin, 0 = auto
     bool usbSoftReset = false;   // --usb-soft-reset: reset the USB channel once, then wait
+    bool json = false;           // --json: the machine-readable contract on stdout
     std::string modelOverride;   // --model <name>: skip the menu
 };
+
+// ---- --json (docs/json-output.md) --------------------------------------
+//
+// The contract owns stdout in this mode, so the human rendering is sent to a
+// sink that drops it rather than guarded at two hundred call sites. Nothing
+// below does anything unless --json was passed.
+
+namespace {
+
+    class NullBuffer final : public std::streambuf
+    {
+    protected:
+        int overflow(int ch) override { return ch; }
+    };
+
+    NullBuffer g_nullBuffer;
+    std::unique_ptr<std::ostream> g_realStdout;
+    std::unique_ptr<ewr::JsonEmitter> g_json;
+
+    // Filled in as the run goes; spent by the single result line.
+    std::string g_jsonCommand = "unknown";
+    std::string g_jsonErrorCode;
+    std::string g_jsonErrorText;
+    nlohmann::json g_jsonData = nlohmann::json::object();
+    bool g_jsonHelloSent = false;
+
+    const char* PlatformName()
+    {
+#ifdef _WIN32
+        return "windows";
+#elif defined(__APPLE__)
+        return "macos";
+#else
+        return "linux";
+#endif
+    }
+
+    // `hello` waits for the command name, which parsing decides - but it must
+    // still come first when parsing is what failed.
+    void JsonHello(const CliOptions& cli)
+    {
+        if (!g_json || g_jsonHelloSent)
+            return;
+
+        g_jsonHelloSent = true;
+
+        nlohmann::json flags;
+        flags["no_update"] = cli.noUpdate;
+        flags["yes"] = cli.assumeYes;
+        flags["force_yes"] = cli.forceYes;
+        flags["cartridge"] = cli.cartridge;
+        flags["usb_soft_reset"] = cli.usbSoftReset;
+        flags["interface"] = cli.interfaceCandidate;
+
+        g_json->Hello(EWR_VERSION, PlatformName(), g_jsonCommand,
+                      cli.modelOverride.empty() ? nlohmann::json(nullptr) : nlohmann::json(cli.modelOverride),
+                      flags);
+    }
+
+    // The reason this run did not do what it was asked. The first one wins:
+    // later failures are consequences of it.
+    void JsonFail(const char* errorCode, const std::string& detail = "")
+    {
+        if (!g_json || !g_jsonErrorCode.empty())
+            return;
+
+        g_jsonErrorCode = errorCode;
+        g_jsonErrorText = detail;
+    }
+
+    nlohmann::json JsonCounters(const std::vector<std::pair<uint16_t, int>>& values)
+    {
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto& v : values)
+        {
+            nlohmann::json entry;
+            entry["address"] = v.first;
+            entry["value"] = (v.second >= 0) ? nlohmann::json(v.second) : nlohmann::json(nullptr);
+            out.push_back(std::move(entry));
+        }
+        return out;
+    }
+
+    // The same counters the gauge bars render, as numbers: a pad group that
+    // could not be read whole is left out, exactly as it is on screen.
+    nlohmann::json JsonPads(const ewr::DbPrinterModel& model,
+                            const std::vector<std::pair<uint16_t, int>>& values)
+    {
+        nlohmann::json out = nlohmann::json::array();
+
+        for (const auto& spec : model.GetAllCounters())
+        {
+            const ewr::CounterReading reading = ewr::EvaluateCounter(spec, values);
+            if (!reading.complete)
+                continue;
+
+            const int percent = reading.Percent();
+
+            nlohmann::json pad;
+            pad["name"] = reading.description.empty() ? std::string("Counter") : reading.description;
+            pad["used"] = static_cast<unsigned>(reading.value);
+            pad["max"] = (reading.max_value > 0) ? nlohmann::json(static_cast<unsigned>(reading.max_value))
+                                                 : nlohmann::json(nullptr);
+            pad["percent"] = (percent >= 0) ? nlohmann::json(percent) : nlohmann::json(nullptr);
+            out.push_back(std::move(pad));
+        }
+
+        return out;
+    }
+
+    nlohmann::json JsonPrinterStatus(const ewr::PrinterStatus& status)
+    {
+        if (!status.valid)
+            return nullptr;
+
+        nlohmann::json inks = nlohmann::json::array();
+        for (const ewr::InkReading& ink : status.inks)
+        {
+            nlohmann::json one;
+            one["color"] = ink.colorName;
+            one["code"] = ink.colorCode;
+            one["level"] = (ink.level >= 0) ? nlohmann::json(ink.level) : nlohmann::json(nullptr);
+            one["status"] = ink.statusText;
+            inks.push_back(std::move(one));
+        }
+
+        nlohmann::json out;
+        out["state"] = status.stateName;
+        out["state_code"] = status.stateCode;
+        out["error"] = status.hasError ? nlohmann::json(status.errorName) : nlohmann::json(nullptr);
+        out["error_code"] = status.hasError ? nlohmann::json(status.errorCode) : nlohmann::json(nullptr);
+        out["truncated"] = status.truncated;
+        out["serial"] = status.serial.empty() ? nlohmann::json(nullptr) : nlohmann::json(status.serial);
+        out["maintenance_box"] = (status.maintenanceBoxLevel >= 0)
+            ? nlohmann::json(status.maintenanceBoxLevel) : nlohmann::json(nullptr);
+        out["inks"] = std::move(inks);
+        return out;
+    }
+
+} // namespace
 
 static void SetWorkingDirectoryToExecutable()
 {
@@ -153,6 +299,10 @@ static void PrintUsage()
               << "                   addresses for. Reads the EEPROM three times and asks you\n"
               << "                   to run a head cleaning between reads; the bytes that rise\n"
               << "                   every time are the counters. Read-only.\n"
+              << "  --json           Machine-readable output: one JSON object per line on\n"
+              << "                   stdout, for callers driving EWR from another language.\n"
+              << "                   Never prompts; see docs/json-output.md for the contract.\n"
+              << "                   --json-version <n> pins the contract version (1).\n"
               << "  --help, -h       Show this help.\n";
 }
 
@@ -296,9 +446,25 @@ static bool StdinIsInteractive()
 #endif
 }
 
-// Every exit path funnels through here so a staged update always applies.
+// Every exit path funnels through here so a staged update always applies -
+// and, in --json mode, so the stream always ends with exactly one result.
 static int FinishRun(int exitCode)
 {
+    if (g_json)
+    {
+        const bool ok = (exitCode == 0);
+
+        // A run can fail without anything having named a reason. "failed" is
+        // that case, and it is part of the contract for exactly this purpose.
+        nlohmann::json errorCode = nullptr;
+        if (!ok)
+            errorCode = g_jsonErrorCode.empty() ? std::string("failed") : g_jsonErrorCode;
+
+        g_json->Result(g_jsonCommand, ok, exitCode, errorCode,
+                       g_jsonErrorText.empty() ? nlohmann::json(nullptr) : nlohmann::json(g_jsonErrorText),
+                       g_jsonData);
+    }
+
     if (g_exitPause)
     {
         std::cout << "\nPress Enter to exit..." << std::endl;
@@ -308,6 +474,17 @@ static int FinishRun(int exitCode)
     ewr::BackgroundUpdater::Instance().ApplyStagedUpdatesOnExit();
 
     return exitCode;
+}
+
+// A rejected command line still owes a --json caller its one result line.
+static int UsageError(const CliOptions& cli, const std::string& message);
+
+static int UsageError(const CliOptions& cli, const std::string& message)
+{
+    std::cerr << "[!] " << message << std::endl;
+    JsonHello(cli);
+    JsonFail("bad_usage", message);
+    return FinishRun(2);
 }
 
 static int FinishReset(bool resetOk)
@@ -436,6 +613,36 @@ int main(int argc, char* argv[])
     ewr::log::Default().AddSink(ewr::log::ConsoleSink(std::cout, std::cerr));
 
     CliOptions cli;
+
+    // Decided before anything prints: in --json mode stdout belongs to the
+    // contract, and a command line that gets rejected still owes the caller a
+    // result line.
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string arg = argv[i];
+        if (arg == "--json" || arg == "--json-version")
+        {
+            cli.json = true;
+            break;
+        }
+    }
+
+    if (cli.json)
+    {
+        g_realStdout = std::make_unique<std::ostream>(std::cout.rdbuf());
+        std::cout.rdbuf(&g_nullBuffer);
+        g_json = std::make_unique<ewr::JsonEmitter>(*g_realStdout);
+
+        // Events become contract lines instead of console text; the CLI's own
+        // stderr writes are untouched and stay human.
+        ewr::log::Default().ClearSinks();
+        ewr::log::Default().AddSink([](const ewr::log::Event& event)
+        {
+            if (g_json)
+                g_json->Event(event);
+        });
+    }
+
     for (int i = 1; i < argc; ++i)
     {
         const std::string arg = argv[i];
@@ -482,12 +689,33 @@ int main(int argc, char* argv[])
         {
             cli.usbSoftReset = true;
         }
+        else if (arg == "--json")
+        {
+            cli.json = true;
+        }
+        else if (arg == "--json-version")
+        {
+            // Named now so a caller can pin the contract from the first
+            // release that has one: a future break raises the version and
+            // keeps this flag answering for the old shape.
+            if (i + 1 >= argc)
+            {
+                return UsageError(cli, "--json-version needs a number (the contract version, 1).");
+            }
+
+            const std::string value = argv[++i];
+            if (value != "1")
+            {
+                return UsageError(cli, "--json-version " + value + " is not supported by this build (it speaks 1).");
+            }
+
+            cli.json = true;
+        }
         else if (arg == "--model" || arg == "--interface")
         {
             if (i + 1 >= argc)
             {
-                std::cerr << "[!] " << arg << " needs a value (see --help)." << std::endl;
-                return 2;
+                return UsageError(cli, arg + " needs a value (see --help).");
             }
 
             const std::string value = argv[++i];
@@ -502,27 +730,49 @@ int main(int argc, char* argv[])
 
                 if (cli.interfaceCandidate < 1)
                 {
-                    std::cerr << "[!] --interface needs a number from --list (1, 2, ...)." << std::endl;
-                    return 2;
+                    return UsageError(cli, "--interface needs a number from --list (1, 2, ...).");
                 }
             }
         }
         else if (arg == "--help" || arg == "-h")
         {
+            if (cli.json)
+            {
+                // The usage text is written for a terminal, so it travels as
+                // one string rather than as silenced stdout.
+                std::ostringstream usage;
+                std::streambuf* const console = std::cout.rdbuf(usage.rdbuf());
+                PrintUsage();
+                std::cout.rdbuf(console);
+
+                g_jsonCommand = "help";
+                JsonHello(cli);
+                g_jsonData["usage"] = usage.str();
+                return FinishRun(0);
+            }
+
             PrintUsage();
             return 0;
         }
         else
         {
-            std::cerr << "[!] Unknown option: " << arg << " (see --help)." << std::endl;
-            return 2;
+            return UsageError(cli, "Unknown option: " + arg + " (see --help).");
         }
     }
 
     const bool statusOnly = cli.statusOnly;
+
+    g_jsonCommand = cli.listOnly       ? "list"
+                  : cli.statusOnly     ? "status"
+                  : cli.dump           ? "dump"
+                  : cli.findAddresses  ? "find-addresses"
+                  : cli.dryRun         ? "dry-run"
+                                       : "reset";
+    JsonHello(cli);
+
     // --yes means nobody is at the keyboard, so the closing "press Enter" read
     // would block the caller after the reset it just asked for.
-    g_exitPause = StdinIsInteractive()
+    g_exitPause = !cli.json && StdinIsInteractive()
         && !(cli.statusOnly || cli.listOnly || cli.dryRun || cli.dump || cli.assumeYes);
 
     std::cout << "========================================" << std::endl;
@@ -560,17 +810,36 @@ int main(int argc, char* argv[])
 
         std::cout << "[*] Scanning Epson USB interfaces (read-only)..." << std::endl;
         ewr::UsbDeviceGateway listGateway;
+
+        if (!listGateway.ClaimPrinter())
+        {
+            JsonFail("another_run", "Another EWR run is already driving a printer on this machine.");
+            return FinishRun(1);
+        }
+
         const std::vector<ewr::InterfaceInfo> interfaces = listGateway.ListInterfaces();
 
         if (interfaces.empty())
         {
             std::cout << "\nNo Epson USB interfaces found. Is the printer on and plugged in?" << std::endl;
-            return 1;
+            g_jsonData["interfaces"] = nlohmann::json::array();
+            JsonFail("device_not_found", "No Epson USB interfaces found.");
+            return FinishRun(1);
         }
+
+        nlohmann::json jsonInterfaces = nlohmann::json::array();
 
         std::cout << "\nDetected Epson USB interfaces (in automatic fallback order):" << std::endl;
         for (const auto& iface : interfaces)
         {
+            nlohmann::json entry;
+            entry["index"] = iface.index;
+            entry["class"] = iface.className;
+            entry["interface_number"] = iface.interfaceNumber;
+            entry["path"] = iface.path;
+            entry["device_id"] = iface.deviceId.empty() ? nlohmann::json(nullptr) : nlohmann::json(iface.deviceId);
+            entry["model_match"] = nullptr;
+
             std::cout << "\n  [" << iface.index << "] " << iface.className;
             if (iface.interfaceNumber >= 0)
                 std::cout << " mi_" << (iface.interfaceNumber < 10 ? "0" : "") << iface.interfaceNumber;
@@ -579,6 +848,7 @@ int main(int argc, char* argv[])
             if (iface.deviceId.empty())
             {
                 std::cout << "      IEEE 1284 device ID: (no reply)" << std::endl;
+                jsonInterfaces.push_back(std::move(entry));
                 continue;
             }
 
@@ -589,12 +859,18 @@ int main(int argc, char* argv[])
             {
                 const std::vector<std::string> matches = ewr::MatchModelEntries(devId.model, listEntries);
                 if (!matches.empty())
+                {
                     std::cout << "      Database entry:      " << matches[0] << std::endl;
+                    entry["model_match"] = matches[0];
+                }
             }
+
+            jsonInterfaces.push_back(std::move(entry));
         }
 
         std::cout << "\nUse --interface <n> to pin a run to one specific interface." << std::endl;
-        return 0;
+        g_jsonData["interfaces"] = std::move(jsonInterfaces);
+        return FinishRun(0);
     }
 
     // Only the first run blocks: without a database there is nothing to show,
@@ -935,6 +1211,15 @@ int main(int argc, char* argv[])
         }
     }
 
+    // --json never prompts: there is nobody to ask, and a menu on a silenced
+    // stdout would look like a hang.
+    if (!hasSelected && cli.json)
+    {
+        std::cerr << "[!] --json needs the model on the command line: pass --model <name>." << std::endl;
+        JsonFail("model_required", "--json cannot open the model menu; pass --model <name>.");
+        return FinishRun(1);
+    }
+
     while (!hasSelected)
     {
         if (!detectedMatch.empty())
@@ -1051,6 +1336,14 @@ int main(int argc, char* argv[])
                       << " values to it." << std::endl;
             return FinishRun(1);
         }
+        else if (cli.json)
+        {
+            std::cerr << "\n[!] --model names something other than the printer that answered."
+                      << " Pass --force-yes to overrule it." << std::endl;
+            JsonFail("model_mismatch", "--model " + selected.smartModel.name
+                                       + " does not match the detected " + detectedMatch + ".");
+            return FinishRun(1);
+        }
         else
         {
             std::cout << "\nContinue with " << selected.smartModel.name << " anyway? [y/N]: ";
@@ -1117,6 +1410,7 @@ int main(int argc, char* argv[])
         {
             std::cerr << "[ERROR] Could not read the printer status. Is it turned on and plugged in?" << std::endl;
             std::cerr << "        Check ewr_trace.log for the hardware trace." << std::endl;
+            JsonFail("read_failed", "The printer did not answer the status query.");
             return FinishRun(1);
         }
 
@@ -1129,6 +1423,12 @@ int main(int argc, char* argv[])
         if (selected.isReplay)
             std::cout << "[i] Counter values are not available for Replay models (no read key in the dump)." << std::endl;
 
+        g_jsonData["model"] = selected.isReplay ? selected.replayModel.name : selected.smartModel.name;
+        g_jsonData["printer"] = JsonPrinterStatus(state.status);
+        g_jsonData["counters"] = JsonCounters(state.values);
+        g_jsonData["pads"] = selected.isReplay ? nlohmann::json::array()
+                                               : JsonPads(selected.smartModel, state.values);
+        g_jsonData["planned_writes"] = nullptr;
         return FinishRun(0);
     }
 
@@ -1140,6 +1440,7 @@ int main(int argc, char* argv[])
         {
             std::cerr << "[!] --dump needs a Smart Protocol model: it reads the EEPROM with the\n"
                          "    database read key, and Replay dumps carry none." << std::endl;
+            JsonFail("not_supported", "--dump needs a Smart Protocol model; a Replay dump carries no read key.");
             return FinishRun(1);
         }
 
@@ -1160,6 +1461,7 @@ int main(int argc, char* argv[])
         {
             std::cerr << "[ERROR] Could not read the printer. Is it powered on and connected?" << std::endl;
             std::cerr << "        See ewr_trace.log for the hardware trace." << std::endl;
+            JsonFail("read_failed", "The printer did not answer the EEPROM read.");
             return FinishRun(1);
         }
 
@@ -1169,12 +1471,21 @@ int main(int argc, char* argv[])
         for (const auto& v : state.values)
             answered += (v.second >= 0) ? 1 : 0;
 
+        g_jsonData["model"] = selected.smartModel.name;
+        g_jsonData["answered"] = answered;
+        g_jsonData["total"] = state.values.size();
+        g_jsonData["values"] = JsonCounters(state.values);
+        g_jsonData["file"] = nullptr;
+
         const std::string path = WriteEepromDump(selected.smartModel, state.values);
         if (path.empty())
         {
             std::cerr << "[ERROR] Read the EEPROM, but could not write the dump file." << std::endl;
+            JsonFail("io_error", "Read the EEPROM, but could not write the dump file.");
             return FinishRun(1);
         }
+
+        g_jsonData["file"] = path;
 
         // A diff reads '--' on both sides as "unchanged" when it means
         // "unknown", so a short dump must not look like a backup (#39).
@@ -1190,6 +1501,9 @@ int main(int argc, char* argv[])
             else
                 std::cerr << "        Run --dump again; if it comes back short twice, power-cycle the\n"
                              "        printer first. See ewr_trace.log for the hardware trace." << std::endl;
+
+            JsonFail("incomplete_dump", "The printer answered " + std::to_string(answered) + " of "
+                                        + std::to_string(state.values.size()) + " EEPROM bytes.");
             return FinishRun(1);
         }
 
@@ -1211,6 +1525,20 @@ int main(int argc, char* argv[])
         {
             std::cerr << "[!] --find-addresses needs a Smart Protocol model: it reads the EEPROM\n"
                          "    with the database read key, and Replay dumps carry none." << std::endl;
+            JsonFail("not_supported", "--find-addresses needs a Smart Protocol model; a Replay dump carries no read key.");
+            return FinishRun(1);
+        }
+
+        // The passes are separated by a head cleaning that a person has to
+        // start on the printer, so this one cannot be driven headlessly.
+        // A caller that wants the readings can run --dump around its own
+        // cleanings and compare the files.
+        if (cli.json)
+        {
+            std::cerr << "[!] --find-addresses needs someone at the printer to run a head cleaning\n"
+                         "    between passes, so it has no --json form. Use --dump around your own\n"
+                         "    cleanings instead." << std::endl;
+            JsonFail("not_supported", "--find-addresses needs a head cleaning between passes and cannot run headlessly.");
             return FinishRun(1);
         }
 
@@ -1401,6 +1729,15 @@ int main(int argc, char* argv[])
             std::cout << "\n[DRY RUN] " << selected.displayName << ": the dump holds "
                       << dumpSequence.size() << " packets, " << dumpWrites << " of them EEPROM writes." << std::endl;
             std::cout << "[DRY RUN] Nothing was sent to the printer." << std::endl;
+
+            g_jsonData["model"] = selected.replayModel.name;
+            g_jsonData["printer"] = nullptr;
+            g_jsonData["counters"] = nlohmann::json::array();
+            g_jsonData["pads"] = nlohmann::json::array();
+            // A replay dump is opaque bytes: the packet count is all it knows.
+            g_jsonData["planned_writes"] = nullptr;
+            g_jsonData["replay_packets"] = dumpSequence.size();
+            g_jsonData["replay_writes"] = dumpWrites;
             return FinishRun(0);
         }
 
@@ -1455,6 +1792,23 @@ int main(int argc, char* argv[])
             std::cout << "    (an alternate write keyword is available if the primary is rejected)" << std::endl;
 
         std::cout << "\n[DRY RUN] Nothing was written. Run without --dry-run to perform the reset." << std::endl;
+
+        nlohmann::json planned = nlohmann::json::array();
+        for (size_t i = 0; i < planAddresses.size(); ++i)
+        {
+            nlohmann::json write;
+            write["address"] = planAddresses[i];
+            write["value"] = (i < planValues.size()) ? planValues[i] : 0;
+            planned.push_back(std::move(write));
+        }
+
+        g_jsonData["model"] = selected.smartModel.name;
+        g_jsonData["target"] = cli.cartridge ? "ink" : "waste";
+        g_jsonData["printer"] = state.available ? JsonPrinterStatus(state.status) : nlohmann::json(nullptr);
+        g_jsonData["counters"] = state.available ? JsonCounters(state.values) : nlohmann::json::array();
+        g_jsonData["pads"] = state.available ? JsonPads(selected.smartModel, state.values)
+                                             : nlohmann::json::array();
+        g_jsonData["planned_writes"] = std::move(planned);
         return FinishRun(0);
     }
 
@@ -1488,8 +1842,24 @@ int main(int argc, char* argv[])
         if (!run.deviceFound)
         {
             std::cerr << "[ERROR] Could not find an Epson printer. Is it turned on and plugged in?" << std::endl;
+            JsonFail("device_not_found", "No Epson USB interface answered.");
             return FinishRun(1);
         }
+
+        g_jsonData["model"] = selected.replayModel.name;
+        g_jsonData["target"] = "waste";
+        g_jsonData["phase"] = run.exec.success ? "done" : "write_failed";
+        g_jsonData["writes"] = {
+            { "verified", run.exec.writesVerified },
+            { "total", run.exec.writesTotal },
+        };
+        // A replay dump has no read key, so there is nothing to read back.
+        g_jsonData["verification"] = { { "ran", false }, { "mismatches", 0 }, { "unread", 0 } };
+        g_jsonData["before"] = nlohmann::json::array();
+        g_jsonData["after"] = nlohmann::json::array();
+
+        if (!run.exec.success)
+            JsonFail("write_failed", run.exec.error);
 
         return FinishReset(run.exec.success);
     }
@@ -1560,7 +1930,7 @@ int main(int argc, char* argv[])
         std::cout << "    so the cartridge ink level reset is the available path." << std::endl;
         resetInk = true;
     }
-    else if (selected.smartModel.HasInkReset() && cli.assumeYes)
+    else if (selected.smartModel.HasInkReset() && (cli.assumeYes || cli.json))
     {
         // Both paths exist, so this menu would otherwise block a caller that
         // has no keyboard. --yes is a yes to the reset EWR is named after;
@@ -1680,6 +2050,15 @@ int main(int argc, char* argv[])
             return false;
         }
 
+        if (cli.json)
+        {
+            // Same answer as --yes, and for the same reason: only --force-yes
+            // overrules what the printer reports.
+            JsonFail("blocked", "The printer reports a condition EWR will not write past: "
+                                + blocker.errorName + ". Pass --force-yes to overrule it.");
+            return false;
+        }
+
         std::cout << "\nTry the reset anyway? [y/N]: ";
 
         std::string answer;
@@ -1702,6 +2081,12 @@ int main(int argc, char* argv[])
             std::cout << "\n[i] --yes: resetting the waste ink pad counters of "
                       << selected.smartModel.name << " without asking." << std::endl;
             return true;
+        }
+
+        if (cli.json)
+        {
+            JsonFail("blocked", "The reset confirmation was not given: pass --yes.");
+            return false;
         }
 
         std::cout << "\nReset the waste ink pad counters of " << selected.smartModel.name
@@ -1730,10 +2115,58 @@ int main(int argc, char* argv[])
     const ewr::ResetOutcome outcome = resetInk ? session.ResetInk(handlers)
                                                : session.Reset(handlers);
 
+    const char* phaseName = "not_started";
+    switch (outcome.phase)
+    {
+        case ewr::ResetPhase::Aborted:        phaseName = "aborted"; break;
+        case ewr::ResetPhase::DeviceNotFound: phaseName = "device_not_found"; break;
+        case ewr::ResetPhase::WriteFailed:    phaseName = "write_failed"; break;
+        case ewr::ResetPhase::Done:           phaseName = "done"; break;
+        default: break;
+    }
+
+    g_jsonData["model"] = selected.smartModel.name;
+    g_jsonData["target"] = resetInk ? "ink" : "waste";
+    g_jsonData["phase"] = phaseName;
+    g_jsonData["writes"] = {
+        { "verified", outcome.writesVerified },
+        { "total", outcome.writesTotal },
+    };
+    g_jsonData["alternate_key_used"] = outcome.alternateKeyUsed;
+    g_jsonData["committed"] = outcome.committed;
+    g_jsonData["verification"] = {
+        { "ran", outcome.verificationRan },
+        { "mismatches", outcome.verifyMismatches },
+        { "unread", outcome.verifyUnread },
+    };
+    g_jsonData["before"] = JsonCounters(outcome.before.values);
+    g_jsonData["after"] = JsonCounters(outcome.after.values);
+
+    if (!outcome.success && !outcome.error.empty())
+    {
+        // The phase says what stage it reached; these are the contract's
+        // reasons for the same thing.
+        if (outcome.phase == ewr::ResetPhase::Aborted)
+            JsonFail("blocked", outcome.error);
+        else if (outcome.phase == ewr::ResetPhase::DeviceNotFound)
+            JsonFail("device_not_found", outcome.error);
+        else if (outcome.verificationRan && outcome.verifyMismatches > 0)
+            JsonFail("write_unverified", outcome.error);
+        else
+            JsonFail("write_failed", outcome.error);
+    }
+
     // The session already narrated why it stopped; skip the FAILED banner.
     if (outcome.phase == ewr::ResetPhase::Aborted
         || outcome.phase == ewr::ResetPhase::DeviceNotFound)
+    {
+        if (outcome.phase == ewr::ResetPhase::Aborted)
+            JsonFail("blocked", "The run stopped at a gate; nothing was written.");
+        else
+            JsonFail("device_not_found", "No Epson interface answered at write time.");
+
         return FinishRun(1);
+    }
 
     return FinishReset(outcome.success);
 }

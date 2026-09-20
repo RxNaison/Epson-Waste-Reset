@@ -58,6 +58,7 @@ Running with no options is the supported path. These exist for diagnosis and for
 | `--cartridge`, `-c` | Reset the cartridge ink levels instead of the waste ink pads, on models that carry a per-color ink map. |
 | `--no-update` | Fully offline: no update check, no download, no staged swap on exit. Use it while editing `database.json`. |
 | `--usb-soft-reset` | Diagnostic only, Windows. Resets the USB channel once at the start of the run, then waits (up to 90 s) for the printer to finish the re-initialization the reset starts. |
+| `--json` | Machine-readable output: one JSON object per line on stdout, for callers driving EWR from another language. See [docs/json-output.md](docs/json-output.md). |
 | `--help`, `-h` | The same list, from the binary. |
 
 ### Unattended runs: `--yes`

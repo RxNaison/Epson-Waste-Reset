@@ -18,6 +18,7 @@
 #include "ewr/session.h"
 #include "ewr/usb_backend.h"
 #include "ewr/run_lock.h"
+#include "ewr/json_out.h"
 #include "ewr/discover.h"
 
 namespace fs = std::filesystem;
@@ -4875,6 +4876,101 @@ void test_end4_sequence_alternate_key()
     CHECK(result.writesVerified == 2);
 }
 
+// The --json contract (docs/json-output.md) is what a caller's program is
+// written against, so the shape is the test: an envelope on every line, one
+// hello first, one result last, and a line that stays one line whatever the
+// message contains.
+void test_json_contract_envelope_and_order()
+{
+    std::cout << "[TEST] test_json_contract_envelope_and_order" << std::endl;
+
+    std::ostringstream out;
+    {
+        ewr::JsonEmitter emitter(out);
+        emitter.Hello("1.2.3", "linux", "status", nullptr, nlohmann::json::object());
+
+        ewr::log::Event event;
+        event.level = ewr::log::Level::Info;
+        event.stage = ewr::log::Stage::Write;
+        event.code = "exec.write_verified";
+        event.message = "wrote\n\"0x2B\"\ttab";  // newline, quote and tab
+        event.index = 3;
+        event.total = 5;
+        event.fields = { { "address", "0x2B" } };
+        emitter.Event(event);
+
+        // Trace belongs to ewr_trace.log, not to the contract.
+        ewr::log::Event trace;
+        trace.level = ewr::log::Level::Trace;
+        trace.code = "d4.tx";
+        emitter.Event(trace);
+
+        emitter.Result("status", true, 0, nullptr, nullptr, { { "counters", nlohmann::json::array() } });
+        // A second verdict would end the stream twice.
+        emitter.Result("status", false, 1, "failed", "ignored", nlohmann::json::object());
+    }
+
+    std::vector<nlohmann::json> lines;
+    std::istringstream reader(out.str());
+    for (std::string line; std::getline(reader, line); )
+    {
+        CHECK(line.find('\n') == std::string::npos);
+        lines.push_back(nlohmann::json::parse(line));
+    }
+
+    CHECK(lines.size() == 3); // hello, one event, one result - the trace dropped
+
+    for (std::size_t i = 0; i < lines.size(); ++i)
+    {
+        CHECK(lines[i]["v"] == ewr::JsonEmitter::kContractVersion);
+        CHECK(lines[i]["seq"] == static_cast<int>(i));
+        CHECK(lines[i].contains("t"));
+    }
+
+    CHECK(lines[0]["type"] == "hello");
+    CHECK(lines[0]["command"] == "status");
+    CHECK(lines[0]["model"].is_null());
+
+    CHECK(lines[1]["type"] == "event");
+    CHECK(lines[1]["code"] == "exec.write_verified");
+    CHECK(lines[1]["level"] == "info");
+    CHECK(lines[1]["stage"] == "write");
+    CHECK(lines[1]["index"] == 3);
+    CHECK(lines[1]["total"] == 5);
+    CHECK(lines[1]["fields"]["address"] == "0x2B");
+    // The escaping survived the round trip rather than breaking the line.
+    CHECK(lines[1]["message"] == "wrote\n\"0x2B\"\ttab");
+
+    CHECK(lines[2]["type"] == "result");
+    CHECK(lines[2]["ok"] == true);
+    CHECK(lines[2]["exit"] == 0);
+    CHECK(lines[2]["error_code"].is_null());
+    CHECK(lines[2]["data"]["counters"].is_array());
+}
+
+// An event with no progress reports null rather than the -1 the struct uses,
+// so a caller can test for absence without knowing EWR's sentinel.
+void test_json_contract_reports_absent_progress_as_null()
+{
+    std::cout << "[TEST] test_json_contract_reports_absent_progress_as_null" << std::endl;
+
+    std::ostringstream out;
+    ewr::JsonEmitter emitter(out);
+
+    ewr::log::Event event;
+    event.level = ewr::log::Level::Warning;
+    event.stage = ewr::log::Stage::Detect;
+    event.code = "usb.another_run";
+    emitter.Event(event);
+
+    const nlohmann::json line = nlohmann::json::parse(out.str());
+    CHECK(line["index"].is_null());
+    CHECK(line["total"].is_null());
+    CHECK(line["level"] == "warning");
+    CHECK(line["stage"] == "detect");
+    CHECK(line["fields"].is_object());
+}
+
 // Two EWR runs on one printer take each other's replies, and the one that
 // loses a reply may be the one mid-write (issue #39). The second run is meant
 // to find the lock taken and stop, and a run that ends must leave it free -
@@ -5652,6 +5748,8 @@ int main()
     test_end4_sequence_verified();
     test_end4_sequence_silent_fails();
     test_end4_sequence_alternate_key();
+    test_json_contract_envelope_and_order();
+    test_json_contract_reports_absent_progress_as_null();
     test_run_lock_admits_one_run_at_a_time();
     test_composite_merges_candidates_in_member_order();
     test_composite_identifies_a_shared_interface_by_number();

@@ -611,6 +611,8 @@ namespace ewr {
         }
 
         out.alternateKeyUsed = run.exec.alternateKeyUsed;
+        out.writesVerified = run.exec.writesVerified;
+        out.writesTotal = run.exec.writesTotal;
 
         // Surfacing this turns a silent recovery into a reportable DB fix.
         if (run.exec.alternateKeyUsed)

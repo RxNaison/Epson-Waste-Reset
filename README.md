@@ -95,6 +95,41 @@ replies, and the run that loses one may be the one mid-write. A second run stops
 message instead of starting. The closing "Press Enter to exit" is skipped when EWR is not
 run from a terminal, so a caller that pipes its answers never waits on a keypress.
 
+### Driving EWR from another language: `--json`
+
+`--json` turns stdout into one JSON object per line: a `hello`, an `event` per step, and
+one `result` carrying the outcome. Any language that can start a process can use it, and a
+caller that reads only `result` and the exit code keeps working across EWR versions -
+[docs/json-output.md](docs/json-output.md) is the contract and what it promises.
+
+```python
+import json, subprocess
+
+run = subprocess.run(
+    ["./ewr", "--model", "L3150", "--yes", "--json", "--no-update"],
+    stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True,
+)
+
+result = None
+for line in run.stdout.splitlines():
+    msg = json.loads(line)
+    if msg["type"] == "event" and msg["total"]:          # progress, e.g. 3 of 5 writes
+        print(f"{msg['index']}/{msg['total']} {msg['code']}")
+    elif msg["type"] == "result":
+        result = msg
+
+if result["ok"]:
+    print("verified", result["data"]["writes"]["verified"], "of", result["data"]["writes"]["total"])
+elif result["error_code"] == "blocked":
+    print("a gate stopped it, nothing was written:", result["error"])
+else:
+    print("failed:", result["error_code"], result["error"])
+```
+
+`--json` never prompts, so answer the gates on the command line: `--model` instead of the
+menu, `--yes` for the reset confirmation, `--force-yes` to overrule a printer error as
+well. A run that would need an answer stops with `error_code: "blocked"` and writes nothing.
+
 ### Choosing the target: `--cartridge`
 
 Some models carry a per-color cartridge ink map as well as waste pad counters, and a run

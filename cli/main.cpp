@@ -397,7 +397,7 @@ static std::string WriteEepromDump(const ewr::DbPrinterModel& model,
     out << "# EWR EEPROM dump\n";
     out << "# model: " << model.name << "\n";
     out << "# answered: " << answered << " of " << values.size() << "\n";
-    out << "# address,value,note ('--' = no reply: unknown, not unchanged)\n";
+    out << "# address,value,note ('--' = no reply: unknown)\n";
     for (const auto& v : values)
     {
         char line[24];
@@ -1162,7 +1162,7 @@ int main(int argc, char* argv[])
             std::cerr << "\n[ERROR] Incomplete dump: the printer answered " << answered << " of "
                       << state.values.size() << " EEPROM byte(s). Saved to " << path << ",\n"
                       << "        but it is NOT a backup and must not be diffed: a '--' line is a\n"
-                      << "        byte that was never read, not one that did not change." << std::endl;
+                      << "        byte that was never read." << std::endl;
             if (answered == 0)
                 std::cerr << "        No byte answered at all: the read key is likely wrong for this\n"
                              "        printer - try a sibling model from the same line." << std::endl;
@@ -1209,6 +1209,7 @@ int main(int argc, char* argv[])
 
         std::vector<ewr::EepromSnapshot> snapshots;
         const int passes = 3;
+        int shortPasses = 0;
 
         for (int pass = 1; pass <= passes; ++pass)
         {
@@ -1233,6 +1234,16 @@ int main(int argc, char* argv[])
             std::cout << "    Pass " << pass << ": " << answered << " of " << state.values.size()
                       << " byte(s) answered." << std::endl;
 
+            // Discovery drops an address that went unread in any pass, so a
+            // short pass quietly narrows the search rather than skewing it.
+            if (answered < state.values.size())
+            {
+                ++shortPasses;
+                std::cout << "    [!] Pass " << pass << " is incomplete. A byte that went unread in any pass"
+                             " is dropped\n        from the comparison, so a counter can go missing from the"
+                             " result." << std::endl;
+            }
+
             if (pass == passes)
                 break;
 
@@ -1256,6 +1267,13 @@ int main(int argc, char* argv[])
         }
 
         const std::vector<ewr::ByteTrend> trends = ewr::FindTrendingBytes(snapshots);
+
+        if (shortPasses > 0)
+        {
+            std::cout << "\n[!] " << shortPasses << " of " << passes << " pass(es) came back incomplete, so the"
+                         " result below covers\n    less of the EEPROM than it looks. Three complete passes"
+                         " are worth rerunning for." << std::endl;
+        }
 
         std::cout << "\n------------------------- BYTES THAT MOVED -------------------------" << std::endl;
         if (trends.empty())

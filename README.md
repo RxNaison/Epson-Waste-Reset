@@ -190,7 +190,7 @@ ewr --model L3150 --dump --no-update
 diff ewr_dump_L3150_1736900000.txt ewr_dump_L3150_1736903600.txt
 ```
 
-A `--` is a byte the printer never answered: unknown, not unchanged, so a diff that lines up two of them is not telling you anything. A dump with any `--` is reported as incomplete and exits `1` instead of `0`; run it again rather than keeping it as a backup. If every value comes back as `--`, the read key is wrong for your printer - try a different sibling from the same model line.
+A `--` is a byte the printer never answered, so its value is unknown. A dump with any `--` is reported as incomplete and exits `1` instead of `0`; run it again rather than keeping it as a backup. If every value comes back as `--`, the read key is wrong for your printer - try a different sibling from the same model line.
 
 Mind the mirror trap: a byte that returns to its old value by itself after a power cycle is being rewritten by the firmware from the cartridge chip. That level lives on the chip and cannot be reset from the PC.
 

@@ -135,11 +135,15 @@ namespace ewr {
             const std::vector<std::vector<unsigned char>>& sequence,
             const ExecutorOptions& options) override;
 
-        // Taken on the first device call and held for the life of the
-        // gateway. False means another EWR run already has the printer; see
+        // Claims the printer for this process and holds it for the life of the
+        // gateway. False means another EWR run already has it; see
         // ewr/run_lock.h for why that must not become two runs on one handle.
-        // Public so a host can claim before it prints anything and say so in
-        // its own words; every device call claims anyway.
+        //
+        // A host calls this before it prints anything, so it can say why it
+        // stopped in its own words - the CLI and the C API both claim at
+        // startup, which is why a run parked at a prompt still holds the
+        // printer. A host that does not bother still claims on its first
+        // device call, so the lock cannot be skipped by forgetting it.
         bool ClaimPrinter();
 
     private:

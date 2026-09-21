@@ -61,6 +61,8 @@ namespace ewr {
 
             nlohmann::json pad;
             pad["name"] = reading.description.empty() ? std::string("Counter") : reading.description;
+            // The key that says which pad this is without reading the label.
+            pad["kind"] = spec.kind.empty() ? nlohmann::json(nullptr) : nlohmann::json(spec.kind);
             pad["used"] = static_cast<unsigned>(reading.value);
             pad["max"] = (reading.max_value > 0) ? nlohmann::json(static_cast<unsigned>(reading.max_value))
                                                  : nlohmann::json(nullptr);
@@ -96,6 +98,10 @@ namespace ewr {
         out["serial"] = status.serial.empty() ? nlohmann::json(nullptr) : nlohmann::json(status.serial);
         out["maintenance_box"] = (status.maintenanceBoxLevel >= 0)
             ? nlohmann::json(status.maintenanceBoxLevel) : nlohmann::json(nullptr);
+        // A box can report a condition without a level, so the text is its own
+        // key rather than a second meaning for the number above.
+        out["maintenance_box_status"] = status.maintenanceBoxText.empty()
+            ? nlohmann::json(nullptr) : nlohmann::json(status.maintenanceBoxText);
         out["inks"] = std::move(inks);
         return out;
     }
@@ -104,9 +110,16 @@ namespace ewr {
     {
         nlohmann::json out;
         out["model"] = model.name;
+        // Filled in by a host that ran detection; null says "not asked", not
+        // "no match", so a caller never reads silence as agreement.
+        out["detected_model"] = nullptr;
         out["printer"] = state.available ? JsonPrinterStatus(state.status) : nlohmann::json(nullptr);
         out["counters"] = state.available ? JsonCounterValues(state.values) : nlohmann::json::array();
         out["pads"] = state.available ? JsonPadUsage(model, state.values) : nlohmann::json::array();
+        // How many pads the model has, so an empty `pads` can be told apart
+        // from a model that reports none: a group whose bytes did not all come
+        // back is left out of `pads` rather than reported with a wrong total.
+        out["pads_total"] = model.GetAllCounters().size();
         return out;
     }
 

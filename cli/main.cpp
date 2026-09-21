@@ -849,6 +849,7 @@ int main(int argc, char* argv[])
     if (replayModels.empty() && smartModels.empty())
     {
         std::cerr << "\n[!] No payloads found: database.json is missing or unreadable." << std::endl;
+        JsonFail("database", "No payloads found: database.json is missing or unreadable.");
         std::cerr << "    It ships next to ewr - re-extract the archive, or run once with internet access to fetch it." << std::endl;
         return FinishRun(1);
     }
@@ -898,9 +899,14 @@ int main(int argc, char* argv[])
     ewr::UsbDeviceGateway gateway;
 
     // Before any device call, so a second run says why it stopped instead of
-    // reporting a printer that cannot be read. The gateway logs the reason.
+    // reporting a printer that cannot be read. The gateway logs the reason as
+    // an event; the result line has to name it too, because a caller is
+    // promised it can act on the verdict alone.
     if (!gateway.ClaimPrinter())
+    {
+        JsonFail("another_run", "Another EWR run is already driving a printer on this machine.");
         return FinishRun(1);
+    }
 
     // Once per run: powers detection, the banner and --interface validation.
     std::string detectedMdl;
@@ -914,6 +920,9 @@ int main(int argc, char* argv[])
         std::cout << "found " << interfaces.size() << " interface(s)." << std::endl;
         std::cerr << "[!] --interface " << cli.interfaceCandidate << " does not exist: only "
                   << interfaces.size() << " Epson interface(s) are present. Run 'ewr --list' to see them." << std::endl;
+        JsonFail("interface_not_found", "--interface " + std::to_string(cli.interfaceCandidate)
+                                        + " does not exist: " + std::to_string(interfaces.size())
+                                        + " Epson interface(s) are present.");
         return FinishRun(1);
     }
 
@@ -1067,6 +1076,7 @@ int main(int argc, char* argv[])
                 std::cerr << "[!] --model \"" << cli.modelOverride << "\" matches no usable model." << std::endl;
                 std::cerr << "    (Database models without resettable waste counters are not offered.)" << std::endl;
                 std::cerr << "    Run without --model and use the menu search, or check 'ewr --list'." << std::endl;
+                JsonFail("model_unknown", "--model \"" + cli.modelOverride + "\" matches no usable model.");
                 return FinishRun(1);
             }
 
@@ -1076,6 +1086,8 @@ int main(int argc, char* argv[])
                 for (size_t i = 0; i < uniqueNames.size() && i < 6; ++i)
                     std::cerr << "      " << uniqueNames[i] << std::endl;
                 std::cerr << "    Be more specific - the full name always works." << std::endl;
+                JsonFail("model_ambiguous", "--model \"" + cli.modelOverride + "\" matches "
+                                            + std::to_string(uniqueNames.size()) + " database entries.");
                 return FinishRun(1);
             }
 
@@ -1126,6 +1138,7 @@ int main(int argc, char* argv[])
                 std::cerr << "    No Epson interface answered the device ID query." << std::endl;
             std::cerr << "    Pass --model <name>, or run 'ewr --list' to see what is connected."
                       << std::endl;
+            JsonFail("model_required", "The printer supplied no model that matches the database.");
             return FinishRun(1);
         }
 
@@ -1167,6 +1180,7 @@ int main(int argc, char* argv[])
             // this one treats empty as "search again" and would spin forever.
             std::cerr << "\n[ERROR] No input available: EWR needs a model to work with and stdin\n"
                          "        is closed. Pass --model <name> to choose one non-interactively." << std::endl;
+            JsonFail("model_required", "No model was given and stdin is closed.");
             return FinishRun(1);
         }
 
@@ -1265,6 +1279,8 @@ int main(int argc, char* argv[])
                       << std::endl;
             std::cerr << "    --force-yes if you really mean to write " << selected.smartModel.name
                       << " values to it." << std::endl;
+            JsonFail("model_mismatch", "--model " + selected.smartModel.name
+                                       + " does not match the detected " + detectedMatch + ".");
             return FinishRun(1);
         }
         else if (cli.json)
@@ -1286,6 +1302,7 @@ int main(int argc, char* argv[])
             {
                 std::cout << "[i] Aborted before any EEPROM write. Re-run and press Enter to use the" << std::endl;
                 std::cout << "    detected model." << std::endl;
+                JsonFail("blocked", "The model mismatch was declined; nothing was written.");
                 return FinishRun(1);
             }
         }
@@ -1300,6 +1317,7 @@ int main(int argc, char* argv[])
             std::cerr << "\n[!] --cartridge needs a Smart Protocol model: it writes the per-color ink"
                       << std::endl;
             std::cerr << "    addresses from the database, and a Replay dump carries none." << std::endl;
+            JsonFail("not_supported", "--cartridge needs a Smart Protocol model; a Replay dump carries no ink map.");
             return FinishRun(1);
         }
 
@@ -1310,6 +1328,7 @@ int main(int argc, char* argv[])
             std::cerr << "    so there are no ink addresses to write. Its waste ink pad reset is"
                       << std::endl;
             std::cerr << "    unaffected - run without --cartridge for that." << std::endl;
+            JsonFail("not_supported", selected.smartModel.name + " has no cartridge ink map in the database.");
             return FinishRun(1);
         }
     }
@@ -1355,6 +1374,8 @@ int main(int argc, char* argv[])
             std::cout << "[i] Counter values are not available for Replay models (no read key in the dump)." << std::endl;
 
         g_jsonData["model"] = selected.isReplay ? selected.replayModel.name : selected.smartModel.name;
+        g_jsonData["detected_model"] = detectedMatch.empty() ? nlohmann::json(nullptr)
+                                                            : nlohmann::json(detectedMatch);
         g_jsonData["printer"] = ewr::JsonPrinterStatus(state.status);
         g_jsonData["counters"] = ewr::JsonCounterValues(state.values);
         g_jsonData["pads"] = selected.isReplay ? nlohmann::json::array()
@@ -1503,6 +1524,7 @@ int main(int argc, char* argv[])
                 std::cerr << "[ERROR] Could not read the printer on pass " << pass
                           << ". Is it powered on and connected?" << std::endl;
                 std::cerr << "        See ewr_trace.log for the hardware trace." << std::endl;
+                JsonFail("read_failed", "The printer did not answer on pass " + std::to_string(pass) + ".");
                 return FinishRun(1);
             }
 
@@ -1536,6 +1558,7 @@ int main(int argc, char* argv[])
             if (!std::getline(std::cin, line))
             {
                 std::cerr << "\n[!] No input available; stopping." << std::endl;
+                JsonFail("blocked", "The pass-to-pass prompt needs someone at the keyboard.");
                 return FinishRun(1);
             }
             if (toLower(line) == "exit" || toLower(line) == "quit")
@@ -1620,6 +1643,7 @@ int main(int argc, char* argv[])
         if (!out)
         {
             std::cerr << "[!] Found the candidates but could not write " << outPath << "." << std::endl;
+            JsonFail("io_error", "Could not write " + outPath + ".");
             return FinishRun(1);
         }
         out << ewr::FormatDiscoveryJson(selected.smartModel.name, body.str(), trends);
@@ -1733,13 +1757,23 @@ int main(int argc, char* argv[])
             planned.push_back(std::move(write));
         }
 
-        g_jsonData["model"] = selected.smartModel.name;
+        g_jsonData = ewr::JsonStateData(selected.smartModel, state);
+        g_jsonData["detected_model"] = detectedMatch.empty() ? nlohmann::json(nullptr)
+                                                             : nlohmann::json(detectedMatch);
         g_jsonData["target"] = cli.cartridge ? "ink" : "waste";
-        g_jsonData["printer"] = state.available ? ewr::JsonPrinterStatus(state.status) : nlohmann::json(nullptr);
-        g_jsonData["counters"] = state.available ? ewr::JsonCounterValues(state.values) : nlohmann::json::array();
-        g_jsonData["pads"] = state.available ? ewr::JsonPadUsage(selected.smartModel, state.values)
-                                             : nlohmann::json::array();
         g_jsonData["planned_writes"] = std::move(planned);
+
+        // The plan is the database's reset pattern for this model, not
+        // anything read from a printer. A dry run that never got a reading has
+        // not done what it was asked, so it says so instead of returning a
+        // plan under a green light.
+        if (!state.available)
+        {
+            JsonFail("read_failed", "The printer did not answer the read-only query; the plan below is the"
+                                    " database's, not this printer's.");
+            return FinishRun(1);
+        }
+
         return FinishRun(0);
     }
 
@@ -1754,6 +1788,8 @@ int main(int argc, char* argv[])
         if (executionSequence.empty())
         {
             std::cerr << "[-] Failed to construct payload. Exiting.\n";
+            JsonFail("not_supported", "The replay dump for " + selected.replayModel.name
+                                      + " holds no packets EWR can send.");
             return FinishRun(1);
         }
 
@@ -1853,6 +1889,8 @@ int main(int argc, char* argv[])
                       << std::endl;
             std::cerr << "    --cartridge to mean it, or drop --yes to confirm at the keyboard."
                       << std::endl;
+            JsonFail("blocked", selected.smartModel.name + " has only a cartridge ink map, and --yes never"
+                                " arms the ink reset; pass --cartridge to mean it.");
             return FinishRun(1);
         }
 

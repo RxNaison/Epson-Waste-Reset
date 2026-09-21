@@ -68,6 +68,12 @@ namespace ewr {
     struct CounterSpec
     {
         std::string description;
+        // Which pad this counts: "main", "platen", or empty when the database
+        // says neither and the description does not tell. Stamped from the
+        // owning pad group by GetAllCounters, because a flattened counter
+        // would otherwise carry only its English label - and reading the label
+        // is exactly how a platen counter gets taken for the main one (#35).
+        std::string kind;
         std::vector<CounterByte> bytes;
         uint32_t max_value{0}; // 0 = unknown, no percentage can be shown
 
@@ -276,7 +282,17 @@ namespace ewr {
         {
             std::vector<CounterSpec> specs;
             for (const auto& group : pad_groups)
-                specs.insert(specs.end(), group.counters.begin(), group.counters.end());
+            {
+                for (CounterSpec spec : group.counters)
+                {
+                    // The group is the only thing that knows which pad these
+                    // bytes belong to, and this is where that gets lost.
+                    if (spec.kind.empty())
+                        spec.kind = group.EffectiveKind();
+
+                    specs.push_back(std::move(spec));
+                }
+            }
 
             return specs;
         }

@@ -4878,6 +4878,187 @@ void test_end4_sequence_alternate_key()
     CHECK(result.writesVerified == 2);
 }
 
+// A caller reads pads by key, never by label: "Platen Pad Counter" and "Main
+// Pad Counter" are one typo apart in English and worlds apart in meaning
+// (#35), and a wrapper acting on the wrong one is the failure #42 asked us to
+// make impossible. The kind survives the flattening into CounterSpecs, whether
+// the database states it or only the description implies it.
+void test_json_pads_carry_a_kind_not_just_a_label()
+{
+    std::cout << "[TEST] test_json_pads_carry_a_kind_not_just_a_label" << std::endl;
+
+    ewr::DbPrinterModel model;
+    model.name = "TwoPads";
+
+    ewr::PadGroup main;
+    main.description = "Main Pad Counter";
+    main.kind = "main";
+    main.addresses = { 0x10 };
+    ewr::CounterSpec mainCounter;
+    mainCounter.description = "Main Pad Counter";
+    mainCounter.max_value = 100;
+    mainCounter.bytes = { ewr::CounterByte{ 0x10, 0xFF, 1 } };
+    main.counters.push_back(mainCounter);
+    model.pad_groups.push_back(main);
+
+    // No kind in the database: it has to come from the description, which is
+    // the path most entries take.
+    ewr::PadGroup platen;
+    platen.description = "Platen Pad Counter";
+    platen.addresses = { 0x11 };
+    ewr::CounterSpec platenCounter;
+    platenCounter.description = "Platen Pad Counter";
+    platenCounter.max_value = 50;
+    platenCounter.bytes = { ewr::CounterByte{ 0x11, 0xFF, 1 } };
+    platen.counters.push_back(platenCounter);
+    model.pad_groups.push_back(platen);
+
+    const std::vector<std::pair<uint16_t, int>> values = { { 0x10, 37 }, { 0x11, 25 } };
+    const nlohmann::json pads = ewr::JsonPadUsage(model, values);
+
+    CHECK(pads.size() == 2);
+    CHECK(pads[0]["kind"] == "main");
+    CHECK(pads[0]["name"] == "Main Pad Counter");
+    CHECK(pads[0]["used"] == 37);
+    CHECK(pads[0]["max"] == 100);
+    CHECK(pads[0]["percent"] == 37);
+    CHECK(pads[1]["kind"] == "platen");
+    CHECK(pads[1]["used"] == 25);
+    CHECK(pads[1]["percent"] == 50);
+
+    // A model that says neither reports null rather than guessing a pad.
+    ewr::DbPrinterModel vague;
+    vague.name = "Vague";
+    ewr::PadGroup group;
+    group.description = "Counter";
+    group.addresses = { 0x20 };
+    ewr::CounterSpec spec;
+    spec.description = "Counter";
+    spec.max_value = 10;
+    spec.bytes = { ewr::CounterByte{ 0x20, 0xFF, 1 } };
+    group.counters.push_back(spec);
+    vague.pad_groups.push_back(group);
+
+    const nlohmann::json vaguePads = ewr::JsonPadUsage(vague, { { 0x20, 5 } });
+    CHECK(vaguePads.size() == 1);
+    CHECK(vaguePads[0]["kind"].is_null());
+}
+
+// "not reported" and "zero" must not look alike: an ink the printer says
+// nothing about reports a null level beside its own status text, and a
+// maintenance box can report a condition without a level.
+void test_json_status_separates_unknown_from_zero()
+{
+    std::cout << "[TEST] test_json_status_separates_unknown_from_zero" << std::endl;
+
+    ewr::PrinterStatus status;
+    status.valid = true;
+    status.stateCode = 0x04;
+    status.stateName = "IDLE";
+    status.serial = "VHEK034809";
+    status.maintenanceBoxLevel = -1;
+    status.maintenanceBoxText = "NOT INSTALLED";
+    status.inks = {
+        ewr::InkReading{ 0, "Black", 43, "OK" },
+        ewr::InkReading{ 1, "Cyan", -1, "UNKNOWN" },
+        ewr::InkReading{ 2, "Magenta", 0, "EMPTY" },
+    };
+
+    const nlohmann::json out = ewr::JsonPrinterStatus(status);
+
+    CHECK(out["state"] == "IDLE");
+    CHECK(out["state_code"] == 4);
+    CHECK(out["error"].is_null());
+    CHECK(out["error_code"].is_null());
+    CHECK(out["serial"] == "VHEK034809");
+
+    CHECK(out["inks"][0]["level"] == 43);
+    // Not reported: null, and never confused with the empty cartridge below.
+    CHECK(out["inks"][1]["level"].is_null());
+    CHECK(out["inks"][1]["status"] == "UNKNOWN");
+    CHECK(out["inks"][2]["level"] == 0);
+
+    CHECK(out["maintenance_box"].is_null());
+    CHECK(out["maintenance_box_status"] == "NOT INSTALLED");
+
+    // Nothing parseable at all is null, not an object of empty strings.
+    ewr::PrinterStatus silent;
+    CHECK(ewr::JsonPrinterStatus(silent).is_null());
+}
+
+// A host that ran detection fills detected_model; the library cannot invent
+// it, and null has to mean "not asked" rather than "no match".
+void test_json_state_data_reports_detection_as_unknown()
+{
+    std::cout << "[TEST] test_json_state_data_reports_detection_as_unknown" << std::endl;
+
+    ewr::StateSnapshot state;
+    state.available = true;
+    state.status.valid = true;
+    state.status.stateName = "IDLE";
+    state.values = { { 0x18, 255 }, { 0x19, -1 } };
+
+    const nlohmann::json data = ewr::JsonStateData(MakeTestModel(), state);
+
+    CHECK(data["model"] == "TestPrinter");
+    CHECK(data.contains("detected_model"));
+    CHECK(data["detected_model"].is_null());
+    CHECK(data["counters"][0]["address"] == 0x18);
+    CHECK(data["counters"][0]["value"] == 255);
+    // An unread byte is null, not 0 and not absent.
+    CHECK(data["counters"][1]["value"].is_null());
+}
+
+// An empty `pads` used to mean two different things: a model with no pads, and
+// a model whose pads all went unread. `pads_total` is what tells them apart -
+// a caller seeing 0 of 2 knows to retry rather than to conclude there is
+// nothing to reset.
+void test_json_state_data_counts_pads_it_could_not_read()
+{
+    std::cout << "[TEST] test_json_state_data_counts_pads_it_could_not_read" << std::endl;
+
+    ewr::DbPrinterModel model;
+    model.name = "TwoPads";
+    for (int i = 0; i < 2; ++i)
+    {
+        ewr::PadGroup group;
+        group.description = (i == 0) ? "Main Pad Counter" : "Platen Pad Counter";
+        group.addresses = { static_cast<uint16_t>(0x30 + i) };
+        ewr::CounterSpec spec;
+        spec.description = group.description;
+        spec.max_value = 100;
+        spec.bytes = { ewr::CounterByte{ static_cast<uint16_t>(0x30 + i), 0xFF, 1 } };
+        group.counters.push_back(spec);
+        model.pad_groups.push_back(group);
+    }
+
+    // One pad answered, the other did not.
+    ewr::StateSnapshot half;
+    half.available = true;
+    half.status.valid = true;
+    half.values = { { 0x30, 12 }, { 0x31, -1 } };
+
+    const nlohmann::json partial = ewr::JsonStateData(model, half);
+    CHECK(partial["pads_total"] == 2);
+    CHECK(partial["pads"].size() == 1);
+    CHECK(partial["pads"][0]["kind"] == "main");
+
+    // Nothing answered at all: still two pads on this model.
+    ewr::StateSnapshot silent;
+    const nlohmann::json none = ewr::JsonStateData(model, silent);
+    CHECK(none["pads_total"] == 2);
+    CHECK(none["pads"].empty());
+    CHECK(none["counters"].empty());
+    CHECK(none["printer"].is_null());
+
+    // A model with no pad groups reports zero, which is the other meaning.
+    ewr::DbPrinterModel bare;
+    bare.name = "NoPads";
+    const nlohmann::json empty = ewr::JsonStateData(bare, half);
+    CHECK(empty["pads_total"] == 0);
+    CHECK(empty["pads"].empty());
+}
+
 // The C ABI is what another language links against, so the test is the
 // promise: codes keep their numbers, an unknown one still answers, and the
 // parts that need no printer work without one.
@@ -5863,6 +6044,10 @@ int main()
     test_end4_sequence_verified();
     test_end4_sequence_silent_fails();
     test_end4_sequence_alternate_key();
+    test_json_pads_carry_a_kind_not_just_a_label();
+    test_json_status_separates_unknown_from_zero();
+    test_json_state_data_reports_detection_as_unknown();
+    test_json_state_data_counts_pads_it_could_not_read();
     test_c_abi_constants_and_status_names();
     test_c_abi_database_calls_need_no_printer();
     test_c_abi_reports_a_missing_database();

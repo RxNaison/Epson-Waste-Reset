@@ -94,6 +94,8 @@ Codes are namespaced by layer (`db.`, `usb.`, `exec.`, `d4.`, `end4.`,
 | `bad_usage` | The command line was rejected. Exit 2. |
 | `another_run` | Another EWR run holds the printer. |
 | `device_not_found` | No Epson interface answered. |
+| `interface_not_found` | `--interface <n>` names an interface that is not present. |
+| `database` | `database.json` is missing, empty or unreadable. |
 | `model_required` | The command needs a model and none was given or detected. |
 | `model_unknown` | `--model` matched nothing usable. |
 | `model_ambiguous` | `--model` matched several models. |
@@ -107,6 +109,11 @@ Codes are namespaced by layer (`db.`, `usb.`, `exec.`, `d4.`, `end4.`,
 | `io_error` | A file could not be written. |
 | `failed` | The run stopped for a reason with no more specific code. Read `error`. A release may replace it with a narrower code, so treat it as "something went wrong", never as a particular thing. |
 
+Every way a run can stop names one of these. `failed` is the last resort, not
+the common case: if you meet it where the table promises something narrower,
+that is a bug worth reporting - a caller is promised it can act on `result`
+alone, and a code it cannot branch on breaks that promise.
+
 ### `data` by command
 
 **status** and **dry-run**
@@ -114,17 +121,46 @@ Codes are namespaced by layer (`db.`, `usb.`, `exec.`, `d4.`, `end4.`,
 ```json
 {
   "model": "L3150",
+  "detected_model": "L3150",
   "printer": {"state": "ERROR", "state_code": 0, "error": "INK OUT", "error_code": 5,
-              "serial": null, "maintenance_box": null,
+              "truncated": false, "serial": null,
+              "maintenance_box": null, "maintenance_box_status": null,
               "inks": [{"color": "Black", "code": 0, "level": 43, "status": "OK"}]},
   "counters": [{"address": 12, "value": 0}],
-  "pads": [{"name": "Main Pad Counter", "used": 0, "max": 46750, "percent": 0}],
+  "pads": [{"name": "Main Pad Counter", "kind": "main", "used": 0, "max": 46750, "percent": 0}],
   "planned_writes": [{"address": 12, "value": 0}]
 }
 ```
 
+`kind` is how you tell one pad from another without reading English: `"main"`,
+`"platen"`, or `null` when the database says neither. Act on the kind, never on
+`name` - a platen counter taken for the main one is a real bug that has
+happened. `used` and `max` are there so you can judge the number yourself
+instead of trusting a rounded `percent`, which is `null` when the model has no
+service limit on record.
+
+`null` always means "not reported", never zero: an ink the printer says nothing
+about has `"level": null` with its own `status` text, while an empty cartridge
+has `"level": 0`. Same for `maintenance_box`, which carries its condition in
+`maintenance_box_status` because a box can report one without a level.
+
+`detected_model` is what the printer said it was, when the caller ran detection
+- `null` means nobody asked, not that nothing matched. `ewr --status` fills it;
+the C API leaves it null and offers `ewr_detect_model` instead.
+
 `planned_writes` is `null` for `status` and the list a reset would write for
 `dry-run`. A counter that went unread has `value: null`.
+
+`pads` holds the pads that could be read whole; `pads_total` is how many the
+model has. They differ when a pad group's bytes did not all come back, so
+`pads: [], pads_total: 2` means "could not read them", while `pads_total: 0`
+means "this model has none" - an empty `pads` alone cannot tell you which.
+
+**A `dry-run` that could not read the printer fails.** It still reports the
+plan, because the plan comes from the database and is worth seeing, but it
+returns `error_code: "read_failed"` and exit 1 with `printer: null` - a plan
+under `ok: true` would read as "this is what your printer needs", and nothing
+was read from any printer.
 
 A Replay model carries no read key, so its `status` has empty `counters` and
 `pads`, and its `dry-run` reports `planned_writes: null` plus `replay_packets`

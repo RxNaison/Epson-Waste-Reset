@@ -285,10 +285,16 @@ namespace ewr {
             {
                 for (CounterSpec spec : group.counters)
                 {
-                    // The group is the only thing that knows which pad these
-                    // bytes belong to, and this is where that gets lost.
+                    // A group can hold counters for more than one pad: 489
+                    // entries keep a "Platen Pad Counter" inside a group whose
+                    // kind is "main" (BX305FW, Artisan 1430, ...). So the
+                    // counter's own description decides, and the group is only
+                    // the fallback for a counter that says nothing.
                     if (spec.kind.empty())
-                        spec.kind = group.EffectiveKind();
+                    {
+                        const std::string own = PadKindFromDescription(spec.description);
+                        spec.kind = own.empty() ? group.EffectiveKind() : own;
+                    }
 
                     specs.push_back(std::move(spec));
                 }

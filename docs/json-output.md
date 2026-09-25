@@ -133,9 +133,11 @@ alone, and a code it cannot branch on breaks that promise.
 ```
 
 `kind` is how you tell one pad from another without reading English: `"main"`,
-`"platen"`, or `null` when the database says neither. Act on the kind, never on
-`name` - a platen counter taken for the main one is a real bug that has
-happened. `used` and `max` are there so you can judge the number yourself
+`"platen"`, or `null` when neither the counter nor its pad group says which. It
+describes *that counter*, not the group it is filed under - 489 models keep a
+platen counter inside a group marked `main`, so the counter's own description
+decides and the group is only the fallback. Act on the kind, never on `name` -
+a platen counter taken for the main one is a real bug that has happened. `used` and `max` are there so you can judge the number yourself
 instead of trusting a rounded `percent`, which is `null` when the model has no
 service limit on record.
 
@@ -161,6 +163,11 @@ plan, because the plan comes from the database and is worth seeing, but it
 returns `error_code: "read_failed"` and exit 1 with `printer: null` - a plan
 under `ok: true` would read as "this is what your printer needs", and nothing
 was read from any printer.
+
+`status` and `dry-run` fill `data` whether the read worked or not, so a caller
+that got nothing still learns which model it asked about and how many pads that
+model has: `printer: null`, `counters: []`, `pads: []`, and `pads_total` from
+the database.
 
 A Replay model carries no read key, so its `status` has empty `counters` and
 `pads`, and its `dry-run` reports `planned_writes: null` plus `replay_packets`

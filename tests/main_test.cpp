@@ -5009,6 +5009,78 @@ void test_json_state_data_reports_detection_as_unknown()
     CHECK(data["counters"][1]["value"].is_null());
 }
 
+// A pad group can hold counters for more than one pad: 489 database entries
+// keep a "Platen Pad Counter" inside a group whose kind is "main". Stamping the
+// group's kind onto every counter in it therefore labelled those platen
+// counters "main" - the #35 confusion again, this time in the key that exists
+// to prevent it. Asserted over the real database rather than one model, so the
+// rule holds whatever build_db.py regenerates.
+void test_every_counter_kind_matches_its_own_description()
+{
+    std::cout << "[TEST] test_every_counter_kind_matches_its_own_description" << std::endl;
+
+    ewr::UniversalGenerator gen;
+    CHECK(gen.LoadDatabase("database.json"));
+
+    size_t checked = 0;
+    size_t platenInsideMainGroup = 0;
+
+    for (const auto& model : gen.GetAvailableModels())
+    {
+        for (const auto& counter : model.GetAllCounters())
+        {
+            const std::string own = ewr::PadKindFromDescription(counter.description);
+            if (own.empty())
+                continue;
+
+            ++checked;
+            if (counter.kind != own)
+            {
+                std::cout << "  [detail] " << model.name << ": \"" << counter.description
+                          << "\" carries kind \"" << counter.kind << "\"" << std::endl;
+            }
+            CHECK(counter.kind == own);
+
+            if (own == "platen")
+                ++platenInsideMainGroup;
+        }
+    }
+
+    // If the database ever stops describing its counters, this test would pass
+    // while checking nothing.
+    CHECK(checked > 100);
+    CHECK(platenInsideMainGroup > 0);
+}
+
+// The group is still the fallback: a counter whose own description says nothing
+// takes the kind of the group it belongs to.
+void test_counter_kind_falls_back_to_its_group()
+{
+    std::cout << "[TEST] test_counter_kind_falls_back_to_its_group" << std::endl;
+
+    ewr::DbPrinterModel model;
+    model.name = "Quiet";
+
+    ewr::PadGroup group;
+    group.description = "Platen Pad Counter";
+    group.kind = "platen";
+    group.addresses = { 0x40 };
+
+    ewr::CounterSpec spec;          // no description to go on
+    spec.max_value = 10;
+    spec.bytes = { ewr::CounterByte{ 0x40, 0xFF, 1 } };
+    group.counters.push_back(spec);
+    model.pad_groups.push_back(group);
+
+    const std::vector<ewr::CounterSpec> counters = model.GetAllCounters();
+    CHECK(counters.size() == 1);
+    CHECK(counters[0].kind == "platen");
+
+    const nlohmann::json pads = ewr::JsonPadUsage(model, { { 0x40, 3 } });
+    CHECK(pads.size() == 1);
+    CHECK(pads[0]["kind"] == "platen");
+}
+
 // An empty `pads` used to mean two different things: a model with no pads, and
 // a model whose pads all went unread. `pads_total` is what tells them apart -
 // a caller seeing 0 of 2 knows to retry rather than to conclude there is
@@ -6045,6 +6117,8 @@ int main()
     test_end4_sequence_silent_fails();
     test_end4_sequence_alternate_key();
     test_json_pads_carry_a_kind_not_just_a_label();
+    test_every_counter_kind_matches_its_own_description();
+    test_counter_kind_falls_back_to_its_group();
     test_json_status_separates_unknown_from_zero();
     test_json_state_data_reports_detection_as_unknown();
     test_json_state_data_counts_pads_it_could_not_read();

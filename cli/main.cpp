@@ -1356,6 +1356,29 @@ int main(int argc, char* argv[])
             state = session.ReadState();
         }
 
+        // Built by the one function that builds it everywhere else, so the
+        // status payload cannot quietly lack a key the dry run has - it lacked
+        // pads_total exactly that way (#42). Built before the read is judged,
+        // so a caller that got nothing still learns which model it asked about
+        // and how many pads that model has.
+        if (selected.isReplay)
+        {
+            // No read key in a dump, so there is no model to count pads on.
+            g_jsonData["model"] = selected.replayModel.name;
+            g_jsonData["printer"] = ewr::JsonPrinterStatus(state.status);
+            g_jsonData["counters"] = nlohmann::json::array();
+            g_jsonData["pads"] = nlohmann::json::array();
+            g_jsonData["pads_total"] = 0;
+        }
+        else
+        {
+            g_jsonData = ewr::JsonStateData(selected.smartModel, state);
+        }
+
+        g_jsonData["detected_model"] = detectedMatch.empty() ? nlohmann::json(nullptr)
+                                                            : nlohmann::json(detectedMatch);
+        g_jsonData["planned_writes"] = nullptr;
+
         if (!state.available)
         {
             std::cerr << "[ERROR] Could not read the printer status. Is it turned on and plugged in?" << std::endl;
@@ -1373,14 +1396,6 @@ int main(int argc, char* argv[])
         if (selected.isReplay)
             std::cout << "[i] Counter values are not available for Replay models (no read key in the dump)." << std::endl;
 
-        g_jsonData["model"] = selected.isReplay ? selected.replayModel.name : selected.smartModel.name;
-        g_jsonData["detected_model"] = detectedMatch.empty() ? nlohmann::json(nullptr)
-                                                            : nlohmann::json(detectedMatch);
-        g_jsonData["printer"] = ewr::JsonPrinterStatus(state.status);
-        g_jsonData["counters"] = ewr::JsonCounterValues(state.values);
-        g_jsonData["pads"] = selected.isReplay ? nlohmann::json::array()
-                                               : ewr::JsonPadUsage(selected.smartModel, state.values);
-        g_jsonData["planned_writes"] = nullptr;
         return FinishRun(0);
     }
 
@@ -1709,7 +1724,13 @@ int main(int argc, char* argv[])
         }
         else
         {
-            std::cout << "[i] The printer did not answer the read-only query - showing the plan anyway." << std::endl;
+            // On stderr like every other failure notice: this run now exits 1,
+            // and a caller that captures one stream should not have to capture
+            // both to learn why (#42).
+            std::cerr << "[!] The printer did not answer the read-only query - showing the plan anyway."
+                      << std::endl;
+            std::cerr << "    The plan below is the database's for this model, not a reading of this printer."
+                      << std::endl;
         }
 
         // The plan has to be the plan of the run --cartridge would perform,

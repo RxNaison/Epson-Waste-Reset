@@ -5110,6 +5110,247 @@ void test_unnamed_counter_reports_no_kind()
     CHECK(lonePads[0]["kind"].is_null());
 }
 
+// `pads` says how full the readable pads are; `reset_covers` says which pads a
+// reset would clear, readable or not. Without it, half the database looked
+// like a reset did nothing: 669 resettable models have no counter at all (an
+// L6490's only pad), and 600 more reset a pad they cannot read (an R220's
+// platen pad). The invariants, over every model in the real database:
+//   - a model the reset writes to never reports an empty list;
+//   - a known pad appears once, however many groups it turns up in;
+//   - the readable entries are exactly the pads `pads` can report;
+//   - bytes the reset writes that no counter reads show up as their group's pad.
+void test_reset_coverage_over_the_database()
+{
+    std::cout << "[TEST] test_reset_coverage_over_the_database" << std::endl;
+
+    ewr::UniversalGenerator gen;
+    CHECK(gen.LoadDatabase("database.json"));
+
+    size_t resettable = 0;
+    size_t withUnreadable = 0;
+
+    for (const auto& model : gen.GetAvailableModels())
+    {
+        std::vector<uint16_t> written;
+        std::vector<uint16_t> read;
+        for (const auto& group : model.pad_groups)
+        {
+            written.insert(written.end(), group.addresses.begin(), group.addresses.end());
+            for (const auto& counter : group.counters)
+                for (const auto& part : counter.bytes)
+                    read.push_back(part.address);
+        }
+        if (written.empty())
+            continue;
+
+        ++resettable;
+        const std::vector<ewr::PadCoverage> covers = model.GetResetCoverage();
+
+        if (covers.empty())
+            std::cout << "  [detail] " << model.name << ": resettable, but covers nothing" << std::endl;
+        CHECK(!covers.empty());
+
+        size_t mains = 0, platens = 0, unnamedReadable = 0;
+        bool anyUnreadable = false;
+        for (const auto& pad : covers)
+        {
+            mains += (pad.kind == "main") ? 1 : 0;
+            platens += (pad.kind == "platen") ? 1 : 0;
+            unnamedReadable += (pad.kind.empty() && pad.readable) ? 1 : 0;
+            anyUnreadable = anyUnreadable || !pad.readable;
+        }
+        CHECK(mains <= 1);
+        CHECK(platens <= 1);
+        withUnreadable += anyUnreadable ? 1 : 0;
+
+        // Readable entries against the counters themselves.
+        bool mainCounter = false, platenCounter = false;
+        size_t unnamedCounters = 0;
+        for (const auto& counter : model.GetAllCounters())
+        {
+            mainCounter = mainCounter || counter.kind == "main";
+            platenCounter = platenCounter || counter.kind == "platen";
+            unnamedCounters += counter.kind.empty() ? 1 : 0;
+        }
+
+        auto readableKind = [&](const char* kind)
+        {
+            for (const auto& pad : covers)
+                if (pad.kind == kind && pad.readable)
+                    return true;
+            return false;
+        };
+        CHECK(readableKind("main") == mainCounter);
+        CHECK(readableKind("platen") == platenCounter);
+        CHECK(unnamedReadable == unnamedCounters);
+
+        // A group whose written bytes no counter reads is still covered.
+        for (const auto& group : model.pad_groups)
+        {
+            bool unread = false;
+            for (uint16_t addr : group.addresses)
+                unread = unread || std::find(read.begin(), read.end(), addr) == read.end();
+
+            const std::string kind = group.EffectiveKind();
+            if (!unread || kind.empty())
+                continue;
+
+            bool present = false;
+            for (const auto& pad : covers)
+                present = present || pad.kind == kind;
+            if (!present)
+                std::cout << "  [detail] " << model.name << ": group \"" << group.description
+                          << "\" has unread bytes but no " << kind << " entry" << std::endl;
+            CHECK(present);
+        }
+    }
+
+    // Both halves of the reason this exists have to be in the data, or the
+    // test checks nothing that matters.
+    CHECK(resettable > 1000);
+    CHECK(withUnreadable > 500);
+}
+
+// The shapes each rule came from, as a caller sees them.
+void test_reset_coverage_shapes()
+{
+    std::cout << "[TEST] test_reset_coverage_shapes" << std::endl;
+
+    // A missing entry has to fail its check, not read past the end of the
+    // vector and take the rest of the suite down with it.
+    auto at = [](const std::vector<ewr::PadCoverage>& covers, size_t i)
+    {
+        return (i < covers.size()) ? covers[i] : ewr::PadCoverage{ "<missing>", "", false };
+    };
+
+    auto counter = [](const char* description, uint16_t address)
+    {
+        ewr::CounterSpec spec;
+        spec.description = description;
+        spec.max_value = 100;
+        spec.bytes = { ewr::CounterByte{ address, 0xFF, 1 } };
+        return spec;
+    };
+    auto group = [](const char* description, const char* kind, std::vector<uint16_t> addresses)
+    {
+        ewr::PadGroup g;
+        g.description = description;
+        g.kind = kind;
+        g.addresses = std::move(addresses);
+        return g;
+    };
+
+    // L6490: its only pad has bytes to reset and no counter to read them.
+    {
+        ewr::DbPrinterModel m;
+        m.pad_groups.push_back(group("Platen Pad Counter", "platen", { 28, 47, 50 }));
+        const auto covers = m.GetResetCoverage();
+        CHECK(covers.size() == 1);
+        CHECK(at(covers, 0).kind == "platen");
+        CHECK(!at(covers, 0).readable);
+        CHECK(m.GetAllCounters().empty()); // so `pads_total` is 0
+    }
+
+    // R220: a readable main pad, and a platen pad the reset clears blind.
+    {
+        ewr::DbPrinterModel m;
+        auto main = group("Main Pad Counter", "main", { 12, 13 });
+        main.counters = { counter("Main Pad Counter", 12) };
+        main.counters[0].bytes.push_back(ewr::CounterByte{ 13, 0xFF, 256 });
+        m.pad_groups.push_back(main);
+        m.pad_groups.push_back(group("Platen Pad Counter", "platen", { 43, 62, 63 }));
+
+        const auto covers = m.GetResetCoverage();
+        CHECK(covers.size() == 2);
+        CHECK(at(covers, 0).kind == "main" && at(covers, 0).readable);
+        CHECK(at(covers, 1).kind == "platen" && !at(covers, 1).readable);
+    }
+
+    // E-300: one group marked main holds all three counters. Its label alone
+    // would say the reset covers only main.
+    {
+        ewr::DbPrinterModel m;
+        auto g = group("Main Pad Counter", "main", { 16, 38, 40 });
+        g.counters = { counter("Main Pad Counter", 16),
+                       counter("Platen Pad Counter", 40),
+                       counter("Waste Counter 3", 38) };
+        m.pad_groups.push_back(g);
+
+        const auto covers = m.GetResetCoverage();
+        CHECK(covers.size() == 3);
+        CHECK(at(covers, 0).kind == "main" && at(covers, 0).readable);
+        CHECK(at(covers, 1).kind == "platen" && at(covers, 1).readable);
+        CHECK(at(covers, 2).kind.empty() && at(covers, 2).readable);
+        CHECK(at(covers, 2).name == "Waste Counter 3");
+    }
+
+    // BX305FW: the platen counter lives in the main group and the platen group
+    // holds more platen bytes nobody reads. Still one platen pad, and readable.
+    {
+        ewr::DbPrinterModel m;
+        auto first = group("Main Pad Counter", "main", { 24, 26 });
+        first.counters = { counter("Main Pad Counter", 24), counter("Platen Pad Counter", 26) };
+        m.pad_groups.push_back(first);
+        m.pad_groups.push_back(group("Platen Pad Counter", "platen", { 28, 46 }));
+
+        const auto covers = m.GetResetCoverage();
+        CHECK(covers.size() == 2);
+        CHECK(at(covers, 0).kind == "main" && at(covers, 0).readable);
+        CHECK(at(covers, 1).kind == "platen" && at(covers, 1).readable);
+    }
+
+    // What a caller gets: the key is there whether or not the printer answered,
+    // because it comes from the database, not from the reading.
+    {
+        ewr::DbPrinterModel m;
+        m.name = "BlindPlaten";
+        m.pad_groups.push_back(group("Platen Pad Counter", "platen", { 28 }));
+
+        ewr::StateSnapshot silent;
+        const nlohmann::json data = ewr::JsonStateData(m, silent);
+        CHECK(data["pads_total"] == 0);
+        CHECK(data["pads"].empty());
+        CHECK(data["reset_covers"].size() == 1);
+        if (data["reset_covers"].size() == 1)
+        {
+            CHECK(data["reset_covers"][0]["kind"] == "platen");
+            CHECK(data["reset_covers"][0]["readable"] == false);
+        }
+    }
+}
+
+// The C API's device-free plan says which pads a reset clears, and an ink reset
+// clears none.
+void test_c_abi_plan_reports_reset_coverage()
+{
+    std::cout << "[TEST] test_c_abi_plan_reports_reset_coverage" << std::endl;
+
+    ewr_session* session = nullptr;
+    const int opened = ewr_session_open("database.json", &session);
+    if (opened == EWR_ERR_ANOTHER_RUN)
+    {
+        std::cout << "  [skip] another EWR run holds the printer" << std::endl;
+        ewr_session_close(session);
+        return;
+    }
+    CHECK(opened == EWR_OK);
+
+    char* json = nullptr;
+    CHECK(ewr_plan(session, "R220", 0, &json) == EWR_OK);
+    const nlohmann::json waste = nlohmann::json::parse(json);
+    ewr_string_free(json);
+    CHECK(waste["reset_covers"].size() == 2);
+    if (waste["reset_covers"].size() == 2)
+    {
+        CHECK(waste["reset_covers"][0]["kind"] == "main");
+        CHECK(waste["reset_covers"][0]["readable"] == true);
+        CHECK(waste["reset_covers"][1]["kind"] == "platen");
+        CHECK(waste["reset_covers"][1]["readable"] == false);
+    }
+
+    ewr_session_close(session);
+}
+
 // An empty `pads` used to mean two different things: a model with no pads, and
 // a model whose pads all went unread. `pads_total` is what tells them apart -
 // a caller seeing 0 of 2 knows to retry rather than to conclude there is
@@ -6148,6 +6389,9 @@ int main()
     test_json_pads_carry_a_kind_not_just_a_label();
     test_every_counter_kind_matches_its_own_description();
     test_unnamed_counter_reports_no_kind();
+    test_reset_coverage_over_the_database();
+    test_reset_coverage_shapes();
+    test_c_abi_plan_reports_reset_coverage();
     test_json_status_separates_unknown_from_zero();
     test_json_state_data_reports_detection_as_unknown();
     test_json_state_data_counts_pads_it_could_not_read();

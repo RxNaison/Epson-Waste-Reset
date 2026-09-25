@@ -138,6 +138,18 @@ namespace ewr {
         bool Valid() const { return !service.empty() && !enter.empty(); }
     };
 
+    // One pad a waste-pad reset covers. `readable` is whether EWR has a
+    // counter to report how full it is - not whether this read worked. Half
+    // the database resets pads it cannot read (an L6490's only pad, an R220's
+    // platen pad), and a caller that sees only the readable ones would think a
+    // reset does nothing there.
+    struct PadCoverage
+    {
+        std::string kind;   // "main", "platen", or empty when nobody knows
+        std::string name;   // human label - never parse it
+        bool readable{false};
+    };
+
     // One cartridge color's ink-consumption counter: a short run of EEPROM
     // bytes storing USED ink (0x00 = full). On chipped-cartridge models the
     // EEPROM copy is a firmware-managed mirror of the cartridge chip, so a
@@ -299,6 +311,99 @@ namespace ewr {
             }
 
             return specs;
+        }
+
+        // The pads a waste-pad reset covers, readable or not.
+        //
+        // Not the groups' labels: a group is a set of bytes reset together
+        // and can mix pads - an E-300's one group marked main also holds the
+        // platen counter's bytes. So a pad is covered when the reset writes a
+        // byte its counter reads, labelled by the counter's own kind; and bytes
+        // the reset writes that no counter reads are covered too, unreadable,
+        // labelled by their group. A known kind is one entry however many
+        // places it turns up; a counter that names no pad is its own.
+        //
+        // Ordered main, platen, then the unnamed ones in database order.
+        std::vector<PadCoverage> GetResetCoverage() const
+        {
+            std::vector<uint16_t> written;
+            std::vector<uint16_t> read;
+            for (const auto& group : pad_groups)
+            {
+                written.insert(written.end(), group.addresses.begin(), group.addresses.end());
+                for (const auto& counter : group.counters)
+                {
+                    for (const auto& part : counter.bytes)
+                        read.push_back(part.address);
+                }
+            }
+
+            auto contains = [](const std::vector<uint16_t>& list, uint16_t addr)
+            {
+                for (uint16_t known : list)
+                {
+                    if (known == addr)
+                        return true;
+                }
+                return false;
+            };
+
+            PadCoverage main{ "main", "", false };
+            PadCoverage platen{ "platen", "", false };
+            bool hasMain = false;
+            bool hasPlaten = false;
+            std::vector<PadCoverage> unnamed;
+
+            auto add = [&](const std::string& kind, const std::string& name, bool readable)
+            {
+                PadCoverage* slot = (kind == "main") ? &main : (kind == "platen") ? &platen : nullptr;
+                bool* seen = (kind == "main") ? &hasMain : (kind == "platen") ? &hasPlaten : nullptr;
+
+                if (!slot)
+                {
+                    unnamed.push_back({ "", name, readable });
+                    return;
+                }
+
+                if (!*seen)
+                    slot->name = name;
+                slot->readable = slot->readable || readable;
+                *seen = true;
+            };
+
+            for (const auto& group : pad_groups)
+            {
+                for (const auto& counter : group.counters)
+                {
+                    bool touched = false;
+                    for (const auto& part : counter.bytes)
+                        touched = touched || contains(written, part.address);
+
+                    // A counter the reset writes nothing of is not something it
+                    // covers, however readable.
+                    if (!touched)
+                        continue;
+
+                    const std::string kind = counter.kind.empty()
+                        ? PadKindFromDescription(counter.description) : counter.kind;
+                    add(kind, counter.description, true);
+                }
+
+                bool unread = false;
+                for (uint16_t addr : group.addresses)
+                    unread = unread || !contains(read, addr);
+
+                if (unread)
+                    add(group.EffectiveKind(), group.description, false);
+            }
+
+            std::vector<PadCoverage> out;
+            if (hasMain)
+                out.push_back(main);
+            if (hasPlaten)
+                out.push_back(platen);
+            out.insert(out.end(), unnamed.begin(), unnamed.end());
+            return out;
         }
 
         // Everything worth reading before a reset: the bytes that get written,

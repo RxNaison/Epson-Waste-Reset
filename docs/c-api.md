@@ -165,10 +165,10 @@ ctypes frees a thunk that nothing holds, and EWR will call it.
 | Call | Needs a printer | Answers |
 | --- | --- | --- |
 | `ewr_list_models` | no | `{"models": [{"name", "aliases", "resettable", "has_ink_reset"}]}` |
-| `ewr_plan` | no | `{"model", "target", "planned_writes": [{"address", "value"}]}` |
+| `ewr_plan` | no | `{"model", "target", "planned_writes": [{"address", "value"}], "reset_covers": [{"kind", "name", "readable"}]}`; `reset_covers` is `[]` for an ink reset |
 | `ewr_list_interfaces` | yes | `{"interfaces": [...]}`, indexes for `ewr_session_set_interface` |
 | `ewr_detect_model` | yes | `{"device_id", "reported_model", "model"}` |
-| `ewr_read_status` | yes | `{"model", "detected_model", "printer", "counters", "pads", "pads_total"}`; `detected_model` stays null here, ask `ewr_detect_model` |
+| `ewr_read_status` | yes | `{"model", "detected_model", "printer", "counters", "pads", "pads_total", "reset_covers"}`; `detected_model` stays null here, ask `ewr_detect_model` |
 | `ewr_dump` | yes | `{"model", "answered", "total", "values"}`; minutes, not seconds |
 | `ewr_reset` | yes | `{"model", "phase", "writes", "verification", "before", "after", ...}` |
 

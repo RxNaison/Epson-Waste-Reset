@@ -453,6 +453,8 @@ int ewr_plan(ewr_session* session, const char* model, int ink, char** out_json)
         payload["model"] = target.name;
         payload["target"] = ink ? "ink" : "waste";
         payload["planned_writes"] = std::move(planned);
+        // Which pads those writes clear; an ink reset clears none.
+        payload["reset_covers"] = ink ? nlohmann::json::array() : ewr::JsonResetCoverage(target);
         return Deliver(session, payload, out_json);
     });
 }

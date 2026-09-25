@@ -1369,6 +1369,8 @@ int main(int argc, char* argv[])
             g_jsonData["counters"] = nlohmann::json::array();
             g_jsonData["pads"] = nlohmann::json::array();
             g_jsonData["pads_total"] = 0;
+            // Opaque bytes: which pads a replay covers is unknown, not none.
+            g_jsonData["reset_covers"] = nullptr;
         }
         else
         {
@@ -1705,6 +1707,8 @@ int main(int argc, char* argv[])
             g_jsonData["counters"] = nlohmann::json::array();
             g_jsonData["pads"] = nlohmann::json::array();
             // A replay dump is opaque bytes: the packet count is all it knows.
+            g_jsonData["pads_total"] = 0;
+            g_jsonData["reset_covers"] = nullptr;
             g_jsonData["planned_writes"] = nullptr;
             g_jsonData["replay_packets"] = dumpSequence.size();
             g_jsonData["replay_writes"] = dumpWrites;
@@ -1783,6 +1787,10 @@ int main(int argc, char* argv[])
                                                              : nlohmann::json(detectedMatch);
         g_jsonData["target"] = cli.cartridge ? "ink" : "waste";
         g_jsonData["planned_writes"] = std::move(planned);
+
+        // An ink reset writes ink levels and clears no pad at all.
+        if (cli.cartridge)
+            g_jsonData["reset_covers"] = nlohmann::json::array();
 
         // The plan is the database's reset pattern for this model, not
         // anything read from a printer. A dry run that never got a reading has

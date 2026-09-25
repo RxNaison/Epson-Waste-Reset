@@ -73,6 +73,20 @@ namespace ewr {
         return out;
     }
 
+    nlohmann::json JsonResetCoverage(const DbPrinterModel& model)
+    {
+        nlohmann::json out = nlohmann::json::array();
+        for (const PadCoverage& pad : model.GetResetCoverage())
+        {
+            nlohmann::json entry;
+            entry["kind"] = pad.kind.empty() ? nlohmann::json(nullptr) : nlohmann::json(pad.kind);
+            entry["name"] = pad.name;
+            entry["readable"] = pad.readable;
+            out.push_back(std::move(entry));
+        }
+        return out;
+    }
+
     nlohmann::json JsonPrinterStatus(const PrinterStatus& status)
     {
         if (!status.valid)
@@ -120,6 +134,10 @@ namespace ewr {
         // from a model that reports none: a group whose bytes did not all come
         // back is left out of `pads` rather than reported with a wrong total.
         out["pads_total"] = model.GetAllCounters().size();
+        // What a waste-pad reset covers, readable or not. From the database, so
+        // it is there whether the read worked or not: `pads` says how full the
+        // readable pads are, this says which pads a reset would clear.
+        out["reset_covers"] = JsonResetCoverage(model);
         return out;
     }
 

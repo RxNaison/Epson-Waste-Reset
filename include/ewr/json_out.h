@@ -80,6 +80,11 @@ namespace ewr {
     nlohmann::json JsonPadUsage(const DbPrinterModel& model,
                                 const std::vector<std::pair<uint16_t, int>>& values);
 
+    // [{"kind": ..., "name": ..., "readable": ...}, ...] - every pad a waste-pad
+    // reset covers, including the ones EWR cannot read. See
+    // DbPrinterModel::GetResetCoverage for how it is worked out.
+    nlohmann::json JsonResetCoverage(const DbPrinterModel& model);
+
     // The '@BDC ST2' report, or null when nothing parsed.
     nlohmann::json JsonPrinterStatus(const PrinterStatus& status);
 

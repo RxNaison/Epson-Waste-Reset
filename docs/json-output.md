@@ -128,6 +128,9 @@ alone, and a code it cannot branch on breaks that promise.
               "inks": [{"color": "Black", "code": 0, "level": 43, "status": "OK"}]},
   "counters": [{"address": 12, "value": 0}],
   "pads": [{"name": "Main Pad Counter", "kind": "main", "used": 0, "max": 46750, "percent": 0}],
+  "pads_total": 1,
+  "reset_covers": [{"kind": "main", "name": "Main Pad Counter", "readable": true},
+                   {"kind": "platen", "name": "Platen Pad Counter", "readable": false}],
   "planned_writes": [{"address": 12, "value": 0}]
 }
 ```
@@ -148,9 +151,11 @@ Two rules keep `null` from hiding anything:
 - **The printer's own error is the verdict.** `printer.error_code` 16 (SERVICE
   REQUEST) or 44 (CARTRIDGE OVERFLOW) are the waste-pad errors a reset clears.
   `pads` says how close each counter is and can be incomplete: an R220 tracks
-  a platen pad the database has no counter for. `used` and `max` are there so you can judge the number yourself
-instead of trusting a rounded `percent`, which is `null` when the model has no
-service limit on record.
+  a platen pad the database has no counter for. `reset_covers` lists it anyway.
+
+`used` and `max` are there so you can judge the number yourself instead of
+trusting a rounded `percent`, which is `null` when the model has no service
+limit on record.
 
 `null` always means "not reported", never zero: an ink the printer says nothing
 about has `"level": null` with its own `status` text, while an empty cartridge
@@ -173,8 +178,31 @@ means "no counter to read" - an empty `pads` alone cannot tell you which.
 `pads_total` counts counters, not physical pads. A pad the database knows how
 to reset but not how to read as a usage number is not in it: an R220 has a main
 and a platen pad, both reset, but only the main one has a counter, so it
-reports `pads_total: 1`. `planned_writes` is where every byte a reset would
-touch shows up, whether or not it can be read back as a percentage.
+reports `pads_total: 1`.
+
+**`reset_covers` is every pad a waste-pad reset clears, readable or not.**
+`pads` answers "how full", and only for pads with a counter; this answers "what
+would a reset clear". The two differ a lot: 669 resettable models have no
+counter at all, so their `pads` is always empty while a reset still writes
+them - an L6490 reports `pads_total: 0` and
+`reset_covers: [{"kind": "platen", "readable": false}]`.
+
+- `kind` is `"main"`, `"platen"`, or `null` for a pad nobody has named. A known
+  kind appears at most once.
+- `readable` is whether EWR has a counter for that pad - whether it can ever
+  appear in `pads` - not whether this particular read worked. The readable
+  entries are exactly the pads `pads` reports when the read succeeds.
+- A pad with `readable: false` has no fill level to judge, so the printer's own
+  error code is the only thing that says it is full.
+- It is worked out from which bytes each counter reads and which bytes the
+  reset writes, not from how the database groups them: groups can mix pads,
+  and an E-300's single group labelled main also holds the platen counter.
+- `[]` when the reset clears no pad, which is a `dry-run` with `target: "ink"`.
+  `null` for a Replay model, whose dump is opaque bytes: which pads it clears
+  is unknown, not none.
+
+`planned_writes` is where every byte a reset would touch shows up, whether or
+not it belongs to a pad EWR can read.
 
 **A `dry-run` that could not read the printer fails.** It still reports the
 plan, because the plan comes from the database and is worth seeing, but it
@@ -183,14 +211,16 @@ under `ok: true` would read as "this is what your printer needs", and nothing
 was read from any printer.
 
 `status` and `dry-run` fill `data` whether the read worked or not, so a caller
-that got nothing still learns which model it asked about and how many pad
-counters that model has: `printer: null`, `counters: []`, `pads: []`, and
-`pads_total` from the database.
+that got nothing still learns which model it asked about, how many pad
+counters that model has and which pads a reset would clear: `printer: null`,
+`counters: []`, `pads: []`, and `pads_total` and `reset_covers` from the
+database.
 
 A Replay model carries no read key, so its `status` has empty `counters` and
-`pads`, and its `dry-run` reports `planned_writes: null` plus `replay_packets`
-and `replay_writes`: a captured dump is opaque bytes, and their count is all
-that can be said about it before it is sent.
+`pads` and `reset_covers: null`, and its `dry-run` reports
+`planned_writes: null` plus `replay_packets` and `replay_writes`: a captured
+dump is opaque bytes, and their count is all that can be said about it before
+it is sent.
 
 **dump**
 

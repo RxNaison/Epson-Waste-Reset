@@ -133,11 +133,22 @@ alone, and a code it cannot branch on breaks that promise.
 ```
 
 `kind` is how you tell one pad from another without reading English: `"main"`,
-`"platen"`, or `null` when neither the counter nor its pad group says which. It
-describes *that counter*, not the group it is filed under - 489 models keep a
-platen counter inside a group marked `main`, so the counter's own description
-decides and the group is only the fallback. Act on the kind, never on `name` -
-a platen counter taken for the main one is a real bug that has happened. `used` and `max` are there so you can judge the number yourself
+`"platen"`, or `null` when the counter does not say which pad it measures. It
+comes from the counter alone, never from the group it is filed under: 489
+models keep a platen counter inside a group marked `main`, and 87 counters the
+database only numbers ("Waste Counter 3") have a pad nobody knows. Those report
+`null`, not a guess. Use the kind to label a pad, never `name`.
+
+Two rules keep `null` from hiding anything:
+
+- **`kind` is a label, not a filter.** Every entry in `pads` has its own limit,
+  and any of them can fill first - in 68 of the 78 models with an unnamed
+  counter, it has a *smaller* limit than the main pad. Judge a printer by the
+  highest `percent` across all its pads, not by the one marked `main`.
+- **The printer's own error is the verdict.** `printer.error_code` 16 (SERVICE
+  REQUEST) or 44 (CARTRIDGE OVERFLOW) are the waste-pad errors a reset clears.
+  `pads` says how close each counter is and can be incomplete: an R220 tracks
+  a platen pad the database has no counter for. `used` and `max` are there so you can judge the number yourself
 instead of trusting a rounded `percent`, which is `null` when the model has no
 service limit on record.
 
@@ -153,10 +164,17 @@ the C API leaves it null and offers `ewr_detect_model` instead.
 `planned_writes` is `null` for `status` and the list a reset would write for
 `dry-run`. A counter that went unread has `value: null`.
 
-`pads` holds the pads that could be read whole; `pads_total` is how many the
-model has. They differ when a pad group's bytes did not all come back, so
+`pads` holds the pads that could be read whole; `pads_total` is how many pad
+counters the database defines for the model - the most `pads` can ever hold.
+They differ when a counter's bytes did not all come back, so
 `pads: [], pads_total: 2` means "could not read them", while `pads_total: 0`
-means "this model has none" - an empty `pads` alone cannot tell you which.
+means "no counter to read" - an empty `pads` alone cannot tell you which.
+
+`pads_total` counts counters, not physical pads. A pad the database knows how
+to reset but not how to read as a usage number is not in it: an R220 has a main
+and a platen pad, both reset, but only the main one has a counter, so it
+reports `pads_total: 1`. `planned_writes` is where every byte a reset would
+touch shows up, whether or not it can be read back as a percentage.
 
 **A `dry-run` that could not read the printer fails.** It still reports the
 plan, because the plan comes from the database and is worth seeing, but it
@@ -165,9 +183,9 @@ under `ok: true` would read as "this is what your printer needs", and nothing
 was read from any printer.
 
 `status` and `dry-run` fill `data` whether the read worked or not, so a caller
-that got nothing still learns which model it asked about and how many pads that
-model has: `printer: null`, `counters: []`, `pads: []`, and `pads_total` from
-the database.
+that got nothing still learns which model it asked about and how many pad
+counters that model has: `printer: null`, `counters: []`, `pads: []`, and
+`pads_total` from the database.
 
 A Replay model carries no read key, so its `status` has empty `counters` and
 `pads`, and its `dry-run` reports `planned_writes: null` plus `replay_packets`

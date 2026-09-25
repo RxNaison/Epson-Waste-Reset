@@ -68,11 +68,9 @@ namespace ewr {
     struct CounterSpec
     {
         std::string description;
-        // Which pad this counts: "main", "platen", or empty when the database
-        // says neither and the description does not tell. Stamped from the
-        // owning pad group by GetAllCounters, because a flattened counter
-        // would otherwise carry only its English label - and reading the label
-        // is exactly how a platen counter gets taken for the main one (#35).
+        // Which pad this counts: "main", "platen", or empty when the counter
+        // does not say. Filled by GetAllCounters from the counter's own label,
+        // never from its group - see there for why.
         std::string kind;
         std::vector<CounterByte> bytes;
         uint32_t max_value{0}; // 0 = unknown, no percentage can be shown
@@ -285,16 +283,16 @@ namespace ewr {
             {
                 for (CounterSpec spec : group.counters)
                 {
-                    // A group can hold counters for more than one pad: 489
-                    // entries keep a "Platen Pad Counter" inside a group whose
-                    // kind is "main" (BX305FW, Artisan 1430, ...). So the
-                    // counter's own description decides, and the group is only
-                    // the fallback for a counter that says nothing.
+                    // A counter is labelled by what it says about itself and by
+                    // nothing else. A pad group is a set of bytes reset
+                    // together, not one pad: 489 entries file a "Platen Pad
+                    // Counter" under a group marked main, and 87 counters named
+                    // only by position ("Waste Counter 3") sit in groups marked
+                    // main - 6 of them alone in one. Nobody knows their pad,
+                    // and the database build refuses to guess it (#35), so the
+                    // group's kind would be a guess here too.
                     if (spec.kind.empty())
-                    {
-                        const std::string own = PadKindFromDescription(spec.description);
-                        spec.kind = own.empty() ? group.EffectiveKind() : own;
-                    }
+                        spec.kind = PadKindFromDescription(spec.description);
 
                     specs.push_back(std::move(spec));
                 }

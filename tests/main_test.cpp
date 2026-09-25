@@ -5009,12 +5009,14 @@ void test_json_state_data_reports_detection_as_unknown()
     CHECK(data["counters"][1]["value"].is_null());
 }
 
-// A pad group can hold counters for more than one pad: 489 database entries
-// keep a "Platen Pad Counter" inside a group whose kind is "main". Stamping the
-// group's kind onto every counter in it therefore labelled those platen
-// counters "main" - the #35 confusion again, this time in the key that exists
-// to prevent it. Asserted over the real database rather than one model, so the
-// rule holds whatever build_db.py regenerates.
+// A counter's kind is what the counter says about itself, and nothing else.
+// A pad group is a set of bytes reset together, not one pad: 489 entries file
+// a "Platen Pad Counter" under a group marked main, and 87 counters named only
+// by position ("Waste Counter 3") sit in groups marked main, 6 of them alone in
+// one. Taking the group's kind labelled the first set wrongly and the second
+// set with a guess the database build explicitly refuses to make (#35).
+// Asserted over the real database rather than a few models, so the rule holds
+// whatever build_db.py regenerates.
 void test_every_counter_kind_matches_its_own_description()
 {
     std::cout << "[TEST] test_every_counter_kind_matches_its_own_description" << std::endl;
@@ -5022,18 +5024,16 @@ void test_every_counter_kind_matches_its_own_description()
     ewr::UniversalGenerator gen;
     CHECK(gen.LoadDatabase("database.json"));
 
-    size_t checked = 0;
-    size_t platenInsideMainGroup = 0;
+    size_t named = 0;
+    size_t platen = 0;
+    size_t unnamed = 0;
 
     for (const auto& model : gen.GetAvailableModels())
     {
         for (const auto& counter : model.GetAllCounters())
         {
             const std::string own = ewr::PadKindFromDescription(counter.description);
-            if (own.empty())
-                continue;
 
-            ++checked;
             if (counter.kind != own)
             {
                 std::cout << "  [detail] " << model.name << ": \"" << counter.description
@@ -5041,44 +5041,73 @@ void test_every_counter_kind_matches_its_own_description()
             }
             CHECK(counter.kind == own);
 
+            if (own.empty())
+                ++unnamed;
+            else
+                ++named;
+
             if (own == "platen")
-                ++platenInsideMainGroup;
+                ++platen;
         }
     }
 
-    // If the database ever stops describing its counters, this test would pass
-    // while checking nothing.
-    CHECK(checked > 100);
-    CHECK(platenInsideMainGroup > 0);
+    // Each branch has to have been exercised, or the test passes while
+    // checking nothing: named counters, platen ones among them, and counters
+    // whose pad nobody knows.
+    CHECK(named > 100);
+    CHECK(platen > 0);
+    CHECK(unnamed > 0);
 }
 
-// The group is still the fallback: a counter whose own description says nothing
-// takes the kind of the group it belongs to.
-void test_counter_kind_falls_back_to_its_group()
+// The shapes from the database, as a caller sees them: a counter named only by
+// position reports no kind, whether it shares its group (E-300) or sits in it
+// alone (PM-A920) - and whatever the group is marked.
+void test_unnamed_counter_reports_no_kind()
 {
-    std::cout << "[TEST] test_counter_kind_falls_back_to_its_group" << std::endl;
+    std::cout << "[TEST] test_unnamed_counter_reports_no_kind" << std::endl;
 
-    ewr::DbPrinterModel model;
-    model.name = "Quiet";
+    auto counter = [](const char* description, uint16_t address, uint32_t max)
+    {
+        ewr::CounterSpec spec;
+        spec.description = description;
+        spec.max_value = max;
+        spec.bytes = { ewr::CounterByte{ address, 0xFF, 1 } };
+        return spec;
+    };
 
+    // E-300: main, platen and a third counter in one group marked main.
+    ewr::DbPrinterModel shared;
+    shared.name = "SharedGroup";
     ewr::PadGroup group;
-    group.description = "Platen Pad Counter";
-    group.kind = "platen";
-    group.addresses = { 0x40 };
+    group.description = "Main Pad Counter";
+    group.kind = "main";
+    group.addresses = { 0x10, 0x28, 0x26 };
+    group.counters = { counter("Main Pad Counter", 0x10, 60000),
+                       counter("Platen Pad Counter", 0x28, 4177),
+                       counter("Waste Counter 3", 0x26, 600) };
+    shared.pad_groups.push_back(group);
 
-    ewr::CounterSpec spec;          // no description to go on
-    spec.max_value = 10;
-    spec.bytes = { ewr::CounterByte{ 0x40, 0xFF, 1 } };
-    group.counters.push_back(spec);
-    model.pad_groups.push_back(group);
+    const nlohmann::json pads = ewr::JsonPadUsage(shared, { { 0x10, 1 }, { 0x28, 2 }, { 0x26, 3 } });
+    CHECK(pads.size() == 3);
+    CHECK(pads[0]["kind"] == "main");
+    CHECK(pads[1]["kind"] == "platen");
+    CHECK(pads[2]["kind"].is_null());
+    // Unknown pad, but still a counter with a limit: it stays in `pads`.
+    CHECK(pads[2]["max"] == 600);
 
-    const std::vector<ewr::CounterSpec> counters = model.GetAllCounters();
-    CHECK(counters.size() == 1);
-    CHECK(counters[0].kind == "platen");
+    // PM-A920: the unnamed counter alone in a group marked main.
+    ewr::DbPrinterModel lone;
+    lone.name = "LoneCounter";
+    ewr::PadGroup single;
+    single.description = "Main Pad Counter";
+    single.kind = "main";
+    single.addresses = { 0x30 };
+    single.counters = { counter("Waste Counter 3", 0x30, 3260) };
+    lone.pad_groups.push_back(single);
 
-    const nlohmann::json pads = ewr::JsonPadUsage(model, { { 0x40, 3 } });
-    CHECK(pads.size() == 1);
-    CHECK(pads[0]["kind"] == "platen");
+    const nlohmann::json lonePads = ewr::JsonPadUsage(lone, { { 0x30, 7 } });
+    CHECK(lonePads.size() == 1);
+    CHECK(lonePads[0]["kind"].is_null());
 }
 
 // An empty `pads` used to mean two different things: a model with no pads, and
@@ -6118,7 +6147,7 @@ int main()
     test_end4_sequence_alternate_key();
     test_json_pads_carry_a_kind_not_just_a_label();
     test_every_counter_kind_matches_its_own_description();
-    test_counter_kind_falls_back_to_its_group();
+    test_unnamed_counter_reports_no_kind();
     test_json_status_separates_unknown_from_zero();
     test_json_state_data_reports_detection_as_unknown();
     test_json_state_data_counts_pads_it_could_not_read();

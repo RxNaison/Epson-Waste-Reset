@@ -139,10 +139,10 @@ namespace ewr {
     };
 
     // One pad a waste-pad reset covers. `readable` is whether EWR has a
-    // counter to report how full it is - not whether this read worked. Half
-    // the database resets pads it cannot read (an L6490's only pad, an R220's
-    // platen pad), and a caller that sees only the readable ones would think a
-    // reset does nothing there.
+    // counter to report how full it is - not whether this read worked. 809 of
+    // the 1337 resettable models reset a pad they cannot read (an L6490's only
+    // pad, an R220's platen pad), and a caller that sees only the readable ones
+    // would think a reset does nothing there.
     struct PadCoverage
     {
         std::string kind;   // "main", "platen", or empty when nobody knows

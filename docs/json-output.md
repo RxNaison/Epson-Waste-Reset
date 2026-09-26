@@ -182,10 +182,12 @@ reports `pads_total: 1`.
 
 **`reset_covers` is every pad a waste-pad reset clears, readable or not.**
 `pads` answers "how full", and only for pads with a counter; this answers "what
-would a reset clear". The two differ a lot: 669 resettable models have no
-counter at all, so their `pads` is always empty while a reset still writes
-them - an L6490 reports `pads_total: 0` and
-`reset_covers: [{"kind": "platen", "readable": false}]`.
+would a reset clear". The two differ on 809 of the 1337 resettable models.
+669 have no counter at all, so their `pads` is always empty while a reset still
+writes them - an L6490 reports `pads_total: 0` and
+`reset_covers: [{"kind": "platen", "readable": false}]`. The other 140 have a
+counter for one pad and none for another the reset also clears, like an R220's
+platen pad.
 
 - `kind` is `"main"`, `"platen"`, or `null` for a pad nobody has named. A known
   kind appears at most once.

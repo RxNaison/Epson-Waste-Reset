@@ -5111,10 +5111,10 @@ void test_unnamed_counter_reports_no_kind()
 }
 
 // `pads` says how full the readable pads are; `reset_covers` says which pads a
-// reset would clear, readable or not. Without it, half the database looked
-// like a reset did nothing: 669 resettable models have no counter at all (an
-// L6490's only pad), and 600 more reset a pad they cannot read (an R220's
-// platen pad). The invariants, over every model in the real database:
+// reset would clear, readable or not. Without it, 809 of the 1337 resettable
+// models hid a pad the reset clears: 669 have no counter at all (an L6490's
+// only pad), and 140 reset a pad they cannot read beside one they can (an
+// R220's platen pad). The invariants, over every model in the real database:
 //   - a model the reset writes to never reports an empty list;
 //   - a known pad appears once, however many groups it turns up in;
 //   - the readable entries are exactly the pads `pads` can report;

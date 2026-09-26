@@ -360,6 +360,28 @@ static void PrintCounterSummary(const ewr::DbPrinterModel& model,
     }
 }
 
+// The gauges above show only pads with a counter, and 809 of the 1337
+// resettable models also reset a pad without one - an R220's platen pad, an
+// L6490's only pad - so without this a person sees one pad, or none, on a
+// printer where a reset clears more (#42). Same list as `reset_covers`.
+static void PrintResetCoverage(const ewr::DbPrinterModel& model)
+{
+    const std::vector<ewr::PadCoverage> covers = model.GetResetCoverage();
+    if (covers.empty())
+        return;
+
+    std::cout << "  A waste pad reset clears:" << std::endl;
+    for (const auto& pad : covers)
+    {
+        const std::string name = pad.name.empty() ? std::string("Waste pad") : pad.name;
+        char line[200];
+        snprintf(line, sizeof(line), "    %-28.28s %s", name.c_str(),
+                 pad.readable ? "has a counter"
+                              : "no counter - only the printer's own error says when it is full");
+        std::cout << line << std::endl;
+    }
+}
+
 // Diagnostic runs are often piped, so they skip the interactive pause.
 static bool g_exitPause = true;
 
@@ -1393,7 +1415,10 @@ int main(int argc, char* argv[])
         PrintCounterValues(state.values, "Waste counter EEPROM values:");
 
         if (!selected.isReplay)
+        {
             PrintCounterSummary(selected.smartModel, state.values);
+            PrintResetCoverage(selected.smartModel);
+        }
 
         if (selected.isReplay)
             std::cout << "[i] Counter values are not available for Replay models (no read key in the dump)." << std::endl;
@@ -1755,6 +1780,10 @@ int main(int argc, char* argv[])
             std::cout << line << std::endl;
         }
 
+        // Which pads those bytes belong to; an ink reset clears none.
+        if (!cli.cartridge)
+            PrintResetCoverage(selected.smartModel);
+
         // The schema-4 close step belongs to the waste-pad reset; the ink
         // lifecycle has no commit.
         if (!cli.cartridge)
@@ -2014,6 +2043,7 @@ int main(int argc, char* argv[])
         {
             PrintCounterValues(before.values, "Waste counter EEPROM values BEFORE reset:");
             PrintCounterSummary(selected.smartModel, before.values);
+            PrintResetCoverage(selected.smartModel);
         }
     };
 

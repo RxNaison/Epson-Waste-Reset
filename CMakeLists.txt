@@ -21,7 +21,7 @@ configure_file(
     @ONLY
 )
 
-set(LIB_SOURCES src/run_lock.cpp src/json_out.cpp src/ewr_c.cpp src/parser.cpp src/generator.cpp src/executor.cpp src/d4session.cpp src/session.cpp src/status.cpp src/deviceid.cpp src/updater_common.cpp src/usb_driver.cpp src/end4.cpp src/usb_composite.cpp src/discover.cpp)
+set(LIB_SOURCES src/run_lock.cpp src/json_out.cpp src/ewr_c.cpp src/parser.cpp src/generator.cpp src/executor.cpp src/d4session.cpp src/session.cpp src/status.cpp src/deviceid.cpp src/updater_common.cpp src/usb_driver.cpp src/end4.cpp src/usb_composite.cpp src/discover.cpp src/snmp.cpp src/snmp_gateway.cpp)
 
 if(WIN32)
     list(APPEND LIB_SOURCES src/usb_windows.cpp src/usb_libusb.cpp src/updater_windows.cpp)
@@ -57,7 +57,7 @@ if(WIN32)
 
     # Bare target name: the libusb::usb-1.0 alias is only on libusb-cmake's
     # main branch, which has no release tag.
-    target_link_libraries(ewr_core PRIVATE setupapi urlmon wininet usb-1.0)
+    target_link_libraries(ewr_core PRIVATE setupapi urlmon wininet ws2_32 usb-1.0)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBUSB REQUIRED libusb-1.0)

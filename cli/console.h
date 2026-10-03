@@ -34,7 +34,8 @@ namespace ewr::cli
             "usb.device_detected", "usb.sequence_begin", "usb.trace_log", "usb.lock_released",
             "usb.kernel_driver_detach", "usb.claim_failed",
             // One interface or attempt failing is the fallback working. If they
-            // all fail, usb.reset_not_confirmed carries the reason.
+            // all fail, usb.reset_not_confirmed (snmp. over the network)
+            // carries the reason.
             "exec.handshake_failed",
             "exec.write_retry", "exec.write_key_retry", "exec.write_rejected", "exec.write_refused",
             "escr.success", "end4.success",
@@ -98,7 +99,8 @@ namespace ewr::cli
                 else if (event.code.rfind("session.commit", 0) == 0)
                     inCommit = false;
 
-                if (inCommit && event.code == "usb.reset_not_confirmed")
+                if (inCommit && (event.code == "usb.reset_not_confirmed"
+                                 || event.code == "snmp.reset_not_confirmed"))
                     return;
 
                 const ConsoleRule rule = ConsoleRuleFor(event.code);

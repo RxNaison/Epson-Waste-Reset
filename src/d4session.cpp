@@ -766,30 +766,68 @@ namespace ewr {
 
         result.handshakeConfirmed = true;
 
-        // The session owns handshake and credit choreography, so only data
-        // payloads survive.
-        struct Item
+        // Set by an exchange that drew no reply; the next one runs on a fresh
+        // session (see D4Session::Restart).
+        bool restartNeeded = false;
+
+        const CtrlExchange exchange = [&](const std::vector<unsigned char>& command,
+                                          std::vector<unsigned char>& reply, std::string& error)
         {
-            std::vector<unsigned char> payload;
-            bool isWrite;
+            if (restartNeeded)
+            {
+                if (!RestartWithBackoff(session, reporter, options))
+                {
+                    error = "A packet went unacknowledged and the printer would not open a fresh D4 session ("
+                          + session.LastError() + ")";
+                    EmitTrace(reporter, "exec.trace_fatal", "[FATAL] " + error + "\n");
+                    return false;
+                }
+
+                restartNeeded = false;
+            }
+
+            if (session.Exchange(command, reply))
+                return true;
+
+            if (session.LastError().find("Transport failure") != std::string::npos)
+            {
+                error = session.LastError();
+                return false;
+            }
+
+            restartNeeded = true;
+            return true;
         };
 
-        std::vector<Item> items;
+        RunCtrlCommands(exchange, ExtractCtrlCommands(sequence), reporter, options, result);
+        return result;
+    }
+
+    std::vector<CtrlCommand> ExtractCtrlCommands(const std::vector<std::vector<unsigned char>>& sequence)
+    {
+        // The session owns handshake and credit choreography, so only data
+        // payloads survive.
+        std::vector<CtrlCommand> commands;
         for (const auto& pkt : sequence)
         {
             std::vector<unsigned char> payload;
             if (ExtractDataPayload(pkt, payload))
-                items.push_back({ std::move(payload), IsWritePacket(pkt) });
+                commands.push_back({ std::move(payload), IsWritePacket(pkt) });
         }
+        return commands;
+    }
 
-        // Set by an exchange that drew no reply; the next one runs on a fresh
-        // session (see D4Session::Restart). A write is idempotent, so sending
-        // it again after a lost acknowledgement is safe.
-        bool restartNeeded = false;
-
-        for (size_t i = 0; i < items.size(); ++i)
+    void RunCtrlCommands(const CtrlExchange& exchange,
+                         const std::vector<CtrlCommand>& commands,
+                         log::Reporter& reporter,
+                         const ExecutorOptions& options,
+                         ExecutionResult& result)
+    {
+        // A write is idempotent, so sending it again after a lost
+        // acknowledgement is safe.
+        for (size_t i = 0; i < commands.size(); ++i)
         {
-            const bool isWrite = items[i].isWrite;
+            const bool isWrite = commands[i].isWrite;
             if (isWrite)
                 result.writesTotal++;
 
@@ -799,15 +837,15 @@ namespace ewr {
 
             // Copied, not referenced: a ':42:NG;' may rebuild this payload with
             // the model's alternate keyword before the next attempt.
-            std::vector<unsigned char> payload = items[i].payload;
+            std::vector<unsigned char> payload = commands[i].payload;
             bool triedAlternateKey = false;
 
             for (int attempt = 1; attempt <= maxAttempts; ++attempt)
             {
                 if (attempt > 1)
                 {
-                    EmitProgress(reporter, log::Stage::Write, "exec.write_retry", i + 1, items.size(),
-                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(items.size())
+                    EmitProgress(reporter, log::Stage::Write, "exec.write_retry", i + 1, commands.size(),
+                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
                                      + " | Retrying write (attempt " + std::to_string(attempt) + "/" + std::to_string(maxAttempts) + ")...");
                     EmitTrace(reporter, "exec.retry", "[RETRY] Command " + std::to_string(i + 1)
                         + " attempt " + std::to_string(attempt) + "/" + std::to_string(maxAttempts));
@@ -816,33 +854,15 @@ namespace ewr {
                         std::this_thread::sleep_for(std::chrono::milliseconds(options.retryDelayMs));
                 }
 
-                if (restartNeeded)
-                {
-                    if (!RestartWithBackoff(session, reporter, options))
-                    {
-                        result.error = "A packet went unacknowledged and the printer would not open a fresh D4 session ("
-                                     + session.LastError() + ")";
-                        EmitTrace(reporter, "exec.trace_fatal", "[FATAL] " + result.error + "\n");
-                        return result;
-                    }
-
-                    restartNeeded = false;
-                }
-
                 std::vector<unsigned char> reply;
-                const bool answered = session.Exchange(payload, reply);
+                std::string fatal;
+                if (!exchange(payload, reply, fatal))
+                {
+                    result.error = fatal;
+                    return;
+                }
 
                 result.packetsSent++;
-
-                if (!answered
-                    && session.LastError().find("Transport failure") != std::string::npos)
-                {
-                    result.error = session.LastError();
-                    return result;
-                }
-
-                if (!answered)
-                    restartNeeded = true;
 
                 if (!reply.empty())
                     result.ackCount++;
@@ -856,8 +876,8 @@ namespace ewr {
                         triedAlternateKey = true;
                         payload = std::move(alternate);
 
-                        EmitProgress(reporter, log::Stage::Write, "exec.write_key_retry", i + 1, items.size(),
-                                     "-> Command " + std::to_string(i + 1) + " / " + std::to_string(items.size())
+                        EmitProgress(reporter, log::Stage::Write, "exec.write_key_retry", i + 1, commands.size(),
+                                     "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
                                          + " | Key rejected (||:42:NG;) - retrying with the alternate keyword.");
                         EmitTrace(reporter, "exec.retry", "[RETRY] Write rejected with ':42:NG;' on command "
                             + std::to_string(i + 1) + "; retrying with the alternate keyword ('wkey1')");
@@ -868,12 +888,12 @@ namespace ewr {
                     result.writesRejected++;
                     result.error = "Printer REJECTED EEPROM write (command " + std::to_string(i + 1)
                                  + ", reply ':42:NG;'). The write key may not match this model.";
-                    EmitProgress(reporter, log::Stage::Write, "exec.write_rejected", i + 1, items.size(),
-                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(items.size())
+                    EmitProgress(reporter, log::Stage::Write, "exec.write_rejected", i + 1, commands.size(),
+                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
                                      + " | EEPROM write REJECTED (||:42:NG;).");
                     EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write rejected with ':42:NG;' on command " + std::to_string(i + 1) + "\n");
 
-                    return result;
+                    return;
                 }
 
                 if (isWrite && IsEepromWriteNaAck(reply))
@@ -883,19 +903,19 @@ namespace ewr {
                                  + ", reply ':42:NA;'). The printer is likely locked by another error"
                                    " state (empty cartridge, paper jam, open cover). Clear that error"
                                    " first, then run EWR again.";
-                    EmitProgress(reporter, log::Stage::Write, "exec.write_refused", i + 1, items.size(),
-                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(items.size())
+                    EmitProgress(reporter, log::Stage::Write, "exec.write_refused", i + 1, commands.size(),
+                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
                                      + " | EEPROM write REFUSED (||:42:NA;) - printer locked by another error.");
                     EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write refused with ':42:NA;' on command " + std::to_string(i + 1) + "\n");
 
-                    return result;
+                    return;
                 }
 
                 if (!verifyThisWrite)
                 {
                     EmitProgress(reporter, log::Stage::Write, reply.empty() ? "exec.packet_sent" : "exec.packet_acked",
-                                 i + 1, items.size(),
-                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(items.size())
+                                 i + 1, commands.size(),
+                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
                                      + (reply.empty() ? " | Sent. (No reply)" : " | Answered."));
                     confirmed = true;
                     break;
@@ -905,8 +925,8 @@ namespace ewr {
                 {
                     result.writesVerified++;
                     confirmed = true;
-                    EmitProgress(reporter, log::Stage::Write, "exec.write_verified", i + 1, items.size(),
-                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(items.size())
+                    EmitProgress(reporter, log::Stage::Write, "exec.write_verified", i + 1, commands.size(),
+                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
                                      + " | EEPROM write verified (||:42:OK;).");
                     break;
                 }
@@ -940,20 +960,20 @@ namespace ewr {
 
                 EmitTrace(reporter, "exec.trace_fatal", "[FATAL] " + result.error + "\n");
 
-                return result;
+                return;
             }
         }
 
         if (options.verifyWrites && result.writesTotal == 0)
         {
             result.error = "The sequence contains no EEPROM write packets - nothing was reset.";
-            return result;
+            return;
         }
 
         if (result.ackCount == 0)
         {
             result.error = "The printer did not acknowledge any packets. The reset sequence was rejected or ignored.";
-            return result;
+            return;
         }
 
         if (options.verifyWrites)
@@ -969,8 +989,6 @@ namespace ewr {
         {
             result.success = true;
         }
-
-        return result;
     }
 
     QuerySessionResult ExecuteQuerySessionD4(ITransport& transport,

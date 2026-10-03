@@ -784,8 +784,11 @@ namespace ewr {
             return out;
         }
 
+        const bool overUsb = !m_gateway.OverNetwork();
+
         m_reporter.Log(log::Level::Info, log::Stage::Detect, "session.scanning",
-                       "Scanning USB ports for Epson device...");
+                       overUsb ? "Scanning USB ports for Epson device..."
+                               : "Sending the reset to the printer over the network...");
 
         const ExecutorOptions writeOptions = BuildWriteOptions();
         const ResetRunResult run = m_gateway.RunReset(flow.sequence, writeOptions);
@@ -793,9 +796,11 @@ namespace ewr {
         if (!run.deviceFound)
         {
             m_reporter.Log(log::Level::Error, log::Stage::Detect, "session.device_not_found",
-                           "[ERROR] Could not find an Epson printer. Is it turned on and plugged in?");
+                           overUsb ? "[ERROR] Could not find an Epson printer. Is it turned on and plugged in?"
+                                   : "[ERROR] The printer stopped answering on the network.");
             out.phase = ResetPhase::DeviceNotFound;
-            out.error = "No Epson USB interface answered.";
+            out.error = overUsb ? "No Epson USB interface answered."
+                                : (run.exec.error.empty() ? "The printer did not answer on the network." : run.exec.error);
             return out;
         }
 

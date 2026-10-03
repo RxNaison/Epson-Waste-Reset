@@ -59,7 +59,7 @@ Every line carries these:
 | `platform` | string | `windows`, `linux` or `macos`. |
 | `command` | string | `status`, `dump`, `list`, `dry-run`, `reset`, `find-addresses` or `find-key`. |
 | `model` | string/null | What `--model` named, before matching. `null` when not given. |
-| `flags` | object | The switches that change behavior: `no_update`, `yes`, `force_yes`, `cartridge`, `usb_soft_reset`, `interface` (int, 0 = automatic). |
+| `flags` | object | The switches that change behavior: `no_update`, `yes`, `force_yes`, `cartridge`, `usb_soft_reset`, `interface` (int, 0 = automatic), `ip` (string, the `--ip` address; `null` on a USB run). |
 
 ## `event`
 
@@ -73,8 +73,8 @@ Every line carries these:
 | `total` | int/null | Length of that sequence. |
 | `fields` | object | String to string. Keys are as stable as `code`. |
 
-Codes are namespaced by layer (`db.`, `usb.`, `exec.`, `d4.`, `end4.`,
-`update.`). A release can add codes; it will not repurpose one.
+Codes are namespaced by layer (`db.`, `usb.`, `snmp.`, `exec.`, `d4.`,
+`end4.`, `update.`). A release can add codes; it will not repurpose one.
 
 Events that carry `fields` so far (values are decimal strings, like every field):
 

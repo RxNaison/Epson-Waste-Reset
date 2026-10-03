@@ -6,6 +6,7 @@
 #include "ewr/payload.h"
 #include "ewr/parser.h"
 #include "ewr/session.h"
+#include "ewr/snmp_gateway.h"
 #include "ewr/usb.h"
 #include "ewr/deviceid.h"
 #include "ewr/generator.h"
@@ -73,6 +74,7 @@ struct CliOptions
     bool usbSoftReset = false;   // --usb-soft-reset: reset the USB channel once, then wait
     bool json = false;           // --json: the machine-readable contract on stdout
     std::string modelOverride;   // --model <name>: skip the menu
+    std::string ip;              // --ip <address>: read a network printer over SNMP
 };
 
 // ---- --json (docs/json-output.md) --------------------------------------
@@ -127,6 +129,7 @@ namespace {
         flags["cartridge"] = cli.cartridge;
         flags["usb_soft_reset"] = cli.usbSoftReset;
         flags["interface"] = cli.interfaceCandidate;
+        flags["ip"] = cli.ip.empty() ? nlohmann::json(nullptr) : nlohmann::json(cli.ip);
 
         g_json->Hello(EWR_VERSION, PlatformName(), g_jsonCommand,
                       cli.modelOverride.empty() ? nlohmann::json(nullptr) : nlohmann::json(cli.modelOverride),
@@ -205,6 +208,9 @@ static void PrintUsage()
               << "  --interface <n>  Pin the whole run to interface <n> from --list and\n"
               << "                   disable the automatic fallback. For composite\n"
               << "                   devices where detection picks the wrong interface.\n"
+              << "  --ip <address>   Reach a printer on the network instead of USB, over SNMP\n"
+              << "                   (UDP 161). Works with --status, --dry-run and the waste\n"
+              << "                   ink pad reset, with the same gates and read-back as USB.\n"
               << "  --dry-run        Detect, read status and counters, and show exactly\n"
               << "                   what a reset would write - then stop. No writes.\n"
               << "  --dump           Detect, select the model, then read the EEPROM into a\n"
@@ -935,7 +941,7 @@ int main(int argc, char* argv[])
 
             cli.json = true;
         }
-        else if (arg == "--model" || arg == "--interface")
+        else if (arg == "--model" || arg == "--interface" || arg == "--ip")
         {
             if (i + 1 >= argc)
             {
@@ -946,6 +952,17 @@ int main(int argc, char* argv[])
             if (arg == "--model")
             {
                 cli.modelOverride = value;
+            }
+            else if (arg == "--ip")
+            {
+                // Empty is how the rest of main() reads "no --ip": an unset
+                // variable in `--ip "$PRINTER"` would reset a USB printer.
+                if (value.empty())
+                {
+                    return UsageError(cli, "--ip needs an address, e.g. --ip 192.168.1.100.");
+                }
+
+                cli.ip = value;
             }
             else
             {
@@ -988,6 +1005,16 @@ int main(int argc, char* argv[])
     // only suggest that entry's key gets special treatment.
     if (cli.findKey && !cli.modelOverride.empty())
         return UsageError(cli, "--find-key takes no --model: it tries every read key in the database.");
+
+    // Over the network: --status, --dry-run and the waste ink pad reset.
+    if (!cli.ip.empty())
+    {
+        if (cli.listOnly || cli.findKey || cli.dump || cli.findAddresses || cli.cartridge)
+            return UsageError(cli, "--ip works with --status, --dry-run and the waste ink pad reset; --list,"
+                                   " --find-key, --dump, --find-addresses and --cartridge need USB.");
+        if (cli.interfaceCandidate >= 1 || cli.usbSoftReset)
+            return UsageError(cli, "--interface and --usb-soft-reset are USB switches and do not combine with --ip.");
+    }
 
     const bool statusOnly = cli.statusOnly;
 
@@ -1178,13 +1205,22 @@ int main(int argc, char* argv[])
 
     // One per run: it owns the ewr_trace.log lifecycle, so the first device
     // call starts the file fresh and every later session appends.
-    ewr::UsbDeviceGateway gateway;
+    ewr::UsbDeviceGateway usbGateway;
+
+    // --ip: the same seam over SNMP. USB is not touched at all on such a run.
+    std::unique_ptr<ewr::SnmpDeviceGateway> netGateway;
+    if (!cli.ip.empty())
+        netGateway = std::make_unique<ewr::SnmpDeviceGateway>(cli.ip);
+
+    ewr::IDeviceGateway& gateway = netGateway ? static_cast<ewr::IDeviceGateway&>(*netGateway)
+                                              : static_cast<ewr::IDeviceGateway&>(usbGateway);
 
     // Before any device call, so a second run says why it stopped instead of
     // reporting a printer that cannot be read. The gateway logs the reason as
     // an event; the result line has to name it too, because a caller is
     // promised it can act on the verdict alone.
-    if (!gateway.ClaimPrinter())
+    const bool claimed = netGateway ? netGateway->ClaimPrinter() : usbGateway.ClaimPrinter();
+    if (!claimed)
     {
         JsonFail("another_run", "Another EWR run is already driving a printer on this machine.");
         return FinishRun(1);
@@ -1194,8 +1230,13 @@ int main(int argc, char* argv[])
     std::string detectedMdl;
     std::string detectedMatch;
 
-    std::cout << "\n[i] Detecting the connected printer... " << std::flush;
-    const std::vector<ewr::InterfaceInfo> interfaces = gateway.ListInterfaces();
+    if (netGateway)
+        std::cout << "\n[i] Asking the printer at " << cli.ip << " (SNMP)... " << std::flush;
+    else
+        std::cout << "\n[i] Detecting the connected printer... " << std::flush;
+
+    const std::vector<ewr::InterfaceInfo> interfaces =
+        netGateway ? std::vector<ewr::InterfaceInfo>{} : usbGateway.ListInterfaces();
 
     if (cli.interfaceCandidate >= 1 && cli.interfaceCandidate > static_cast<int>(interfaces.size()))
     {
@@ -1210,6 +1251,36 @@ int main(int argc, char* argv[])
 
     // The pinned interface's when --interface is set, else the first answer.
     ewr::DeviceIdQueryResult devIdQuery;
+    if (netGateway)
+    {
+        devIdQuery = netGateway->QueryDeviceId();
+
+        // Silence here is the whole answer: there is no second interface to
+        // fall back to, and a menu would only postpone the same timeout.
+        if (!netGateway->Answered())
+        {
+            const std::string why = netGateway->SilenceError();
+
+            std::cout << "no answer." << std::endl;
+            std::cerr << "[ERROR] " << why << std::endl;
+            if (netGateway->SendBlocked())
+            {
+                std::cerr << "        The request never left this machine, so this says nothing about the printer.\n"
+                             "        Usual causes: a VPN or firewall that cuts off the local network, or on macOS\n"
+                             "        a terminal app without the Local Network permission (System Settings >\n"
+                             "        Privacy & Security > Local Network). Running with sudo also gets past the latter." << std::endl;
+            }
+            else if (netGateway->OpenError().empty())
+            {
+                std::cerr << "        Check that the printer is on and awake, that the address is the one on its\n"
+                             "        network status sheet, that this computer is on the same network, and that\n"
+                             "        SNMP has not been switched off in the printer's web settings." << std::endl;
+            }
+            JsonFail("device_not_found", why);
+            return FinishRun(1);
+        }
+    }
+
     for (const auto& iface : interfaces)
     {
         if (cli.interfaceCandidate >= 1 && iface.index != cli.interfaceCandidate)
@@ -1258,7 +1329,8 @@ int main(int argc, char* argv[])
     }
     else
     {
-        std::cout << "no answer (printer off, unplugged, or driver limitation)." << std::endl;
+        std::cout << (netGateway ? "it answers SNMP, but returned no device ID."
+                                 : "no answer (printer off, unplugged, or driver limitation).") << std::endl;
     }
 
     // Composite devices expose several interfaces and only one of them is
@@ -1551,6 +1623,16 @@ int main(int argc, char* argv[])
 
     // The top cause of wrong-model writes, so it needs an explicit yes.
     // The read-only modes are exempt: they send no writes to misplace.
+    // A replay dump is opaque bytes for a D4 channel; there is nothing in it
+    // the network transport could confirm. Its status read still works.
+    if (netGateway && selected.isReplay && !statusOnly)
+    {
+        std::cerr << "\n[!] " << selected.displayName << " is a Replay dump, and those can only be sent over USB."
+                  << std::endl;
+        JsonFail("not_supported", "A Replay dump cannot be sent over the network; pick a database model or use USB.");
+        return FinishRun(1);
+    }
+
     const bool readOnly = statusOnly || cli.dryRun || cli.dump || cli.findAddresses;
     const bool modelMismatch = !selected.isReplay && !detectedMatch.empty()
                                && selected.smartModel.name != detectedMatch;
@@ -1702,7 +1784,8 @@ int main(int argc, char* argv[])
 
         if (!state.available)
         {
-            std::cerr << "[ERROR] Could not read the printer status. Is it turned on and plugged in?" << std::endl;
+            std::cerr << (netGateway ? "[ERROR] Could not read the printer status over the network."
+                                     : "[ERROR] Could not read the printer status. Is it turned on and plugged in?") << std::endl;
             std::cerr << "        Check ewr_trace.log for the hardware trace." << std::endl;
             JsonFail("read_failed", "The printer did not answer the status query.");
             return FinishRun(1);

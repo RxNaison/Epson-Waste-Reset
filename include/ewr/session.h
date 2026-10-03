@@ -117,6 +117,9 @@ namespace ewr {
     {
         virtual ~IDeviceGateway() = default;
 
+        // For the lines a session prints about how it reaches the printer.
+        virtual bool OverNetwork() const { return false; }
+
         virtual QueryRunResult RunQuery(
             const std::vector<std::vector<unsigned char>>& handshake,
             const std::vector<std::vector<unsigned char>>& queries,

@@ -3,6 +3,7 @@
 #include "ewr/generator.h"
 
 #include <cstdint>
+#include <functional>
 #include <ostream>
 #include <string>
 #include <vector>
@@ -186,5 +187,32 @@ namespace ewr {
 
     // False for transaction/handshake packets, which carry no ctrl payload.
     bool ExtractDataPayload(const std::vector<unsigned char>& packet, std::vector<unsigned char>& payload);
+
+    // One EPSON-CTRL command out, its reply back: the step a write sequence
+    // repeats, over a D4 session or an SNMP GET. An empty `reply` is an
+    // answer that never came, and a later exchange may still be heard; false
+    // means none can be, with the reason in `error`.
+    using CtrlExchange = std::function<bool(const std::vector<unsigned char>& command,
+                                            std::vector<unsigned char>& reply,
+                                            std::string& error)>;
+
+    struct CtrlCommand
+    {
+        std::vector<unsigned char> payload;
+        bool isWrite = false;
+    };
+
+    // The data payloads of a generated sequence, in order.
+    std::vector<CtrlCommand> ExtractCtrlCommands(const std::vector<std::vector<unsigned char>>& sequence);
+
+    // The one write loop, whatever carries it. With options.verifyWrites
+    // every write must come back ':42:OK;': an unconfirmed one is sent again
+    // (a write is idempotent), ':42:NG;' earns one retry with the alternate
+    // keyword, and ':42:NA;' ends the run. Fills `result` past the handshake.
+    void RunCtrlCommands(const CtrlExchange& exchange,
+                         const std::vector<CtrlCommand>& commands,
+                         log::Reporter& reporter,
+                         const ExecutorOptions& options,
+                         ExecutionResult& result);
 
 } // namespace ewr

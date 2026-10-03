@@ -23,6 +23,8 @@
 #include "ewr/ewr_c.h"
 #include "ewr/version.h"
 #include "ewr/discover.h"
+#include "ewr/snmp.h"
+#include "ewr/snmp_gateway.h"
 #include "../cli/console.h"
 
 namespace fs = std::filesystem;
@@ -6658,14 +6660,18 @@ void test_console_hides_the_machinery()
         sink(event(L::Info, "session.commit", "[*] Commit step: latching the new counter values..."));
         sink(event(L::Info, "exec.write_verified", "-> Command 1 / 1", 1, 1));
         sink(event(L::Error, "usb.reset_not_confirmed", "[ERROR] no ack\n[!] The waste counter was NOT confirmed as reset."));
+        sink(event(L::Error, "snmp.reset_not_confirmed", "[ERROR] no network ack\n[!] The waste counter was NOT confirmed as reset."));
         sink(event(L::Info, "session.commit_failed", "[!] Commit step did not complete (no ack)."));
         sink(event(L::Error, "usb.reset_not_confirmed", "[ERROR] the reset itself\n[!] The waste counter was NOT confirmed as reset."));
+        sink(event(L::Error, "snmp.reset_not_confirmed", "[ERROR] the network reset itself\n[!] The waste counter was NOT confirmed as reset."));
 
         CHECK(out.str().find("Commit step: latching") == std::string::npos);
         CHECK(out.str().find("Writing to the printer") == std::string::npos);
         CHECK(out.str().find("Commit step did not complete") != std::string::npos);
         CHECK(err.str().find("no ack") == std::string::npos);
+        CHECK(err.str().find("no network ack") == std::string::npos);
         CHECK(err.str().find("the reset itself") != std::string::npos);
+        CHECK(err.str().find("the network reset itself") != std::string::npos);
     }
 
     // Everything the rules touch is Info except usb.claim_failed, which
@@ -6673,7 +6679,8 @@ void test_console_hides_the_machinery()
     // any other warning or error would lose a real problem.
     const char* const hiddenOnPurpose[] = { "usb.claim_failed" };
     const char* const errorCodes[] = {
-        "usb.reset_not_confirmed", "usb.claim_all_failed", "usb.another_run", "session.device_not_found",
+        "usb.reset_not_confirmed", "snmp.reset_not_confirmed", "usb.claim_all_failed", "usb.another_run",
+        "snmp.another_run", "session.device_not_found",
         "session.preflight_required", "session.db_conflict", "db.parse_error", "usb.busy_status_monitor",
         "usb.access_denied", "usb.open_failed", "usb.soft_reset_settle_timeout",
     };
@@ -6818,6 +6825,737 @@ void test_json_never_leaks_minus_one()
     CHECK(st["state"].is_null());
     CHECK(st["state_code"].is_null());
     CHECK(st["error_code"].is_null());
+}
+
+// ---- SNMP (the --ip network transport) ----------------------------------
+
+namespace snmp_test {
+
+    void AppendTlv(std::vector<unsigned char>& out, unsigned char tag, const std::vector<unsigned char>& content)
+    {
+        out.push_back(tag);
+        if (content.size() < 0x80)
+        {
+            out.push_back(static_cast<unsigned char>(content.size()));
+        }
+        else
+        {
+            out.push_back(0x82);
+            out.push_back(static_cast<unsigned char>(content.size() >> 8));
+            out.push_back(static_cast<unsigned char>(content.size() & 0xFF));
+        }
+        out.insert(out.end(), content.begin(), content.end());
+    }
+
+    // Shortest BER form of a non-negative INTEGER.
+    std::vector<unsigned char> IntegerContent(int value)
+    {
+        std::vector<unsigned char> bytes;
+        do
+        {
+            bytes.insert(bytes.begin(), static_cast<unsigned char>(value & 0xFF));
+            value >>= 8;
+        } while (value > 0);
+
+        if (bytes[0] & 0x80)
+            bytes.insert(bytes.begin(), 0x00);
+        return bytes;
+    }
+
+    // A GetRequest read back the way an agent reads it: its ID and its one
+    // OID. False for anything else, or for a community other than "public".
+    bool ParseRequest(const std::vector<unsigned char>& datagram, int& id, ewr::snmp::Oid& oid)
+    {
+        std::size_t pos = 0;
+
+        // One TLV of `tag` at pos: stepped into, or over with its content kept.
+        auto tlv = [&](unsigned char tag, bool enter, std::vector<unsigned char>* content) -> bool
+        {
+            if (pos + 2 > datagram.size() || datagram[pos] != tag)
+                return false;
+
+            std::size_t length = datagram[pos + 1];
+            pos += 2;
+            if (length & 0x80)
+            {
+                const std::size_t count = length & 0x7F;
+                length = 0;
+                for (std::size_t i = 0; i < count && pos < datagram.size(); ++i)
+                    length = (length << 8) | datagram[pos++];
+            }
+
+            if (length > datagram.size() - pos)
+                return false;
+            if (content)
+                content->assign(datagram.begin() + static_cast<long>(pos),
+                                datagram.begin() + static_cast<long>(pos + length));
+            if (!enter)
+                pos += length;
+            return true;
+        };
+
+        std::vector<unsigned char> community, idBytes, oidBytes;
+        if (!tlv(0x30, true, nullptr) || !tlv(0x02, false, nullptr) || !tlv(0x04, false, &community)
+            || std::string(community.begin(), community.end()) != "public"
+            || !tlv(0xA0, true, nullptr) || !tlv(0x02, false, &idBytes)
+            || !tlv(0x02, false, nullptr) || !tlv(0x02, false, nullptr)
+            || !tlv(0x30, true, nullptr) || !tlv(0x30, true, nullptr) || !tlv(0x06, false, &oidBytes)
+            || idBytes.empty() || oidBytes.empty())
+            return false;
+
+        id = 0;
+        for (unsigned char b : idBytes)
+            id = (id << 8) | b;
+
+        oid = { oidBytes[0] / 40u, oidBytes[0] % 40u };
+        uint32_t arc = 0;
+        for (std::size_t i = 1; i < oidBytes.size(); ++i)
+        {
+            arc = (arc << 7) | (oidBytes[i] & 0x7Fu);
+            if ((oidBytes[i] & 0x80) == 0)
+            {
+                oid.push_back(arc);
+                arc = 0;
+            }
+        }
+        return true;
+    }
+
+    // A GetResponse as an agent would send it. The OID is not echoed
+    // faithfully - the decoder only steps over it.
+    std::vector<unsigned char> MakeResponse(int requestId, int errorStatus, unsigned char valueTag,
+                                            const std::vector<unsigned char>& value)
+    {
+        std::vector<unsigned char> binding;
+        AppendTlv(binding, 0x06, { 0x2B, 0x06, 0x01 });
+        AppendTlv(binding, valueTag, value);
+
+        std::vector<unsigned char> list;
+        AppendTlv(list, 0x30, binding);
+
+        std::vector<unsigned char> pdu;
+        AppendTlv(pdu, 0x02, IntegerContent(requestId));
+        AppendTlv(pdu, 0x02, IntegerContent(errorStatus));
+        AppendTlv(pdu, 0x02, { 0x00 });
+        AppendTlv(pdu, 0x30, list);
+
+        std::vector<unsigned char> message;
+        AppendTlv(message, 0x02, { 0x00 });
+        AppendTlv(message, 0x04, { 'p', 'u', 'b', 'l', 'i', 'c' });
+        AppendTlv(message, 0xA2, pdu);
+
+        std::vector<unsigned char> datagram;
+        AppendTlv(datagram, 0x30, message);
+        return datagram;
+    }
+
+    // A printer that serves a fixed set of OIDs. `dropFirst` loses that many
+    // requests before it starts answering; `silent` never answers.
+    struct ScriptedPrinter final : ewr::snmp::IDatagramChannel
+    {
+        std::map<std::string, std::vector<unsigned char>> served;
+        std::vector<std::vector<unsigned char>> pending;
+        std::vector<std::string> requested; // OIDs, one per datagram sent
+        int dropFirst = 0;
+        bool silent = false;
+        bool refuseSend = false; // the local stack will not send at all
+
+        bool Send(const std::vector<unsigned char>& datagram) override
+        {
+            if (refuseSend)
+                return false;
+
+            int id = 0;
+            ewr::snmp::Oid oid;
+            if (!ParseRequest(datagram, id, oid) || std::find(known.begin(), known.end(), oid) == known.end())
+            {
+                requested.push_back("?");
+                return true;
+            }
+
+            const std::string name = ewr::snmp::FormatOid(oid);
+            requested.push_back(name);
+
+            if (silent)
+                return true;
+            if (dropFirst > 0)
+            {
+                --dropFirst;
+                return true;
+            }
+
+            const auto hit = served.find(name);
+            if (hit == served.end())
+                pending.push_back(MakeResponse(id, 2, 0x05, {}));
+            else
+                pending.push_back(MakeResponse(id, 0, 0x04, hit->second));
+            return true;
+        }
+
+        std::vector<unsigned char> Receive(int) override
+        {
+            if (pending.empty())
+                return {};
+
+            std::vector<unsigned char> next = pending.front();
+            pending.erase(pending.begin());
+            return next;
+        }
+
+        void Serve(const ewr::snmp::Oid& oid, const std::vector<unsigned char>& value)
+        {
+            known.push_back(oid);
+            served[ewr::snmp::FormatOid(oid)] = value;
+        }
+
+        // Recognised, but answered with noSuchName.
+        void Know(const ewr::snmp::Oid& oid) { known.push_back(oid); }
+
+        std::vector<ewr::snmp::Oid> known;
+    };
+
+    std::vector<unsigned char> Bytes(const std::string& text)
+    {
+        return std::vector<unsigned char>(text.begin(), text.end());
+    }
+
+    // The EPSON-CTRL command inside a generated query packet.
+    std::vector<unsigned char> CommandOf(const std::vector<unsigned char>& packet)
+    {
+        std::vector<unsigned char> command;
+        ewr::ExtractDataPayload(packet, command);
+        return command;
+    }
+
+    ewr::DbPrinterModel TwoByteModel()
+    {
+        ewr::DbPrinterModel model;
+        model.name = "NetTest";
+        model.rkey = 0x0797; // 151, 7
+        model.wkey = "Maribaya";
+
+        ewr::PadGroup group;
+        group.addresses = { 0x30, 0x1FE };
+        group.reset_values = { 0x00, 0x00 };
+        model.pad_groups.push_back(group);
+        return model;
+    }
+
+} // namespace snmp_test
+
+void test_snmp_get_request_is_byte_exact()
+{
+    std::cout << "[TEST] test_snmp_get_request_is_byte_exact" << std::endl;
+
+    // sysDescr.0, community "public", request ID 1.
+    const std::vector<unsigned char> expected = {
+        0x30, 0x26, 0x02, 0x01, 0x00, 0x04, 0x06, 'p', 'u', 'b', 'l', 'i', 'c',
+        0xA0, 0x19, 0x02, 0x01, 0x01, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00,
+        0x30, 0x0E, 0x30, 0x0C, 0x06, 0x08, 0x2B, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00,
+        0x05, 0x00
+    };
+    CHECK(ewr::snmp::EncodeGetRequest("public", 1, { 1, 3, 6, 1, 2, 1, 1, 1, 0 }) == expected);
+
+    // Arcs above 127 take two base-128 bytes: 1248 -> 89 60, 190 -> 81 3E.
+    // A command byte such as 0xBE encoded as one byte would be read by the
+    // printer as the start of a longer arc and shift everything after it.
+    const std::vector<unsigned char> wide = ewr::snmp::EncodeGetRequest("public", 1, { 1, 3, 1248, 190, 127, 128 });
+    const std::vector<unsigned char> oidTlv = { 0x06, 0x08, 0x2B, 0x89, 0x60, 0x81, 0x3E, 0x7F, 0x81, 0x00 };
+    CHECK(std::search(wide.begin(), wide.end(), oidTlv.begin(), oidTlv.end()) != wide.end());
+
+    // A request ID with the high bit of its low byte set needs a leading 00,
+    // or it reads back negative.
+    const std::vector<unsigned char> id200 = ewr::snmp::EncodeGetRequest("public", 200, { 1, 3 });
+    const std::vector<unsigned char> idTlv = { 0xA0, 0x13, 0x02, 0x02, 0x00, 0xC8, 0x02, 0x01, 0x00 };
+    CHECK(std::search(id200.begin(), id200.end(), idTlv.begin(), idTlv.end()) != id200.end());
+
+    CHECK(ewr::snmp::EncodeGetRequest("public", 1, { 1 }).empty());
+    CHECK(ewr::snmp::FormatOid({ 1, 3, 6, 1248 }) == "1.3.6.1248");
+
+    // The scripted printers below read requests with their own decoder and
+    // answer with their own encoder; both have to agree past one-byte IDs.
+    int id = 0;
+    ewr::snmp::Oid oid;
+    const ewr::snmp::Oid control = ewr::SnmpControlOid({ 0x7C, 0x7C, 0xBE });
+    CHECK(snmp_test::ParseRequest(ewr::snmp::EncodeGetRequest("public", 70000, control), id, oid));
+    CHECK(id == 70000 && oid == control);
+    CHECK(!snmp_test::ParseRequest(ewr::snmp::EncodeGetRequest("private", 1, control), id, oid));
+
+    ewr::snmp::GetResponse response;
+    CHECK(ewr::snmp::DecodeGetResponse(snmp_test::MakeResponse(300, 0, 0x04, {}), response));
+    CHECK(response.requestId == 300);
+}
+
+void test_snmp_response_decoding_is_bounded()
+{
+    std::cout << "[TEST] test_snmp_response_decoding_is_bounded" << std::endl;
+
+    const std::vector<unsigned char> value = snmp_test::Bytes("@BDC PS\r\nEE:003012;\f");
+    const std::vector<unsigned char> datagram = snmp_test::MakeResponse(7, 0, 0x04, value);
+
+    ewr::snmp::GetResponse response;
+    CHECK(ewr::snmp::DecodeGetResponse(datagram, response));
+    CHECK(response.requestId == 7);
+    CHECK(response.errorStatus == 0);
+    CHECK(response.valueTag == ewr::snmp::kTagOctetString);
+    CHECK(response.value == value);
+
+    // A value past 127 bytes switches every enclosing length to long form.
+    const std::vector<unsigned char> big(300, 0x5A);
+    CHECK(ewr::snmp::DecodeGetResponse(snmp_test::MakeResponse(9, 0, 0x04, big), response));
+    CHECK(response.value == big);
+
+    CHECK(ewr::snmp::DecodeGetResponse(snmp_test::MakeResponse(3, 2, 0x05, {}), response));
+    CHECK(response.errorStatus == 2);
+    CHECK(response.value.empty());
+
+    // Cut anywhere, a datagram is refused rather than read past its end.
+    for (size_t cut = 0; cut < datagram.size(); ++cut)
+    {
+        const std::vector<unsigned char> part(datagram.begin(), datagram.begin() + static_cast<long>(cut));
+        CHECK(!ewr::snmp::DecodeGetResponse(part, response));
+    }
+
+    // A request is not a response.
+    CHECK(!ewr::snmp::DecodeGetResponse(ewr::snmp::EncodeGetRequest("public", 1, { 1, 3, 6 }), response));
+}
+
+void test_snmp_control_oid_carries_the_read_command()
+{
+    std::cout << "[TEST] test_snmp_control_oid_carries_the_read_command" << std::endl;
+
+    // The form every SNMP tool for these printers sends:
+    // <ctrl>.124.124.7.0.<rkey lo>.<rkey hi>.65.190.160.<addr lo>.<addr hi>
+    const std::vector<unsigned char> command =
+        snmp_test::CommandOf(ewr::UniversalGenerator::GenerateReadPacket(0x0797, 0x01FE));
+    const ewr::snmp::Oid expected = { 1, 3, 6, 1, 4, 1, 1248, 1, 2, 2, 44, 1, 1, 2, 1,
+                                      124, 124, 7, 0, 151, 7, 65, 190, 160, 254, 1 };
+    CHECK(ewr::SnmpControlOid(command) == expected);
+}
+
+void test_snmp_gateway_reads_state_through_the_session()
+{
+    std::cout << "[TEST] test_snmp_gateway_reads_state_through_the_session" << std::endl;
+
+    const ewr::DbPrinterModel model = snmp_test::TwoByteModel();
+
+    auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
+    snmp_test::ScriptedPrinter* script = printer.get();
+
+    script->Serve(ewr::SnmpDeviceIdOid(), snmp_test::Bytes("MFG:EPSON;CMD:ESCPL2,BDC,D4;MDL:L3150 Series;CLS:PRINTER;"));
+    script->Serve(ewr::SnmpStatusOid(), ewr::ExtractD4Payload(MakeSt2Reply()));
+    script->Serve(ewr::SnmpControlOid(snmp_test::CommandOf(
+                      ewr::UniversalGenerator::GenerateReadPacket(model.rkey, 0x30))),
+                  snmp_test::Bytes("@BDC PS\r\nEE:00302A;\f"));
+    // 0x1FE is known to the printer but refused, as an unserved OID is.
+    script->Know(ewr::SnmpControlOid(snmp_test::CommandOf(
+        ewr::UniversalGenerator::GenerateReadPacket(model.rkey, 0x1FE))));
+
+    std::ostringstream trace;
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer), &trace);
+
+    const ewr::DeviceIdQueryResult id = gateway.QueryDeviceId();
+    CHECK(id.found);
+    CHECK(ewr::ParseIeee1284DeviceId(id.deviceId).model == "L3150 Series");
+    CHECK(gateway.Answered());
+
+    ewr::log::Reporter quiet;
+    ewr::Session session(model, gateway, quiet);
+    const ewr::StateSnapshot state = session.ReadState();
+
+    CHECK(state.available);
+    CHECK(state.status.valid);
+    CHECK(state.status.errorName == "INK OUT");
+    CHECK(state.status.serial == "X7A9000123");
+    CHECK(state.values.size() == 2);
+    if (state.values.size() == 2)
+    {
+        CHECK(state.values[0].first == 0x30 && state.values[0].second == 0x2A);
+        // Answered, but with no value: unread, not zero.
+        CHECK(state.values[1].first == 0x1FE && state.values[1].second == -1);
+    }
+
+    // One datagram per question: nothing was retried, nothing else was asked.
+    CHECK(script->requested.size() == 4);
+    CHECK(trace.str().find("noSuchName") != std::string::npos);
+}
+
+void test_snmp_gateway_retries_a_lost_datagram()
+{
+    std::cout << "[TEST] test_snmp_gateway_retries_a_lost_datagram" << std::endl;
+
+    auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
+    snmp_test::ScriptedPrinter* script = printer.get();
+    script->Serve(ewr::SnmpStatusOid(), ewr::ExtractD4Payload(MakeSt2Reply()));
+    script->dropFirst = 2;
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+    const ewr::StateSnapshot state = ewr::ReadPrinterStatus(gateway);
+
+    CHECK(state.available);
+    CHECK(state.status.valid);
+    CHECK(script->requested.size() == 3);
+}
+
+void test_snmp_gateway_reports_silence_without_asking_on()
+{
+    std::cout << "[TEST] test_snmp_gateway_reports_silence_without_asking_on" << std::endl;
+
+    const ewr::DbPrinterModel model = snmp_test::TwoByteModel();
+
+    auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
+    snmp_test::ScriptedPrinter* script = printer.get();
+    script->Know(ewr::SnmpStatusOid());
+    script->silent = true;
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+
+    ewr::log::Reporter quiet;
+    ewr::Session session(model, gateway, quiet);
+    const ewr::StateSnapshot state = session.ReadState();
+
+    CHECK(!state.available);
+    CHECK(!gateway.Answered());
+    // The status request and its repeats; the counter reads behind it were
+    // never sent into the same silence.
+    CHECK(script->requested.size() == 3);
+
+    const ewr::QueryRunResult run = gateway.RunQuery({}, { ewr::UniversalGenerator::GenerateStatusQueryPacket() },
+                                                     ewr::DefaultQueryOptions());
+    CHECK(!run.deviceFound);
+    CHECK(run.query.handshakeFailed);
+    CHECK(run.query.replies.size() == 1 && run.query.replies[0].empty());
+    CHECK(run.query.error.find("192.0.2.1") != std::string::npos);
+}
+
+void test_snmp_gateway_tells_a_blocked_send_from_a_silent_printer()
+{
+    std::cout << "[TEST] test_snmp_gateway_tells_a_blocked_send_from_a_silent_printer" << std::endl;
+
+    auto blocked = std::make_unique<snmp_test::ScriptedPrinter>();
+    blocked->refuseSend = true;
+    ewr::SnmpDeviceGateway blockedGateway("192.0.2.1", std::move(blocked));
+    CHECK(!blockedGateway.QueryDeviceId().found);
+    CHECK(blockedGateway.SendBlocked());
+
+    auto quiet = std::make_unique<snmp_test::ScriptedPrinter>();
+    quiet->Know(ewr::SnmpDeviceIdOid());
+    quiet->silent = true;
+    ewr::SnmpDeviceGateway quietGateway("192.0.2.1", std::move(quiet));
+    CHECK(!quietGateway.QueryDeviceId().found);
+    CHECK(!quietGateway.SendBlocked());
+}
+
+void test_snmp_query_path_never_sends_a_write()
+{
+    std::cout << "[TEST] test_snmp_query_path_never_sends_a_write" << std::endl;
+
+    const ewr::DbPrinterModel model = snmp_test::TwoByteModel();
+    const std::vector<unsigned char> write =
+        ewr::UniversalGenerator::GenerateWritePacket(model.rkey, 0x30, 0x00, model.wkey);
+
+    auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
+    snmp_test::ScriptedPrinter* script = printer.get();
+    script->Serve(ewr::SnmpControlOid(snmp_test::CommandOf(write)), snmp_test::Bytes("@BDC PS\r\n||:42:OK;\f"));
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+    CHECK(gateway.OverNetwork());
+
+    // Handed to the query path, a write is dropped, not forwarded.
+    const ewr::QueryRunResult query = gateway.RunQuery({}, { write }, ewr::DefaultQueryOptions());
+    CHECK(script->requested.empty());
+    CHECK(query.query.replies.size() == 1 && query.query.replies[0].empty());
+
+    // Nor does a read-back, which shares that path, ever turn into one.
+    CHECK(!gateway.Answered());
+}
+
+namespace snmp_test {
+
+    // A printer with an EEPROM: reads answer from it, writes with
+    // `acceptedKey` change it, writes with any other keyword come back
+    // ':42:NG;', and `refuse` makes every write come back ':42:NA;'.
+    struct EepromPrinter final : ewr::snmp::IDatagramChannel
+    {
+        ewr::DbPrinterModel model;
+        std::map<uint16_t, uint8_t> eeprom;
+        std::string acceptedKey;
+        bool refuse = false;
+        int writesSeen = 0;
+        std::vector<std::vector<unsigned char>> pending;
+
+        bool Send(const std::vector<unsigned char>& datagram) override
+        {
+            static const char* hex = "0123456789ABCDEF";
+
+            int id = 0;
+            ewr::snmp::Oid oid;
+            if (!ParseRequest(datagram, id, oid))
+                return true;
+
+            if (oid == ewr::SnmpStatusOid())
+            {
+                pending.push_back(MakeResponse(id, 0, 0x04,
+                    Bytes("@BDC ST2\r\n\x03" + std::string(1, '\0') + "\x01\x01\x04")));
+                return true;
+            }
+
+            for (auto& cell : eeprom)
+            {
+                if (oid == ewr::SnmpControlOid(CommandOf(
+                               ewr::UniversalGenerator::GenerateReadPacket(model.rkey, cell.first))))
+                {
+                    std::string read = "@BDC PS\r\nEE:";
+                    read += hex[(cell.first >> 12) & 0xF]; read += hex[(cell.first >> 8) & 0xF];
+                    read += hex[(cell.first >> 4) & 0xF];  read += hex[cell.first & 0xF];
+                    read += hex[(cell.second >> 4) & 0xF]; read += hex[cell.second & 0xF];
+                    read += ";\f";
+                    pending.push_back(MakeResponse(id, 0, 0x04, Bytes(read)));
+                    return true;
+                }
+
+                for (const std::string& key : { model.wkey, model.wkey1 })
+                {
+                    if (key.empty())
+                        continue;
+
+                    for (int value : { 0x00, 0x5E })
+                    {
+                        if (oid != ewr::SnmpControlOid(CommandOf(ewr::UniversalGenerator::GenerateWritePacket(
+                                       model.rkey, cell.first, static_cast<uint8_t>(value), key))))
+                            continue;
+
+                        ++writesSeen;
+                        std::string verdict = "OK";
+                        if (refuse)
+                            verdict = "NA";
+                        else if (key != acceptedKey)
+                            verdict = "NG";
+                        else
+                            cell.second = static_cast<uint8_t>(value);
+
+                        pending.push_back(MakeResponse(id, 0, 0x04, Bytes("@BDC PS\r\n||:42:" + verdict + ";\f")));
+                        return true;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        std::vector<unsigned char> Receive(int) override
+        {
+            if (pending.empty())
+                return {};
+
+            std::vector<unsigned char> next = pending.front();
+            pending.erase(pending.begin());
+            return next;
+        }
+    };
+
+    std::unique_ptr<EepromPrinter> FullPads()
+    {
+        auto printer = std::make_unique<EepromPrinter>();
+        printer->model = TwoByteModel();
+        printer->model.wkey1 = "Nbsjcbzb";
+        printer->acceptedKey = printer->model.wkey;
+        printer->eeprom[0x30] = 0xCA;
+        printer->eeprom[0x1FE] = 0x18;
+        return printer;
+    }
+
+} // namespace snmp_test
+
+void test_snmp_reset_writes_and_verifies_through_the_session()
+{
+    std::cout << "[TEST] test_snmp_reset_writes_and_verifies_through_the_session" << std::endl;
+
+    auto printer = snmp_test::FullPads();
+    snmp_test::EepromPrinter* script = printer.get();
+    const ewr::DbPrinterModel model = script->model;
+
+    std::ostringstream trace;
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer), &trace);
+
+    ewr::log::Reporter quiet;
+    ewr::Session session(model, gateway, quiet);
+
+    bool asked = false;
+    ewr::ResetHandlers handlers;
+    handlers.confirmWrite = [&](const ewr::StateSnapshot& before)
+    {
+        // Nothing has been written by the time the question is put.
+        asked = true;
+        CHECK(script->writesSeen == 0);
+        CHECK(before.values.size() == 2 && before.values[0].second == 0xCA);
+        return true;
+    };
+
+    const ewr::ResetOutcome outcome = session.Reset(handlers);
+
+    CHECK(asked);
+    CHECK(outcome.phase == ewr::ResetPhase::Done);
+    CHECK(outcome.success);
+    CHECK(outcome.writesTotal == 2 && outcome.writesVerified == 2);
+    CHECK(outcome.verificationRan);
+    CHECK(outcome.verifyMismatches == 0 && outcome.verifyUnread == 0);
+    CHECK(script->eeprom[0x30] == 0x00 && script->eeprom[0x1FE] == 0x00);
+    CHECK(script->writesSeen == 2);
+    CHECK(!outcome.alternateKeyUsed);
+    CHECK(trace.str().find("BEGIN WRITE SESSION") != std::string::npos);
+
+    // Declined at the confirmation, nothing travels.
+    auto second = snmp_test::FullPads();
+    snmp_test::EepromPrinter* untouched = second.get();
+    ewr::SnmpDeviceGateway declinedGateway("192.0.2.1", std::move(second));
+    ewr::Session declinedSession(model, declinedGateway, quiet);
+    ewr::ResetHandlers decline;
+    decline.confirmWrite = [](const ewr::StateSnapshot&) { return false; };
+    const ewr::ResetOutcome declined = declinedSession.Reset(decline);
+    CHECK(declined.phase == ewr::ResetPhase::Aborted);
+    CHECK(untouched->writesSeen == 0);
+    CHECK(untouched->eeprom[0x30] == 0xCA);
+}
+
+void test_snmp_reset_falls_back_to_the_alternate_key()
+{
+    std::cout << "[TEST] test_snmp_reset_falls_back_to_the_alternate_key" << std::endl;
+
+    auto printer = snmp_test::FullPads();
+    snmp_test::EepromPrinter* script = printer.get();
+    script->acceptedKey = script->model.wkey1;
+    const ewr::DbPrinterModel model = script->model;
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+    ewr::log::Reporter quiet;
+    ewr::Session session(model, gateway, quiet);
+    const ewr::ResetOutcome outcome = session.Reset();
+
+    CHECK(outcome.success);
+    CHECK(outcome.alternateKeyUsed);
+    CHECK(outcome.writesVerified == 2);
+    CHECK(script->eeprom[0x30] == 0x00 && script->eeprom[0x1FE] == 0x00);
+    // Each write: once rejected, once accepted.
+    CHECK(script->writesSeen == 4);
+}
+
+void test_snmp_reset_stops_at_a_refused_write()
+{
+    std::cout << "[TEST] test_snmp_reset_stops_at_a_refused_write" << std::endl;
+
+    auto printer = snmp_test::FullPads();
+    snmp_test::EepromPrinter* script = printer.get();
+    script->refuse = true;
+    const ewr::DbPrinterModel model = script->model;
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+    ewr::log::Reporter quiet;
+    ewr::Session session(model, gateway, quiet);
+
+    // What the CLI prints: the per-write verdicts are hidden there, so
+    // without the gateway's own event the run ended on a bare RESET FAILED.
+    std::ostringstream out, err;
+    const int consoleId = ewr::log::Default().AddSink(ewr::cli::ConsoleFor(out, err, false));
+    const ewr::ResetOutcome outcome = session.Reset();
+    ewr::log::Default().RemoveSink(consoleId);
+
+    CHECK(!outcome.success);
+    CHECK(outcome.phase == ewr::ResetPhase::WriteFailed);
+    CHECK(outcome.error.find(":42:NA;") != std::string::npos);
+    CHECK(err.str().find(":42:NA;") != std::string::npos);
+    CHECK(err.str().find("NOT confirmed as reset") != std::string::npos);
+    // The first refusal ends the run: the second write is never sent.
+    CHECK(script->writesSeen == 1);
+    CHECK(script->eeprom[0x30] == 0xCA && script->eeprom[0x1FE] == 0x18);
+
+    // Nothing ever answered: session.device_not_found says so, not this.
+    auto silent = std::make_unique<snmp_test::ScriptedPrinter>();
+    silent->silent = true;
+    ewr::SnmpDeviceGateway silentGateway("192.0.2.1", std::move(silent));
+
+    int notConfirmed = 0;
+    const int countId = ewr::log::Default().AddSink([&](const ewr::log::Event& e)
+    {
+        if (e.code == "snmp.reset_not_confirmed")
+            ++notConfirmed;
+    });
+    ewr::UniversalGenerator generator;
+    const ewr::ResetRunResult run = silentGateway.RunReset(generator.GenerateSequence(model), ewr::ExecutorOptions{});
+    ewr::log::Default().RemoveSink(countId);
+
+    CHECK(!run.deviceFound);
+    CHECK(notConfirmed == 0);
+}
+
+void test_snmp_reset_refuses_a_replay_dump()
+{
+    std::cout << "[TEST] test_snmp_reset_refuses_a_replay_dump" << std::endl;
+
+    auto printer = snmp_test::FullPads();
+    snmp_test::EepromPrinter* script = printer.get();
+    const ewr::DbPrinterModel model = script->model;
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+
+    ewr::UniversalGenerator generator;
+    ewr::ExecutorOptions replay;
+    replay.verifyWrites = false;
+    const ewr::ResetRunResult run = gateway.RunReset(generator.GenerateSequence(model), replay);
+
+    CHECK(!run.exec.success);
+    CHECK(!run.exec.error.empty());
+    CHECK(script->writesSeen == 0);
+}
+
+void test_snmp_gateway_waits_for_the_run_lock()
+{
+    std::cout << "[TEST] test_snmp_gateway_waits_for_the_run_lock" << std::endl;
+
+    ewr::RunLock otherRun;
+    {
+        ewr::RunLock probe;
+        if (probe.Held())
+        {
+            std::cout << "  (no run lock can be created here - skipped)" << std::endl;
+            return;
+        }
+    }
+
+    auto readTrace = []() -> std::string
+    {
+        std::ifstream in("ewr_trace.log", std::ios::binary);
+        return in ? std::string(std::istreambuf_iterator<char>(in), {}) : std::string("(absent)");
+    };
+    const std::string traceBefore = readTrace();
+
+    std::vector<std::string> codes;
+    const int sinkId = ewr::log::Default().AddSink([&](const ewr::log::Event& e) { codes.push_back(e.code); });
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1");
+    CHECK(!gateway.ClaimPrinter());
+    CHECK(!gateway.QueryDeviceId().found);
+
+    const ewr::QueryRunResult query = gateway.RunQuery({}, { ewr::UniversalGenerator::GenerateStatusQueryPacket() },
+                                                       ewr::DefaultQueryOptions());
+    CHECK(!query.query.success);
+    CHECK(query.query.error.find("Another EWR run") != std::string::npos);
+
+    ewr::UniversalGenerator generator;
+    const ewr::ResetRunResult reset = gateway.RunReset(generator.GenerateSequence(snmp_test::TwoByteModel()),
+                                                       ewr::ExecutorOptions{});
+    CHECK(!reset.exec.success);
+    CHECK(reset.exec.packetsSent == 0);
+    CHECK(reset.exec.error.find("Another EWR run") != std::string::npos);
+
+    ewr::log::Default().RemoveSink(sinkId);
+
+    // Refused before anything was opened: the other run's trace is intact
+    // and no socket was ever pointed at the printer.
+    CHECK(readTrace() == traceBefore);
+    CHECK(gateway.OpenError().empty());
+    CHECK(!gateway.Answered() && !gateway.SendBlocked());
+    CHECK(std::find(codes.begin(), codes.end(), "snmp.another_run") != codes.end());
 }
 
 int main()
@@ -6973,6 +7711,19 @@ int main()
     test_l3110_shows_both_counters_sharing_a_byte();
     test_counter_names_follow_wicreset_pad_order();
     test_no_model_repeats_a_gauge_label();
+    test_snmp_get_request_is_byte_exact();
+    test_snmp_response_decoding_is_bounded();
+    test_snmp_control_oid_carries_the_read_command();
+    test_snmp_gateway_reads_state_through_the_session();
+    test_snmp_gateway_retries_a_lost_datagram();
+    test_snmp_gateway_reports_silence_without_asking_on();
+    test_snmp_gateway_tells_a_blocked_send_from_a_silent_printer();
+    test_snmp_query_path_never_sends_a_write();
+    test_snmp_reset_writes_and_verifies_through_the_session();
+    test_snmp_reset_falls_back_to_the_alternate_key();
+    test_snmp_reset_stops_at_a_refused_write();
+    test_snmp_reset_refuses_a_replay_dump();
+    test_snmp_gateway_waits_for_the_run_lock();
 
     std::cout << "\n----------------------------------------" << std::endl;
     if (g_failures == 0)

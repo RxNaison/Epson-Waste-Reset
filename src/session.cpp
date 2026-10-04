@@ -136,6 +136,14 @@ namespace ewr {
         return false;
     }
 
+    std::unique_ptr<RunLock> UsbDeviceGateway::ReleaseRunLock()
+    {
+        if (!m_runLock || !m_runLock->Held())
+            return nullptr;
+
+        return std::move(m_runLock);
+    }
+
     DeviceIdQueryResult UsbDeviceGateway::QueryDeviceId()
     {
         if (!ClaimPrinter())

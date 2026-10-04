@@ -22,6 +22,30 @@ namespace ewr {
     // command, one arc per byte.
     snmp::Oid SnmpControlOid(const std::vector<unsigned char>& command);
 
+    // A printer that answered the network search.
+    struct NetworkPrinter
+    {
+        std::string address;
+        std::string deviceId; // the IEEE 1284 string USB would return
+        std::string model;    // its MDL field
+    };
+
+    // How long the search listens. A printer asleep on Wi-Fi is the slow one.
+    constexpr int kDiscoveryWaitMs = 2000;
+
+    // Asks every address in `targets` for its device ID, again a third of the
+    // way in for a printer that missed the first, and keeps the Epson
+    // printers that answer within waitMs: one per address, in address order.
+    // Empty with `error` set when this machine refused every send, which
+    // says nothing about the printers out there.
+    std::vector<NetworkPrinter> DiscoverNetworkPrinters(snmp::IBroadcastChannel& channel,
+                                                        const std::vector<std::string>& targets,
+                                                        int waitMs, std::string& error);
+
+    // The same over this machine's own networks, with `error` also set when
+    // no broadcast socket could be opened.
+    std::vector<NetworkPrinter> DiscoverNetworkPrinters(int waitMs, std::string& error);
+
     // A network printer behind the same seam as a USB one. Status, EEPROM
     // reads and EEPROM writes all travel as SNMP GETs - a write is a GET whose
     // OID carries the write command, answered with the same ':42:OK;'.
@@ -53,6 +77,11 @@ namespace ewr {
         // at a time machine-wide, whichever transport it uses. Every device
         // call claims first, so a host cannot skip it by forgetting.
         bool ClaimPrinter();
+
+        // The lock this run already holds, from UsbDeviceGateway::ReleaseRunLock
+        // when the printer turned up on the network instead. ClaimPrinter then
+        // has nothing left to claim.
+        void AdoptRunLock(std::unique_ptr<RunLock> lock);
 
         // Non-empty when no channel could be opened at all (a host name that
         // does not resolve). Every call then fails with it.

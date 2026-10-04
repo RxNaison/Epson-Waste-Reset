@@ -174,6 +174,14 @@ EWR_API const char* ewr_session_last_error(ewr_session* session);
 EWR_API int ewr_list_interfaces(ewr_session* session, char** out_json);
 /* {"device_id": ..., "model": ...} - what the printer says it is. */
 EWR_API int ewr_detect_model(ewr_session* session, char** out_json);
+/* ABI 2. {"printers": [{"address", "device_id", "reported_model",
+ * "model_match"}]} - the Epson printers that answer a broadcast on this
+ * machine's networks within about 2 s, as `ewr --list` shows them. Works on
+ * any session, since the database names the models, and asks the printers
+ * nothing but their device ID. An empty list is EWR_OK; EWR_ERR_IO means no
+ * broadcast could be sent. Open the one the user picks with
+ * ewr_session_open_network. */
+EWR_API int ewr_discover_network(ewr_session* session, char** out_json);
 /* {"models": [{"name": ..., "aliases": [...]}]} - no device needed. */
 EWR_API int ewr_list_models(ewr_session* session, char** out_json);
 /* {"model": ..., "target": ..., "planned_writes": [...]} - what a reset would

@@ -1,5 +1,7 @@
 #include "ewr/snmp.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
 
 #ifdef _WIN32
@@ -8,8 +10,13 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 #else
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -274,9 +281,10 @@ namespace snmp {
         void CloseSocket(SocketHandle s) { close(s); }
 #endif
 
-        // SIGPIPE belongs to stream sockets and UDP should never raise it,
-        // but if it did the run would end mid-write without a word, so it is
-        // off anyway: per call on Linux, per socket on macOS (OpenUdpChannel).
+        // A send this machine refuses can fail with EPIPE even on UDP - macOS
+        // does it to a terminal without the Local Network permission - and
+        // the default for that is a signal that ends the process before the
+        // run can say why. Off per call on Linux, per socket on macOS.
 #if defined(MSG_NOSIGNAL)
         constexpr int kSendFlags = MSG_NOSIGNAL;
 #else
@@ -287,6 +295,48 @@ namespace snmp {
         // bytes, but nothing here should truncate one that is not.
         constexpr std::size_t kMaxDatagram = 65535;
 
+        // Winsock counts its users: each channel starts it once and stops it
+        // once, in its destructor or on its way out of a failed open.
+        bool StartSockets(std::string& error)
+        {
+#ifdef _WIN32
+            WSADATA wsa;
+            if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+            {
+                error = "Winsock could not be started.";
+                return false;
+            }
+#else
+            (void)error;
+#endif
+            return true;
+        }
+
+        void StopSockets()
+        {
+#ifdef _WIN32
+            WSACleanup();
+#endif
+        }
+
+        bool WaitReadable(SocketHandle socket, int timeoutMs)
+        {
+            if (timeoutMs < 0)
+                timeoutMs = 0;
+
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(socket, &readable);
+
+            timeval wait;
+            wait.tv_sec = timeoutMs / 1000;
+            wait.tv_usec = (timeoutMs % 1000) * 1000;
+
+            // The first argument is ignored by Winsock and must be the
+            // highest descriptor plus one everywhere else.
+            return select(static_cast<int>(socket) + 1, &readable, nullptr, nullptr, &wait) > 0;
+        }
+
         class UdpChannel final : public IDatagramChannel
         {
         public:
@@ -295,9 +345,7 @@ namespace snmp {
             ~UdpChannel() override
             {
                 CloseSocket(m_socket);
-#ifdef _WIN32
-                WSACleanup();
-#endif
+                StopSockets();
             }
 
             UdpChannel(const UdpChannel&) = delete;
@@ -312,21 +360,7 @@ namespace snmp {
 
             std::vector<unsigned char> Receive(int timeoutMs) override
             {
-                if (timeoutMs < 0)
-                    timeoutMs = 0;
-
-                fd_set readable;
-                FD_ZERO(&readable);
-                FD_SET(m_socket, &readable);
-
-                timeval wait;
-                wait.tv_sec = timeoutMs / 1000;
-                wait.tv_usec = (timeoutMs % 1000) * 1000;
-
-                // The first argument is ignored by Winsock and must be the
-                // highest descriptor plus one everywhere else.
-                const int ready = select(static_cast<int>(m_socket) + 1, &readable, nullptr, nullptr, &wait);
-                if (ready <= 0)
+                if (!WaitReadable(m_socket, timeoutMs))
                     return {};
 
                 std::vector<unsigned char> buffer(kMaxDatagram);
@@ -347,27 +381,81 @@ namespace snmp {
             SocketHandle m_socket;
         };
 
+        class BroadcastChannel final : public IBroadcastChannel
+        {
+        public:
+            explicit BroadcastChannel(SocketHandle socket) : m_socket(socket) {}
+
+            ~BroadcastChannel() override
+            {
+                CloseSocket(m_socket);
+                StopSockets();
+            }
+
+            BroadcastChannel(const BroadcastChannel&) = delete;
+            BroadcastChannel& operator=(const BroadcastChannel&) = delete;
+
+            bool SendTo(const std::string& address, uint16_t port,
+                        const std::vector<unsigned char>& datagram) override
+            {
+                sockaddr_in to{};
+                to.sin_family = AF_INET;
+                to.sin_port = htons(port);
+                if (inet_pton(AF_INET, address.c_str(), &to.sin_addr) != 1)
+                    return false;
+
+                const auto sent = sendto(m_socket, reinterpret_cast<const char*>(datagram.data()),
+                                         static_cast<int>(datagram.size()), kSendFlags,
+                                         reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+                return sent == static_cast<decltype(sent)>(datagram.size());
+            }
+
+            bool ReceiveFrom(int timeoutMs, std::string& from, std::vector<unsigned char>& datagram) override
+            {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+                for (;;)
+                {
+                    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        deadline - std::chrono::steady_clock::now()).count();
+                    if (left <= 0 || !WaitReadable(m_socket, static_cast<int>(left)))
+                        return false;
+
+                    std::vector<unsigned char> buffer(kMaxDatagram);
+                    sockaddr_in peer{};
+                    socklen_t peerSize = sizeof(peer);
+                    const auto received = recvfrom(m_socket, reinterpret_cast<char*>(buffer.data()),
+                                                   static_cast<int>(buffer.size()), 0,
+                                                   reinterpret_cast<sockaddr*>(&peer), &peerSize);
+
+                    // Windows hands an earlier send's ICMP "unreachable" to
+                    // the next receive as an error; the search goes on past it.
+                    if (received <= 0)
+                        continue;
+
+                    buffer.resize(static_cast<std::size_t>(received));
+                    datagram = std::move(buffer);
+                    from = FormatIpv4(ntohl(peer.sin_addr.s_addr));
+                    return true;
+                }
+            }
+
+        private:
+            SocketHandle m_socket;
+        };
+
     } // namespace
 
     std::unique_ptr<IDatagramChannel> OpenUdpChannel(const std::string& host,
                                                      uint16_t port,
                                                      std::string& error)
     {
-#ifdef _WIN32
-        WSADATA wsa;
-        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
-        {
-            error = "Winsock could not be started.";
+        if (!StartSockets(error))
             return nullptr;
-        }
-#endif
 
         auto fail = [&error](const std::string& message) -> std::unique_ptr<IDatagramChannel>
         {
             error = message;
-#ifdef _WIN32
-            WSACleanup();
-#endif
+            StopSockets();
             return nullptr;
         };
 
@@ -408,6 +496,125 @@ namespace snmp {
             return fail("No UDP socket could be opened towards " + host + " (no route to it?).");
 
         return std::make_unique<UdpChannel>(socketHandle);
+    }
+
+    std::unique_ptr<IBroadcastChannel> OpenBroadcastChannel(std::string& error)
+    {
+        if (!StartSockets(error))
+            return nullptr;
+
+        const SocketHandle socketHandle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (socketHandle == kNoSocket)
+        {
+            error = "No UDP socket could be opened for the network search.";
+            StopSockets();
+            return nullptr;
+        }
+
+        const int on = 1;
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_addr.s_addr = htonl(INADDR_ANY);
+
+        if (setsockopt(socketHandle, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&on), sizeof(on)) != 0
+            || bind(socketHandle, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0)
+        {
+            error = "This computer would not let EWR broadcast on the network.";
+            CloseSocket(socketHandle);
+            StopSockets();
+            return nullptr;
+        }
+
+#if defined(SO_NOSIGPIPE)
+        setsockopt(socketHandle, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#endif
+
+        return std::make_unique<BroadcastChannel>(socketHandle);
+    }
+
+    uint32_t DirectedBroadcast(uint32_t address, int prefixLength)
+    {
+        if (prefixLength < 1 || prefixLength > 30)
+            return 0;
+
+        return address | (0xFFFFFFFFu >> prefixLength);
+    }
+
+    std::string FormatIpv4(uint32_t address)
+    {
+        return std::to_string((address >> 24) & 0xFF) + "." + std::to_string((address >> 16) & 0xFF) + "."
+             + std::to_string((address >> 8) & 0xFF) + "." + std::to_string(address & 0xFF);
+    }
+
+    std::vector<std::string> LocalBroadcastAddresses()
+    {
+        std::vector<std::string> addresses = { "255.255.255.255" };
+        auto add = [&addresses](uint32_t broadcast)
+        {
+            if (broadcast == 0)
+                return;
+
+            const std::string text = FormatIpv4(broadcast);
+            if (std::find(addresses.begin(), addresses.end(), text) == addresses.end())
+                addresses.push_back(text);
+        };
+
+#ifdef _WIN32
+        ULONG size = 16 * 1024;
+        std::vector<unsigned char> buffer;
+        ULONG result = ERROR_BUFFER_OVERFLOW;
+        for (int attempt = 0; attempt < 3 && result == ERROR_BUFFER_OVERFLOW; ++attempt)
+        {
+            buffer.resize(size);
+            result = GetAdaptersAddresses(AF_INET,
+                                          GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                                          nullptr, reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()), &size);
+        }
+
+        if (result == NO_ERROR)
+        {
+            for (auto* adapter = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()); adapter;
+                 adapter = adapter->Next)
+            {
+                if (adapter->OperStatus != IfOperStatusUp || adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+                    continue;
+
+                for (auto* unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next)
+                {
+                    if (unicast->Address.lpSockaddr->sa_family != AF_INET)
+                        continue;
+
+                    const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(unicast->Address.lpSockaddr);
+                    add(DirectedBroadcast(ntohl(ipv4->sin_addr.s_addr), unicast->OnLinkPrefixLength));
+                }
+            }
+        }
+#else
+        ifaddrs* list = nullptr;
+        if (getifaddrs(&list) == 0)
+        {
+            for (ifaddrs* entry = list; entry; entry = entry->ifa_next)
+            {
+                if (!entry->ifa_addr || !entry->ifa_netmask || entry->ifa_addr->sa_family != AF_INET)
+                    continue;
+                if (!(entry->ifa_flags & IFF_UP) || (entry->ifa_flags & IFF_LOOPBACK))
+                    continue;
+
+                const uint32_t address = ntohl(reinterpret_cast<const sockaddr_in*>(entry->ifa_addr)->sin_addr.s_addr);
+                const uint32_t mask = ntohl(reinterpret_cast<const sockaddr_in*>(entry->ifa_netmask)->sin_addr.s_addr);
+
+                int prefix = 0;
+                for (uint32_t bits = mask; bits & 0x80000000u; bits <<= 1)
+                    ++prefix;
+
+                add(DirectedBroadcast(address, prefix));
+            }
+
+            freeifaddrs(list);
+        }
+#endif
+
+        return addresses;
     }
 
 } // namespace snmp

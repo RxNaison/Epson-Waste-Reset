@@ -22,10 +22,16 @@ int main(void)
         return 1;
     }
 
-    /* Revision 2's addition, refused before it could open anything. */
+    /* Revision 2's additions, refused before they could touch the network. */
     if (ewr_session_open_network(NULL, "192.0.2.1", NULL) != EWR_ERR_INVALID_ARGUMENT)
     {
         printf("[FAIL] ewr_session_open_network accepted a NULL out-parameter\n");
+        return 1;
+    }
+
+    if (ewr_discover_network(NULL, NULL) != EWR_ERR_INVALID_ARGUMENT)
+    {
+        printf("[FAIL] ewr_discover_network accepted a NULL session\n");
         return 1;
     }
 

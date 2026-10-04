@@ -163,6 +163,12 @@ namespace ewr {
         // device call, so the lock cannot be skipped by forgetting it.
         bool ClaimPrinter();
 
+        // Hands a held claim on to SnmpDeviceGateway::AdoptRunLock with no
+        // moment in which another run could take it: a second claim in the
+        // same process is refused like any other. nullptr when none is held.
+        // This gateway is done after it; its next call would claim again.
+        std::unique_ptr<RunLock> ReleaseRunLock();
+
     private:
         // False exactly once: the call that must start the trace file fresh.
         bool NextCallAppends();

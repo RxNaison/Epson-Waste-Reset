@@ -29,7 +29,7 @@ EWR bypasses the need to pay for sketchy third-party reset keys (like WIC Reset)
 ## Usage
 
 1. Download the latest version from the [Releases page](https://github.com/RxNaison/Epson-Waste-Reset/releases/latest) (or click the big green button above) and unzip it anywhere. Keep `ewr` and `database.json` together.
-2. Turn your Epson printer on and connect it **via USB**. A printer on the network works too: add `--ip <address>` (below).
+2. Turn your Epson printer on and connect it **via USB**, or have it on the same network as your computer: when nothing answers on USB, EWR searches the network and asks which printer to use. `--ip <address>` (below) goes straight to one.
 3. Run it:
    * **Windows:** double-click `ewr.exe`
    * **Linux / macOS:** `sudo ./ewr` *(raw USB access requires root)*
@@ -57,7 +57,7 @@ Running with no options is the supported path. These exist for diagnosis and for
 | Option | What it does |
 | --- | --- |
 | `--status`, `-s` | Read-only: printer status, ink levels and waste counter values. Sends no writes. |
-| `--list`, `-l` | List every Epson USB interface with its IEEE 1284 device ID and database match, then exit. Read-only. |
+| `--list`, `-l` | List every Epson USB interface, and every Epson printer that answers on the network, with its IEEE 1284 device ID and database match, then exit. Read-only. |
 | `--model <name>` | Skip the menu. Takes the exact name, an alias, or the name the printer reports (`--model "EPSON ET-2803 Series"`). |
 | `--ip <address>` | Reach a printer on the network instead of USB, over SNMP (UDP 161): `ewr --ip 192.168.1.100`. Works with `--status`, `--dry-run` and the waste ink pad reset, with the same gates, confirmation and read-back as USB. Replay dumps and the other modes still need USB. |
 | `--interface <n>` | Pin the run to interface `<n>` from `--list` and disable the automatic fallback. |

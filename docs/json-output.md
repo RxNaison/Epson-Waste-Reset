@@ -243,11 +243,16 @@ it is sent.
 
 ```json
 {"interfaces": [{"index": 1, "class": "USBPRINT", "interface_number": null, "path": "\\\\?\\usb#...",
-                 "device_id": "MFG:EPSON;...", "model_match": "R220"}]}
+                 "device_id": "MFG:EPSON;...", "model_match": "R220"}],
+ "network_printers": [{"address": "192.168.1.23", "device_id": "MFG:EPSON;...",
+                       "reported_model": "L3150 Series", "model_match": "L3150"}]}
 ```
 
 `index` is what `--interface <n>` takes. `interface_number` is the USB
 interface (`mi_02` is `2`), `null` when the device is not composite.
+`network_printers` are the Epson printers that answered a broadcast on this
+machine's networks; `address` is what `--ip` takes. `--list` fails with
+`device_not_found` only when both lists are empty.
 
 **reset**
 

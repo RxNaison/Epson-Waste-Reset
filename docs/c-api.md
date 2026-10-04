@@ -65,6 +65,14 @@ ewr_session* session = NULL;
 int rc = ewr_session_open_network(NULL, "192.168.1.100", &session);
 ```
 
+To find the address, `ewr_discover_network` on any session (a USB one, say)
+asks this machine's networks which Epson printers are there and answers
+`{"printers": [{"address", "device_id", "reported_model", "model_match"}]}`
+within about 2 s, the same list `ewr --list` prints. Let the user pick: a
+network can hold someone else's Epson. An empty list is `EWR_OK`;
+`EWR_ERR_IO` means this machine would not send the broadcast. A USB session
+holds the run lock, so close it before opening the network one.
+
 - `ewr_detect_model`, `ewr_read_status` and the waste pad `ewr_reset` work as
   over USB, with the same gates, confirmation and read-back; the database
   calls need no printer either way.
@@ -197,6 +205,7 @@ ctypes frees a thunk that nothing holds, and EWR will call it.
 | `ewr_plan` | no | `{"model", "target", "planned_writes": [{"address", "value"}], "reset_covers": [{"kind", "name", "readable"}]}`; `reset_covers` is `[]` for an ink reset |
 | `ewr_list_interfaces` | yes | `{"interfaces": [{"index", "class", "interface_number", "path", "device_id", "model_match"}]}`, the same entries as `--list`; `index` is what `ewr_session_set_interface` takes |
 | `ewr_detect_model` | yes | `{"device_id", "reported_model", "model"}` |
+| `ewr_discover_network` | on the network | `{"printers": [{"address", "device_id", "reported_model", "model_match"}]}`; `address` is what `ewr_session_open_network` takes |
 | `ewr_read_status` | yes | `{"model", "detected_model", "printer", "counters", "pads", "pads_total", "reset_covers"}`; `detected_model` stays null here, ask `ewr_detect_model` |
 | `ewr_dump` | yes | `{"model", "answered", "total", "values"}`; minutes, not seconds |
 | `ewr_reset` | yes | `{"model", "phase", "writes", "verification", "before", "after", "overrides", ...}`; `overrides` names each gate your callbacks, or `ewr_session_set_allow_model_mismatch`, let it past |

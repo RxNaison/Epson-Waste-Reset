@@ -136,6 +136,16 @@ namespace ewr {
         return out;
     }
 
+    nlohmann::json JsonNetworkPrinter(const NetworkPrinter& printer, const std::string& modelMatch)
+    {
+        nlohmann::json out;
+        out["address"] = printer.address;
+        out["device_id"] = printer.deviceId;
+        out["reported_model"] = printer.model.empty() ? nlohmann::json(nullptr) : nlohmann::json(printer.model);
+        out["model_match"] = modelMatch.empty() ? nlohmann::json(nullptr) : nlohmann::json(modelMatch);
+        return out;
+    }
+
     nlohmann::json JsonBlocker(const Blocker& blocker)
     {
         nlohmann::json out;

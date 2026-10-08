@@ -45,6 +45,12 @@ namespace ewr {
             return command.size() >= 2 && command[0] == 's' && command[1] == 't';
         }
 
+        // '||', the length, the read key, then 'A'.
+        bool IsEepromReadCommand(const std::vector<unsigned char>& command)
+        {
+            return command.size() >= 7 && command[0] == '|' && command[1] == '|' && command[6] == 'A';
+        }
+
         // UsbDeviceGateway's wording, so a host sees one reason either way.
         const char* const kAnotherRunError =
             "Another EWR run is already driving a printer on this machine.";
@@ -241,6 +247,17 @@ namespace ewr {
             Trace("[!] " + m_openError + "\n");
     }
 
+    // A read answered with a value anywhere in the run settles it: the lock is
+    // the whole EEPROM or nothing, and silence proves neither.
+    std::string SnmpDeviceGateway::EepromUnreachable() const
+    {
+        if (m_eepromReadsRefused == 0 || m_eepromReadsAnswered > 0)
+            return {};
+
+        return "the printer refused every EEPROM read over the network. Many recent Epson models lock"
+               " the EEPROM over the network but not over USB: connect it by USB and run EWR again.";
+    }
+
     void SnmpDeviceGateway::Trace(const std::string& text)
     {
         if (!m_trace)
@@ -411,6 +428,17 @@ namespace ewr {
                 heard = Get(SnmpControlOid(command), value);
             }
 
+            // An SNMP error counts as a refusal too: some firmware drops the
+            // EEPROM commands from its agent rather than answering ':NA;'.
+            if (heard && IsEepromReadCommand(command))
+            {
+                const std::string text(value.begin(), value.end());
+                if (text.find("EE:") != std::string::npos)
+                    m_eepromReadsAnswered++;
+                else
+                    m_eepromReadsRefused++;
+            }
+
             run.query.packetsSent++;
 
             if (!value.empty())
@@ -431,6 +459,20 @@ namespace ewr {
         run.query.success = m_answered;
         if (!m_answered)
             run.query.error = SilenceError();
+
+        // Once per run, where --status and --dry-run see it as well as a reset.
+        if (!m_eepromLockReported && !EepromUnreachable().empty())
+        {
+            m_eepromLockReported = true;
+            Trace("[!] Every EEPROM read was refused over the network.\n");
+            log::Log(log::Level::Warning, log::Stage::Read, "snmp.eeprom_refused",
+                     "[!] The printer answers over the network but refused every EEPROM read, so its\n"
+                     "    counters cannot be read or reset this way. Many recent Epson models, and\n"
+                     "    older ones after a firmware update, lock the EEPROM over the network and\n"
+                     "    still allow it over USB: connect this printer by USB and run EWR again.\n"
+                     "    (A wrong read key in the database looks the same; over USB, ewr --find-key\n"
+                     "    tells the two apart.)");
+        }
 
         Trace("==================================================\n"
               "QUERY SESSION COMPLETE\n"

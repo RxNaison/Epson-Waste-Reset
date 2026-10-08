@@ -7252,6 +7252,9 @@ void test_snmp_gateway_reads_state_through_the_session()
     // One datagram per question: nothing was retried, nothing else was asked.
     CHECK(script->requested.size() == 4);
     CHECK(trace.str().find("noSuchName") != std::string::npos);
+
+    // One read answered settles it: one refused address is not a lock.
+    CHECK(gateway.EepromUnreachable().empty());
 }
 
 void test_snmp_gateway_retries_a_lost_datagram()
@@ -7300,6 +7303,9 @@ void test_snmp_gateway_reports_silence_without_asking_on()
     CHECK(run.query.handshakeFailed);
     CHECK(run.query.replies.size() == 1 && run.query.replies[0].empty());
     CHECK(run.query.error.find("192.0.2.1") != std::string::npos);
+
+    // Silence is not a refusal: nothing is known about the EEPROM.
+    CHECK(gateway.EepromUnreachable().empty());
 }
 
 void test_snmp_gateway_tells_a_blocked_send_from_a_silent_printer()
@@ -7349,12 +7355,15 @@ namespace snmp_test {
     // A printer with an EEPROM: reads answer from it, writes with
     // `acceptedKey` change it, writes with any other keyword come back
     // ':42:NG;', and `refuse` makes every write come back ':42:NA;'.
+    // `locked` is firmware that shuts the EEPROM over the network: status
+    // still answers, every read and write is refused with a bare block.
     struct EepromPrinter final : ewr::snmp::IDatagramChannel
     {
         ewr::DbPrinterModel model;
         std::map<uint16_t, uint8_t> eeprom;
         std::string acceptedKey;
         bool refuse = false;
+        bool locked = false;
         int writesSeen = 0;
         std::vector<std::vector<unsigned char>> pending;
 
@@ -7379,6 +7388,12 @@ namespace snmp_test {
                 if (oid == ewr::SnmpControlOid(CommandOf(
                                ewr::UniversalGenerator::GenerateReadPacket(model.rkey, cell.first))))
                 {
+                    if (locked)
+                    {
+                        pending.push_back(MakeResponse(id, 0, 0x04, Bytes("||:41:NA;\f")));
+                        return true;
+                    }
+
                     std::string read = "@BDC PS\r\nEE:";
                     read += hex[(cell.first >> 12) & 0xF]; read += hex[(cell.first >> 8) & 0xF];
                     read += hex[(cell.first >> 4) & 0xF];  read += hex[cell.first & 0xF];
@@ -7401,7 +7416,7 @@ namespace snmp_test {
 
                         ++writesSeen;
                         std::string verdict = "OK";
-                        if (refuse)
+                        if (refuse || locked)
                             verdict = "NA";
                         else if (key != acceptedKey)
                             verdict = "NG";
@@ -7814,6 +7829,58 @@ void test_run_lock_hands_over_to_the_network()
     CHECK(afterwards.Held());
 }
 
+// Firmware that locks the EEPROM over the network still answers the status,
+// so the run used to reach the writes and blame the refusal on an empty
+// cartridge or a paper jam. It now stops before the first write and says to
+// use USB, without asking a question that has only one answer.
+void test_snmp_locked_eeprom_stops_before_any_write()
+{
+    std::cout << "[TEST] test_snmp_locked_eeprom_stops_before_any_write" << std::endl;
+
+    auto printer = snmp_test::FullPads();
+    snmp_test::EepromPrinter* script = printer.get();
+    script->locked = true;
+    const ewr::DbPrinterModel model = script->model;
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+    ewr::log::Reporter quiet;
+    ewr::Session session(model, gateway, quiet);
+
+    int refusedEvents = 0;
+    const int sinkId = ewr::log::Default().AddSink([&](const ewr::log::Event& e)
+    {
+        if (e.code == "snmp.eeprom_refused")
+            ++refusedEvents;
+    });
+
+    // --status and --dry-run see it too: the status answers, the counters do not.
+    const ewr::StateSnapshot state = session.ReadState();
+    CHECK(state.available);
+    CHECK(!state.values.empty());
+    for (const auto& value : state.values)
+        CHECK(value.second == -1);
+    CHECK(gateway.EepromUnreachable().find("USB") != std::string::npos);
+
+    bool asked = false;
+    bool blockerAsked = false;
+    ewr::ResetHandlers handlers;
+    handlers.confirmWrite = [&](const ewr::StateSnapshot&) { asked = true; return true; };
+    handlers.onBlocker = [&](const ewr::Blocker&) { blockerAsked = true; return true; };
+    const ewr::ResetOutcome outcome = session.Reset(handlers);
+
+    ewr::log::Default().RemoveSink(sinkId);
+
+    CHECK(outcome.phase == ewr::ResetPhase::NotSupported);
+    CHECK(!outcome.success);
+    CHECK(outcome.error.find("Nothing was written") != std::string::npos);
+    CHECK(script->writesSeen == 0);
+    CHECK(!asked && !blockerAsked);
+    CHECK(ewr::JsonResetData(model, false, outcome)["phase"] == "not_supported");
+
+    // Said once per run, not again for every read that follows.
+    CHECK(refusedEvents == 1);
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -7984,6 +8051,7 @@ int main()
     test_snmp_directed_broadcast();
     test_snmp_discovery_keeps_only_epson_answers();
     test_run_lock_hands_over_to_the_network();
+    test_snmp_locked_eeprom_stops_before_any_write();
 
     std::cout << "\n----------------------------------------" << std::endl;
     if (g_failures == 0)

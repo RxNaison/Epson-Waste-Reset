@@ -88,6 +88,11 @@ holds the run lock, so close it before opening the network one.
   call that needs it, and `ewr_reset` stops there, before the confirm callback
   is asked anything. The last error tells silence apart from a send this
   machine refused: a VPN, a firewall, or macOS's Local Network permission.
+- Many recent Epson models, and older ones after a firmware update, lock the
+  EEPROM over the network but not over USB. A printer that answers but refuses
+  every EEPROM read raises `snmp.eeprom_refused`, and `ewr_reset` then returns
+  `EWR_ERR_NOT_SUPPORTED` (`phase` `not_supported`) before the confirm
+  callback is asked anything. Over USB the same printer usually works.
 - The network transport's own events are namespaced `snmp.`.
 
 ## A whole run, in C

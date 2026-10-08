@@ -66,6 +66,7 @@ namespace ewr {
         DeviceNotFound, // no Epson interface answered at write time
         WriteFailed,    // the write session ran and did not succeed
         Done,           // the reset writes were acknowledged
+        NotSupported,   // this way to the printer cannot reach its EEPROM - nothing was written
     };
 
     // A gate that objected and was told to go ahead: by --force-yes, a typed
@@ -119,6 +120,11 @@ namespace ewr {
 
         // For the lines a session prints about how it reaches the printer.
         virtual bool OverNetwork() const { return false; }
+
+        // Why no EEPROM write sent this way could land, once the gateway has
+        // seen enough to say so; empty while it can, or cannot tell. A reset
+        // stops on it before the first write, since none could be verified.
+        virtual std::string EepromUnreachable() const { return {}; }
 
         virtual QueryRunResult RunQuery(
             const std::vector<std::vector<unsigned char>>& handshake,

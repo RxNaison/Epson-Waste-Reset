@@ -99,6 +99,11 @@ namespace ewr {
 
         bool OverNetwork() const override { return true; }
 
+        // Set once the printer has answered EEPROM reads and refused every
+        // one: firmware that locks the EEPROM over the network, or a wrong
+        // read key. Writes would be refused the same way.
+        std::string EepromUnreachable() const override;
+
         // Why nothing came back, in the words the CLI prints: the open
         // error, a send this machine refused, or plain silence.
         std::string SilenceError() const;
@@ -134,6 +139,9 @@ namespace ewr {
         bool m_answered = false;
         bool m_sendFailed = false;
         bool m_sendSucceeded = false;
+        int m_eepromReadsAnswered = 0;
+        int m_eepromReadsRefused = 0;
+        bool m_eepromLockReported = false;
     };
 
 } // namespace ewr

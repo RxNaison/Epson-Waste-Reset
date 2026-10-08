@@ -187,6 +187,7 @@ namespace ewr {
             case ResetPhase::DeviceNotFound: return "device_not_found";
             case ResetPhase::WriteFailed:    return "write_failed";
             case ResetPhase::Done:           return "done";
+            case ResetPhase::NotSupported:   return "not_supported";
         }
 
         return "not_started";

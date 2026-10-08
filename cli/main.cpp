@@ -2756,6 +2756,8 @@ int main(int argc, char* argv[])
             JsonFail("blocked", outcome.error);
         else if (outcome.phase == ewr::ResetPhase::DeviceNotFound)
             JsonFail("device_not_found", outcome.error);
+        else if (outcome.phase == ewr::ResetPhase::NotSupported)
+            JsonFail("not_supported", outcome.error);
         else if (outcome.verificationRan && outcome.verifyMismatches > 0)
             JsonFail("write_unverified", outcome.error);
         else
@@ -2764,10 +2766,13 @@ int main(int argc, char* argv[])
 
     // The session already narrated why it stopped; skip the FAILED banner.
     if (outcome.phase == ewr::ResetPhase::Aborted
-        || outcome.phase == ewr::ResetPhase::DeviceNotFound)
+        || outcome.phase == ewr::ResetPhase::DeviceNotFound
+        || outcome.phase == ewr::ResetPhase::NotSupported)
     {
         if (outcome.phase == ewr::ResetPhase::Aborted)
             JsonFail("blocked", "The run stopped at a gate; nothing was written.");
+        else if (outcome.phase == ewr::ResetPhase::NotSupported)
+            JsonFail("not_supported", outcome.error);
         else
             JsonFail("device_not_found", "No Epson interface answered at write time.");
 

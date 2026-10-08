@@ -108,7 +108,7 @@ Events that carry `fields` so far (values are decimal strings, like every field)
 | `model_unknown` | `--model` matched nothing usable. |
 | `model_ambiguous` | `--model` matched several models. |
 | `model_mismatch` | `--model` names something other than the printer that answered. |
-| `not_supported` | The model cannot do this (a Replay dump has no read key, no ink map for `--cartridge`). |
+| `not_supported` | The model cannot do this (a Replay dump has no read key, no ink map for `--cartridge`), or cannot over this connection (a printer that locks its EEPROM over the network). |
 | `read_failed` | The printer did not answer the read. |
 | `incomplete_dump` | Some addresses went unread; the file is not a backup. |
 | `blocked` | A gate stopped the run: a printer error, a database conflict, or a confirmation that was not given. Nothing was written. |
@@ -265,7 +265,9 @@ machine's networks; `address` is what `--ip` takes. `--list` fails with
 ```
 
 `target` is `waste` or `ink`. `phase` is `not_started`, `aborted`,
-`device_not_found`, `write_failed` or `done`.
+`device_not_found`, `write_failed`, `done` or `not_supported`: the way the run
+reached the printer cannot reach its EEPROM (over the network, the printer
+refused every EEPROM read), so nothing was written.
 
 `overrides` lists every gate that objected and was told to go ahead anyway -
 by `--force-yes`, a typed yes, or a host callback - in the order they were

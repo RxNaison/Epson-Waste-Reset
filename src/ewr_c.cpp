@@ -738,6 +738,7 @@ int ewr_reset(ewr_session* session, const char* model, int ink, char** out_json)
         {
             case ewr::ResetPhase::Aborted:        return EWR_ERR_BLOCKED;
             case ewr::ResetPhase::DeviceNotFound: return EWR_ERR_DEVICE_NOT_FOUND;
+            case ewr::ResetPhase::NotSupported:   return EWR_ERR_NOT_SUPPORTED;
             default: break;
         }
 

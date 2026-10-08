@@ -59,7 +59,7 @@ Every line carries these:
 | `platform` | string | `windows`, `linux` or `macos`. |
 | `command` | string | `status`, `dump`, `list`, `dry-run`, `reset`, `find-addresses` or `find-key`. |
 | `model` | string/null | What `--model` named, before matching. `null` when not given. |
-| `flags` | object | The switches that change behavior: `no_update`, `yes`, `force_yes`, `cartridge`, `usb_soft_reset`, `interface` (int, 0 = automatic), `ip` (string, the `--ip` address; `null` on a USB run). |
+| `flags` | object | The switches that change behavior: `no_update`, `yes`, `force_yes`, `cartridge`, `usb_soft_reset`, `interface` (int, 0 = automatic), `ip` (string, the `--ip` address, or `auto`; `null` on a USB run). |
 
 ## `event`
 
@@ -108,7 +108,7 @@ Events that carry `fields` so far (values are decimal strings, like every field)
 | `model_unknown` | `--model` matched nothing usable. |
 | `model_ambiguous` | `--model` matched several models. |
 | `model_mismatch` | `--model` names something other than the printer that answered. |
-| `not_supported` | The model cannot do this (a Replay dump has no read key, no ink map for `--cartridge`). |
+| `not_supported` | The model cannot do this (a Replay dump has no read key, no ink map for `--cartridge`), or cannot over this connection (a printer that locks its EEPROM over the network). |
 | `read_failed` | The printer did not answer the read. |
 | `incomplete_dump` | Some addresses went unread; the file is not a backup. |
 | `blocked` | A gate stopped the run: a printer error, a database conflict, or a confirmation that was not given. Nothing was written. |
@@ -243,11 +243,16 @@ it is sent.
 
 ```json
 {"interfaces": [{"index": 1, "class": "USBPRINT", "interface_number": null, "path": "\\\\?\\usb#...",
-                 "device_id": "MFG:EPSON;...", "model_match": "R220"}]}
+                 "device_id": "MFG:EPSON;...", "model_match": "R220"}],
+ "network_printers": [{"address": "192.168.1.23", "device_id": "MFG:EPSON;...",
+                       "reported_model": "L3150 Series", "model_match": "L3150"}]}
 ```
 
 `index` is what `--interface <n>` takes. `interface_number` is the USB
 interface (`mi_02` is `2`), `null` when the device is not composite.
+`network_printers` are the Epson printers that answered a broadcast on this
+machine's networks; `address` is what `--ip` takes. `--list` fails with
+`device_not_found` only when both lists are empty.
 
 **reset**
 
@@ -260,7 +265,9 @@ interface (`mi_02` is `2`), `null` when the device is not composite.
 ```
 
 `target` is `waste` or `ink`. `phase` is `not_started`, `aborted`,
-`device_not_found`, `write_failed` or `done`.
+`device_not_found`, `write_failed`, `done` or `not_supported`: the way the run
+reached the printer cannot reach its EEPROM (over the network, the printer
+refused every EEPROM read), so nothing was written.
 
 `overrides` lists every gate that objected and was told to go ahead anyway -
 by `--force-yes`, a typed yes, or a host callback - in the order they were

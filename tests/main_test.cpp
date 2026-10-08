@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <iterator>
 #include <map>
+#include <thread>
 #include "ewr/parser.h"
 #include "ewr/generator.h"
 #include "ewr/executor.h"
@@ -5864,6 +5865,11 @@ void test_c_abi_network_session()
     CHECK(session != nullptr);
 
     char* json = nullptr;
+
+    // The search is refused before it listens, not after.
+    CHECK(ewr_discover_network(nullptr, &json) == EWR_ERR_INVALID_ARGUMENT);
+    CHECK(ewr_discover_network(session, nullptr) == EWR_ERR_INVALID_ARGUMENT);
+    CHECK(json == nullptr);
     CHECK(ewr_list_models(session, &json) == EWR_OK);
     ewr_string_free(json);
     json = nullptr;
@@ -7246,6 +7252,9 @@ void test_snmp_gateway_reads_state_through_the_session()
     // One datagram per question: nothing was retried, nothing else was asked.
     CHECK(script->requested.size() == 4);
     CHECK(trace.str().find("noSuchName") != std::string::npos);
+
+    // One read answered settles it: one refused address is not a lock.
+    CHECK(gateway.EepromUnreachable().empty());
 }
 
 void test_snmp_gateway_retries_a_lost_datagram()
@@ -7294,6 +7303,9 @@ void test_snmp_gateway_reports_silence_without_asking_on()
     CHECK(run.query.handshakeFailed);
     CHECK(run.query.replies.size() == 1 && run.query.replies[0].empty());
     CHECK(run.query.error.find("192.0.2.1") != std::string::npos);
+
+    // Silence is not a refusal: nothing is known about the EEPROM.
+    CHECK(gateway.EepromUnreachable().empty());
 }
 
 void test_snmp_gateway_tells_a_blocked_send_from_a_silent_printer()
@@ -7343,12 +7355,15 @@ namespace snmp_test {
     // A printer with an EEPROM: reads answer from it, writes with
     // `acceptedKey` change it, writes with any other keyword come back
     // ':42:NG;', and `refuse` makes every write come back ':42:NA;'.
+    // `locked` is firmware that shuts the EEPROM over the network: status
+    // still answers, every read and write is refused with a bare block.
     struct EepromPrinter final : ewr::snmp::IDatagramChannel
     {
         ewr::DbPrinterModel model;
         std::map<uint16_t, uint8_t> eeprom;
         std::string acceptedKey;
         bool refuse = false;
+        bool locked = false;
         int writesSeen = 0;
         std::vector<std::vector<unsigned char>> pending;
 
@@ -7373,6 +7388,12 @@ namespace snmp_test {
                 if (oid == ewr::SnmpControlOid(CommandOf(
                                ewr::UniversalGenerator::GenerateReadPacket(model.rkey, cell.first))))
                 {
+                    if (locked)
+                    {
+                        pending.push_back(MakeResponse(id, 0, 0x04, Bytes("||:41:NA;\f")));
+                        return true;
+                    }
+
                     std::string read = "@BDC PS\r\nEE:";
                     read += hex[(cell.first >> 12) & 0xF]; read += hex[(cell.first >> 8) & 0xF];
                     read += hex[(cell.first >> 4) & 0xF];  read += hex[cell.first & 0xF];
@@ -7395,7 +7416,7 @@ namespace snmp_test {
 
                         ++writesSeen;
                         std::string verdict = "OK";
-                        if (refuse)
+                        if (refuse || locked)
                             verdict = "NA";
                         else if (key != acceptedKey)
                             verdict = "NG";
@@ -7626,6 +7647,240 @@ void test_snmp_gateway_waits_for_the_run_lock()
     CHECK(std::find(codes.begin(), codes.end(), "snmp.another_run") != codes.end());
 }
 
+void test_snmp_directed_broadcast()
+{
+    std::cout << "[TEST] test_snmp_directed_broadcast" << std::endl;
+
+    const uint32_t host = 0xC0A80117; // 192.168.1.23
+    CHECK(ewr::snmp::DirectedBroadcast(host, 24) == 0xC0A801FF);
+    CHECK(ewr::snmp::DirectedBroadcast(host, 16) == 0xC0A8FFFF);
+    CHECK(ewr::snmp::DirectedBroadcast(0x0A000005, 8) == 0x0AFFFFFF);
+
+    // A point-to-point link or a lone host has no broadcast of its own; a
+    // VPN adapter is often one.
+    CHECK(ewr::snmp::DirectedBroadcast(host, 31) == 0);
+    CHECK(ewr::snmp::DirectedBroadcast(host, 32) == 0);
+    CHECK(ewr::snmp::DirectedBroadcast(host, 0) == 0);
+    CHECK(ewr::snmp::DirectedBroadcast(host, 33) == 0);
+
+    CHECK(ewr::snmp::FormatIpv4(0xC0A801FF) == "192.168.1.255");
+    CHECK(ewr::snmp::FormatIpv4(0) == "0.0.0.0");
+
+    // Whatever this machine's adapters are, the limited broadcast leads.
+    const std::vector<std::string> local = ewr::snmp::LocalBroadcastAddresses();
+    CHECK(!local.empty() && local[0] == "255.255.255.255");
+}
+
+namespace snmp_test {
+
+    // A network of agents answering a broadcast: each answers every request
+    // it hears, so two rounds to two addresses bring four answers apiece.
+    struct ScriptedNetwork final : ewr::snmp::IBroadcastChannel
+    {
+        struct Agent
+        {
+            std::string address;
+            std::string deviceId; // empty: answers noSuchName
+            bool wrongId = false;
+            bool malformed = false;
+        };
+
+        std::vector<Agent> agents;
+        std::vector<std::string> sentTo;
+        std::vector<std::pair<std::string, std::vector<unsigned char>>> pending;
+        bool refuseSend = false; // macOS without the Local Network permission
+
+        bool SendTo(const std::string& address, uint16_t port, const std::vector<unsigned char>& datagram) override
+        {
+            if (refuseSend)
+                return false;
+
+            sentTo.push_back(address + ":" + std::to_string(port));
+
+            int id = 0;
+            ewr::snmp::Oid oid;
+            if (!ParseRequest(datagram, id, oid) || oid != ewr::SnmpDeviceIdOid())
+                return true;
+
+            for (const Agent& agent : agents)
+            {
+                if (agent.malformed)
+                    pending.push_back({ agent.address, { 0x30, 0x03, 0x02 } });
+                else if (agent.deviceId.empty())
+                    pending.push_back({ agent.address, MakeResponse(id, 2, 0x05, {}) });
+                else
+                    pending.push_back({ agent.address, MakeResponse(agent.wrongId ? id + 1 : id, 0, 0x04,
+                                                                    Bytes(agent.deviceId)) });
+            }
+            return true;
+        }
+
+        bool ReceiveFrom(int timeoutMs, std::string& from, std::vector<unsigned char>& datagram) override
+        {
+            if (pending.empty())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs));
+                return false;
+            }
+
+            from = pending.front().first;
+            datagram = pending.front().second;
+            pending.erase(pending.begin());
+            return true;
+        }
+    };
+
+} // namespace snmp_test
+
+void test_snmp_discovery_keeps_only_epson_answers()
+{
+    std::cout << "[TEST] test_snmp_discovery_keeps_only_epson_answers" << std::endl;
+
+    snmp_test::ScriptedNetwork network;
+    network.agents = {
+        { "192.168.1.40", "MFG:EPSON;CMD:ESCPL2,BDC,D4;MDL:ET-2850 Series;CLS:PRINTER;" },
+        { "192.168.1.9", "MFG:EPSON;CMD:ESCPL2,BDC,D4;MDL:L3150 Series;CLS:PRINTER;" },
+        { "192.168.1.30", "" },                                  // not in Epson's tree
+        { "192.168.1.31", "MFG:Hewlett-Packard;MDL:LaserJet;" }, // answers, not an Epson
+        { "192.168.1.32", "", false, true },                     // garbage
+        { "192.168.1.33", "MFG:EPSON;MDL:L805;", true },         // answers another question
+    };
+
+    std::string error;
+    const std::vector<ewr::NetworkPrinter> found =
+        ewr::DiscoverNetworkPrinters(network, { "255.255.255.255", "192.168.1.255" }, 300, error);
+    CHECK(error.empty());
+
+    // Two Epsons, once each, by address as a number: .9 before .40.
+    CHECK(found.size() == 2);
+    if (found.size() == 2)
+    {
+        CHECK(found[0].address == "192.168.1.9");
+        CHECK(found[0].model == "L3150 Series");
+        CHECK(found[1].address == "192.168.1.40");
+        CHECK(found[1].model == "ET-2850 Series");
+        CHECK(found[1].deviceId.find("MFG:EPSON") != std::string::npos);
+    }
+
+    // Two rounds, to the given addresses only, on the SNMP port.
+    const std::vector<std::string> expected = {
+        "255.255.255.255:161", "192.168.1.255:161", "255.255.255.255:161", "192.168.1.255:161",
+    };
+    CHECK(network.sentTo == expected);
+
+    // Nothing answering is an empty list, not a failure.
+    snmp_test::ScriptedNetwork quiet;
+    CHECK(ewr::DiscoverNetworkPrinters(quiet, { "255.255.255.255" }, 30, error).empty());
+    CHECK(error.empty());
+
+    // A machine that refuses every send is not an empty network: it says so,
+    // and does not sit out the wait for answers that cannot come.
+    snmp_test::ScriptedNetwork blocked;
+    blocked.refuseSend = true;
+    blocked.agents = network.agents;
+    const auto before = std::chrono::steady_clock::now();
+    CHECK(ewr::DiscoverNetworkPrinters(blocked, { "255.255.255.255" }, 2000, error).empty());
+    CHECK(error.find("refused to send") != std::string::npos);
+    CHECK(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(1000));
+}
+
+void test_run_lock_hands_over_to_the_network()
+{
+    std::cout << "[TEST] test_run_lock_hands_over_to_the_network" << std::endl;
+
+    {
+        ewr::UsbDeviceGateway usb;
+        if (!usb.ClaimPrinter())
+        {
+            std::cout << "  [skip] another EWR run holds the printer" << std::endl;
+            return;
+        }
+
+        {
+            ewr::RunLock probe;
+            if (probe.Held())
+            {
+                std::cout << "  (no run lock can be created here - skipped)" << std::endl;
+                return;
+            }
+        }
+
+        std::unique_ptr<ewr::RunLock> lock = usb.ReleaseRunLock();
+        CHECK(lock && lock->Held());
+        CHECK(usb.ReleaseRunLock() == nullptr);
+
+        // Never free in between: not in the hand, not after it.
+        {
+            ewr::RunLock other;
+            CHECK(!other.Held());
+        }
+
+        ewr::SnmpDeviceGateway net("192.0.2.1");
+        net.AdoptRunLock(std::move(lock));
+        CHECK(net.ClaimPrinter());
+        {
+            ewr::RunLock other;
+            CHECK(!other.Held());
+        }
+    }
+
+    // Both gateways gone: the next run gets it.
+    ewr::RunLock afterwards;
+    CHECK(afterwards.Held());
+}
+
+// Firmware that locks the EEPROM over the network still answers the status,
+// so the run used to reach the writes and blame the refusal on an empty
+// cartridge or a paper jam. It now stops before the first write and says to
+// use USB, without asking a question that has only one answer.
+void test_snmp_locked_eeprom_stops_before_any_write()
+{
+    std::cout << "[TEST] test_snmp_locked_eeprom_stops_before_any_write" << std::endl;
+
+    auto printer = snmp_test::FullPads();
+    snmp_test::EepromPrinter* script = printer.get();
+    script->locked = true;
+    const ewr::DbPrinterModel model = script->model;
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+    ewr::log::Reporter quiet;
+    ewr::Session session(model, gateway, quiet);
+
+    int refusedEvents = 0;
+    const int sinkId = ewr::log::Default().AddSink([&](const ewr::log::Event& e)
+    {
+        if (e.code == "snmp.eeprom_refused")
+            ++refusedEvents;
+    });
+
+    // --status and --dry-run see it too: the status answers, the counters do not.
+    const ewr::StateSnapshot state = session.ReadState();
+    CHECK(state.available);
+    CHECK(!state.values.empty());
+    for (const auto& value : state.values)
+        CHECK(value.second == -1);
+    CHECK(gateway.EepromUnreachable().find("USB") != std::string::npos);
+
+    bool asked = false;
+    bool blockerAsked = false;
+    ewr::ResetHandlers handlers;
+    handlers.confirmWrite = [&](const ewr::StateSnapshot&) { asked = true; return true; };
+    handlers.onBlocker = [&](const ewr::Blocker&) { blockerAsked = true; return true; };
+    const ewr::ResetOutcome outcome = session.Reset(handlers);
+
+    ewr::log::Default().RemoveSink(sinkId);
+
+    CHECK(outcome.phase == ewr::ResetPhase::NotSupported);
+    CHECK(!outcome.success);
+    CHECK(outcome.error.find("Nothing was written") != std::string::npos);
+    CHECK(script->writesSeen == 0);
+    CHECK(!asked && !blockerAsked);
+    CHECK(ewr::JsonResetData(model, false, outcome)["phase"] == "not_supported");
+
+    // Said once per run, not again for every read that follows.
+    CHECK(refusedEvents == 1);
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -7793,6 +8048,10 @@ int main()
     test_snmp_reset_stops_at_a_refused_write();
     test_snmp_reset_refuses_a_replay_dump();
     test_snmp_gateway_waits_for_the_run_lock();
+    test_snmp_directed_broadcast();
+    test_snmp_discovery_keeps_only_epson_answers();
+    test_run_lock_hands_over_to_the_network();
+    test_snmp_locked_eeprom_stops_before_any_write();
 
     std::cout << "\n----------------------------------------" << std::endl;
     if (g_failures == 0)

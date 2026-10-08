@@ -136,6 +136,14 @@ namespace ewr {
         return false;
     }
 
+    std::unique_ptr<RunLock> UsbDeviceGateway::ReleaseRunLock()
+    {
+        if (!m_runLock || !m_runLock->Held())
+            return nullptr;
+
+        return std::move(m_runLock);
+    }
+
     DeviceIdQueryResult UsbDeviceGateway::QueryDeviceId()
     {
         if (!ClaimPrinter())
@@ -701,6 +709,18 @@ namespace ewr {
         {
             if (handlers.onPreflight)
                 handlers.onPreflight(out.before);
+
+            // No gate can be argued past this one: a write that cannot be read
+            // back cannot be verified, and the gateway has seen the reads fail.
+            const std::string unreachable = m_gateway.EepromUnreachable();
+            if (!unreachable.empty())
+            {
+                m_reporter.Log(log::Level::Error, log::Stage::Read, "session.eeprom_unreachable",
+                               "[!] Nothing was written: " + unreachable);
+                out.phase = ResetPhase::NotSupported;
+                out.error = "Nothing was written: " + unreachable;
+                return out;
+            }
 
             const std::optional<Blocker> blocker = flow.classify
                 ? flow.classify(out.before.status)

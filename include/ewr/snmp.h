@@ -63,5 +63,33 @@ namespace snmp {
                                                      uint16_t port,
                                                      std::string& error);
 
+    // Datagrams to any IPv4 address, broadcasts included, and from any: what
+    // the network search runs on. Behind an interface so it can be scripted.
+    class IBroadcastChannel
+    {
+    public:
+        virtual ~IBroadcastChannel() = default;
+        virtual bool SendTo(const std::string& address, uint16_t port,
+                            const std::vector<unsigned char>& datagram) = 0;
+        // One datagram and the address it came from; false when none arrived
+        // within timeoutMs.
+        virtual bool ReceiveFrom(int timeoutMs, std::string& from, std::vector<unsigned char>& datagram) = 0;
+    };
+
+    // nullptr with `error` set when no socket could be opened, or this
+    // machine will not let one broadcast.
+    std::unique_ptr<IBroadcastChannel> OpenBroadcastChannel(std::string& error);
+
+    // 255.255.255.255, then the broadcast address of each IPv4 interface that
+    // is up and not loopback. Windows sends the first out of one adapter
+    // only, so a PC on Wi-Fi with a VPN or Hyper-V adapter needs the rest.
+    std::vector<std::string> LocalBroadcastAddresses();
+
+    // `address` and the result in host byte order. 0 when the network has no
+    // broadcast address of its own: /31, /32, or a prefix out of range.
+    uint32_t DirectedBroadcast(uint32_t address, int prefixLength);
+
+    std::string FormatIpv4(uint32_t address);
+
 } // namespace snmp
 } // namespace ewr

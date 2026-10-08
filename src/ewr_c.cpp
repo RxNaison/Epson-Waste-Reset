@@ -464,6 +464,38 @@ int ewr_detect_model(ewr_session* session, char** out_json)
     });
 }
 
+int ewr_discover_network(ewr_session* session, char** out_json)
+{
+    return Guard(session, [&]() -> int
+    {
+        // Before two seconds of listening, not after.
+        if (!out_json)
+            return EWR_ERR_INVALID_ARGUMENT;
+
+        std::string error;
+        const std::vector<ewr::NetworkPrinter> found = ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, error);
+        if (!error.empty())
+        {
+            session->Fail(error);
+            return EWR_ERR_IO;
+        }
+
+        std::vector<ewr::ModelNameEntry> entries;
+        for (const auto& model : session->database.GetAvailableModels())
+            entries.push_back({ model.name, model.aliases });
+
+        nlohmann::json printers = nlohmann::json::array();
+        for (const ewr::NetworkPrinter& printer : found)
+        {
+            const std::vector<std::string> matches = printer.model.empty()
+                ? std::vector<std::string>{} : ewr::MatchModelEntries(printer.model, entries);
+            printers.push_back(ewr::JsonNetworkPrinter(printer, matches.empty() ? std::string() : matches[0]));
+        }
+
+        return Deliver(session, { { "printers", std::move(printers) } }, out_json);
+    });
+}
+
 int ewr_list_models(ewr_session* session, char** out_json)
 {
     return Guard(session, [&]() -> int
@@ -706,6 +738,7 @@ int ewr_reset(ewr_session* session, const char* model, int ink, char** out_json)
         {
             case ewr::ResetPhase::Aborted:        return EWR_ERR_BLOCKED;
             case ewr::ResetPhase::DeviceNotFound: return EWR_ERR_DEVICE_NOT_FOUND;
+            case ewr::ResetPhase::NotSupported:   return EWR_ERR_NOT_SUPPORTED;
             default: break;
         }
 

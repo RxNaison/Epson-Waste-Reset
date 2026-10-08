@@ -1,6 +1,7 @@
 #pragma once
 #include "ewr/log.h"
 #include "ewr/session.h"
+#include "ewr/snmp_gateway.h"
 #include "ewr/usb.h"
 
 #include <chrono>
@@ -92,6 +93,10 @@ namespace ewr {
     // One --list / ewr_list_interfaces entry. `modelMatch` is the database
     // entry the device ID names, empty when none does.
     nlohmann::json JsonInterface(const InterfaceInfo& info, const std::string& modelMatch);
+
+    // One --list `network_printers` / ewr_discover_network entry:
+    // {"address", "device_id", "reported_model", "model_match"}.
+    nlohmann::json JsonNetworkPrinter(const NetworkPrinter& printer, const std::string& modelMatch);
 
     // What a blocker callback is asked: {"error", "error_code", "explanation"}.
     nlohmann::json JsonBlocker(const Blocker& blocker);

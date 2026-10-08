@@ -57,7 +57,7 @@ if(WIN32)
 
     # Bare target name: the libusb::usb-1.0 alias is only on libusb-cmake's
     # main branch, which has no release tag.
-    target_link_libraries(ewr_core PRIVATE setupapi urlmon wininet ws2_32 usb-1.0)
+    target_link_libraries(ewr_core PRIVATE setupapi urlmon wininet ws2_32 iphlpapi usb-1.0)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBUSB REQUIRED libusb-1.0)

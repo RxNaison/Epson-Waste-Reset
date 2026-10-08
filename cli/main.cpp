@@ -75,6 +75,7 @@ struct CliOptions
     bool json = false;           // --json: the machine-readable contract on stdout
     std::string modelOverride;   // --model <name>: skip the menu
     std::string ip;              // --ip <address>: read a network printer over SNMP
+    bool ipAuto = false;         // --ip auto: search the network even with a printer on USB
 };
 
 // ---- --json (docs/json-output.md) --------------------------------------
@@ -129,7 +130,9 @@ namespace {
         flags["cartridge"] = cli.cartridge;
         flags["usb_soft_reset"] = cli.usbSoftReset;
         flags["interface"] = cli.interfaceCandidate;
-        flags["ip"] = cli.ip.empty() ? nlohmann::json(nullptr) : nlohmann::json(cli.ip);
+        flags["ip"] = cli.ipAuto       ? nlohmann::json("auto")
+                    : cli.ip.empty()   ? nlohmann::json(nullptr)
+                                       : nlohmann::json(cli.ip);
 
         g_json->Hello(EWR_VERSION, PlatformName(), g_jsonCommand,
                       cli.modelOverride.empty() ? nlohmann::json(nullptr) : nlohmann::json(cli.modelOverride),
@@ -211,6 +214,10 @@ static void PrintUsage()
               << "  --ip <address>   Reach a printer on the network instead of USB, over SNMP\n"
               << "                   (UDP 161). Works with --status, --dry-run and the waste\n"
               << "                   ink pad reset, with the same gates and read-back as USB.\n"
+              << "  --ip auto        Search the network and pick the printer from a list,\n"
+              << "                   even when another one is on USB. Asks at the keyboard,\n"
+              << "                   so not with --yes or --json: pass the address from\n"
+              << "                   --list instead.\n"
               << "  --dry-run        Detect, read status and counters, and show exactly\n"
               << "                   what a reset would write - then stop. No writes.\n"
               << "  --dump           Detect, select the model, then read the EEPROM into a\n"
@@ -571,6 +578,55 @@ static int UsageError(const CliOptions& cli, const std::string& message)
     JsonHello(cli);
     JsonFail("bad_usage", message);
     return FinishRun(2);
+}
+
+static void PrintNetworkSearchHints()
+{
+    std::cout << "    A printer on the network has to be on, on this computer's network, and have\n"
+                 "    SNMP enabled in its web settings. A VPN, or on macOS a terminal without the\n"
+                 "    Local Network permission, keeps the search from reaching it. Its address is on\n"
+                 "    its network status sheet: ewr --ip <address> goes straight to it." << std::endl;
+}
+
+// The network search's menu. Even a lone printer is picked, not assumed: the
+// network may hold someone else's Epson. -1 when none was chosen.
+static int ChooseNetworkPrinter(const std::vector<ewr::NetworkPrinter>& found,
+                                const std::vector<ewr::ModelNameEntry>& entries)
+{
+    std::cout << std::endl;
+    for (std::size_t i = 0; i < found.size(); ++i)
+    {
+        const ewr::NetworkPrinter& printer = found[i];
+        std::cout << "  [" << i + 1 << "] " << (printer.model.empty() ? "(no model name)" : printer.model)
+                  << "   " << printer.address;
+
+        const std::vector<std::string> matches = printer.model.empty()
+            ? std::vector<std::string>{} : ewr::MatchModelEntries(printer.model, entries);
+        if (!matches.empty())
+            std::cout << "   (database: " << matches[0] << ")";
+        std::cout << std::endl;
+    }
+    std::cout << "  [0] None of these" << std::endl;
+
+    while (true)
+    {
+        std::cout << "\nSelect a printer [0-" << found.size() << "]: ";
+        std::string line;
+        if (!std::getline(std::cin, line))
+            return -1;
+
+        try
+        {
+            const int choice = std::stoi(line);
+            if (choice >= 0 && choice <= static_cast<int>(found.size()))
+                return choice - 1;
+        }
+        catch (...)
+        {
+        }
+
+        std::cout << "[-] Please enter a number from 0 to " << found.size() << "." << std::endl;
+    }
 }
 
 static int FinishReset(bool resetOk)
@@ -962,7 +1018,10 @@ int main(int argc, char* argv[])
                     return UsageError(cli, "--ip needs an address, e.g. --ip 192.168.1.100.");
                 }
 
-                cli.ip = value;
+                if (toLower(value) == "auto")
+                    cli.ipAuto = true;
+                else
+                    cli.ip = value;
             }
             else
             {
@@ -1007,7 +1066,7 @@ int main(int argc, char* argv[])
         return UsageError(cli, "--find-key takes no --model: it tries every read key in the database.");
 
     // Over the network: --status, --dry-run and the waste ink pad reset.
-    if (!cli.ip.empty())
+    if (!cli.ip.empty() || cli.ipAuto)
     {
         if (cli.listOnly || cli.findKey || cli.dump || cli.findAddresses || cli.cartridge)
             return UsageError(cli, "--ip works with --status, --dry-run and the waste ink pad reset; --list,"
@@ -1015,6 +1074,14 @@ int main(int argc, char* argv[])
         if (cli.interfaceCandidate >= 1 || cli.usbSoftReset)
             return UsageError(cli, "--interface and --usb-soft-reset are USB switches and do not combine with --ip.");
     }
+
+    // --yes answers "reset this printer?", never "which printer?": picking
+    // for an unattended run could reset someone else's Epson, even when only
+    // one answers - the one meant may be off.
+    if (cli.ipAuto && (cli.assumeYes || cli.forceYes || cli.json))
+        return UsageError(cli, "--ip auto asks at the keyboard which printer to use, so it does not combine with"
+                               " --yes, --force-yes or --json. Find the address with ewr --list (--json shows it"
+                               " as network_printers) and pass it: --ip <address>.");
 
     const bool statusOnly = cli.statusOnly;
 
@@ -1077,18 +1144,13 @@ int main(int argc, char* argv[])
         }
 
         const std::vector<ewr::InterfaceInfo> interfaces = listGateway.ListInterfaces();
-
-        if (interfaces.empty())
-        {
-            std::cout << "\nNo Epson USB interfaces found. Is the printer on and plugged in?" << std::endl;
-            g_jsonData["interfaces"] = nlohmann::json::array();
-            JsonFail("device_not_found", "No Epson USB interfaces found.");
-            return FinishRun(1);
-        }
-
         nlohmann::json jsonInterfaces = nlohmann::json::array();
 
-        std::cout << "\nDetected Epson USB interfaces (in automatic fallback order):" << std::endl;
+        if (interfaces.empty())
+            std::cout << "\nNo Epson USB interfaces found." << std::endl;
+        else
+            std::cout << "\nDetected Epson USB interfaces (in automatic fallback order):" << std::endl;
+
         for (const auto& iface : interfaces)
         {
             std::cout << "\n  [" << iface.index << "] " << iface.className;
@@ -1120,8 +1182,54 @@ int main(int argc, char* argv[])
             jsonInterfaces.push_back(ewr::JsonInterface(iface, match));
         }
 
-        std::cout << "\nUse --interface <n> to pin a run to one specific interface." << std::endl;
+        if (!interfaces.empty())
+            std::cout << "\nUse --interface <n> to pin a run to one specific interface." << std::endl;
         g_jsonData["interfaces"] = std::move(jsonInterfaces);
+
+        std::cout << "\n[*] Searching the local network for Epson printers (SNMP, read-only)..." << std::endl;
+        std::string searchError;
+        const std::vector<ewr::NetworkPrinter> network = ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, searchError);
+        nlohmann::json jsonNetwork = nlohmann::json::array();
+
+        if (!searchError.empty())
+            std::cerr << "\n[!] " << searchError << std::endl;
+        else if (network.empty())
+            std::cout << "\nNo Epson printer answered on the network." << std::endl;
+        else
+            std::cout << "\nEpson printers on the network:" << std::endl;
+
+        for (const auto& printer : network)
+        {
+            std::cout << "\n  " << printer.address << std::endl;
+            std::cout << "      IEEE 1284 device ID: "
+                      << (printer.model.empty() ? printer.deviceId : "MDL \"" + printer.model + "\"") << std::endl;
+
+            std::string match;
+            if (!printer.model.empty() && !listEntries.empty())
+            {
+                const std::vector<std::string> matches = ewr::MatchModelEntries(printer.model, listEntries);
+                if (!matches.empty())
+                {
+                    std::cout << "      Database entry:      " << matches[0] << std::endl;
+                    match = matches[0];
+                }
+            }
+
+            jsonNetwork.push_back(ewr::JsonNetworkPrinter(printer, match));
+        }
+
+        if (!network.empty())
+            std::cout << "\nUse --ip <address> to reach one of them." << std::endl;
+        g_jsonData["network_printers"] = std::move(jsonNetwork);
+
+        if (interfaces.empty() && network.empty())
+        {
+            std::cout << "\nIs the printer on, and plugged in or on this network?" << std::endl;
+            PrintNetworkSearchHints();
+            JsonFail("device_not_found", "No Epson printer found on USB or on the network.");
+            return FinishRun(1);
+        }
+
         return FinishRun(0);
     }
 
@@ -1208,12 +1316,10 @@ int main(int argc, char* argv[])
     ewr::UsbDeviceGateway usbGateway;
 
     // --ip: the same seam over SNMP. USB is not touched at all on such a run.
+    // Also set when the network search below finds the printer instead.
     std::unique_ptr<ewr::SnmpDeviceGateway> netGateway;
     if (!cli.ip.empty())
         netGateway = std::make_unique<ewr::SnmpDeviceGateway>(cli.ip);
-
-    ewr::IDeviceGateway& gateway = netGateway ? static_cast<ewr::IDeviceGateway&>(*netGateway)
-                                              : static_cast<ewr::IDeviceGateway&>(usbGateway);
 
     // Before any device call, so a second run says why it stopped instead of
     // reporting a printer that cannot be read. The gateway logs the reason as
@@ -1232,11 +1338,13 @@ int main(int argc, char* argv[])
 
     if (netGateway)
         std::cout << "\n[i] Asking the printer at " << cli.ip << " (SNMP)... " << std::flush;
-    else
+    else if (!cli.ipAuto)
         std::cout << "\n[i] Detecting the connected printer... " << std::flush;
 
-    const std::vector<ewr::InterfaceInfo> interfaces =
-        netGateway ? std::vector<ewr::InterfaceInfo>{} : usbGateway.ListInterfaces();
+    // --ip auto leaves USB alone like --ip does: a printer there is not the
+    // one that was asked for.
+    const std::vector<ewr::InterfaceInfo> interfaces = (netGateway || cli.ipAuto)
+        ? std::vector<ewr::InterfaceInfo>{} : usbGateway.ListInterfaces();
 
     if (cli.interfaceCandidate >= 1 && cli.interfaceCandidate > static_cast<int>(interfaces.size()))
     {
@@ -1294,6 +1402,80 @@ int main(int argc, char* argv[])
         }
     }
 
+    // The database owns the name table, so no model strings here.
+    std::vector<ewr::ModelNameEntry> smartEntries;
+    for (const auto& opt : options)
+    {
+        if (!opt.isReplay)
+            smartEntries.push_back({ opt.smartModel.name, opt.smartModel.aliases });
+    }
+
+    // Nothing Epson on USB at all: the printer may be on the network. A
+    // person picks it, since a network can hold someone else's Epson, and
+    // from the pick on this is an --ip run. --json has no one to ask, and
+    // the USB-only modes have nothing to do with what it would find.
+    // --ip auto asks for the search outright.
+    const bool searchNetwork = cli.ipAuto
+        || (!netGateway && interfaces.empty() && !cli.json
+            && cli.interfaceCandidate < 1 && !cli.usbSoftReset
+            && !cli.findKey && !cli.dump && !cli.findAddresses && !cli.cartridge);
+    if (searchNetwork)
+    {
+        if (cli.ipAuto)
+            std::cout << "\n";
+        else
+            std::cout << "no answer on USB." << std::endl;
+        std::cout << "[i] Searching the local network for Epson printers (SNMP)... " << std::flush;
+
+        std::string searchError;
+        const std::vector<ewr::NetworkPrinter> found = ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, searchError);
+
+        if (!searchError.empty())
+        {
+            std::cout << "not possible." << std::endl;
+            std::cerr << "[!] " << searchError << std::endl;
+        }
+        else if (found.empty())
+        {
+            std::cout << "none found." << std::endl;
+            PrintNetworkSearchHints();
+        }
+        else
+        {
+            std::cout << "found " << found.size() << "." << std::endl;
+
+            const int choice = ChooseNetworkPrinter(found, smartEntries);
+            if (choice >= 0)
+            {
+                const ewr::NetworkPrinter& chosen = found[static_cast<std::size_t>(choice)];
+                cli.ip = chosen.address;
+                netGateway = std::make_unique<ewr::SnmpDeviceGateway>(cli.ip);
+                netGateway->AdoptRunLock(usbGateway.ReleaseRunLock());
+
+                devIdQuery.found = true;
+                devIdQuery.deviceId = chosen.deviceId;
+                std::cout << "\n[i] Using the printer at " << cli.ip << " (SNMP)... " << std::flush;
+            }
+        }
+
+        // Asked for the network, so no falling back to a USB printer or to
+        // the model menu: it is that printer or none.
+        if (cli.ipAuto && !netGateway)
+        {
+            if (!searchError.empty() || found.empty())
+            {
+                JsonFail("device_not_found", searchError.empty() ? "No Epson printer answered on the network."
+                                                                 : searchError);
+            }
+            else
+            {
+                std::cout << "[i] No printer chosen. Nothing was changed." << std::endl;
+                JsonFail("blocked", "No printer was chosen from the network search.");
+            }
+            return FinishRun(1);
+        }
+    }
+
     if (devIdQuery.found)
     {
         const ewr::DeviceIdInfo devId = ewr::ParseIeee1284DeviceId(devIdQuery.deviceId);
@@ -1302,14 +1484,6 @@ int main(int argc, char* argv[])
         if (!detectedMdl.empty())
         {
             std::cout << "found \"" << detectedMdl << "\"." << std::endl;
-
-            // The database owns the name table, so no model strings here.
-            std::vector<ewr::ModelNameEntry> smartEntries;
-            for (const auto& opt : options)
-            {
-                if (!opt.isReplay)
-                    smartEntries.push_back({ opt.smartModel.name, opt.smartModel.aliases });
-            }
 
             const std::vector<std::string> matches = ewr::MatchModelEntries(detectedMdl, smartEntries);
             if (!matches.empty())
@@ -1327,7 +1501,7 @@ int main(int argc, char* argv[])
             std::cout << "the device answered, but reported no model name." << std::endl;
         }
     }
-    else
+    else if (!searchNetwork)
     {
         std::cout << (netGateway ? "it answers SNMP, but returned no device ID."
                                  : "no answer (printer off, unplugged, or driver limitation).") << std::endl;
@@ -1364,6 +1538,10 @@ int main(int argc, char* argv[])
             std::cout << std::endl;
         }
     }
+
+    // Bound only now: the network search above can change the transport.
+    ewr::IDeviceGateway& gateway = netGateway ? static_cast<ewr::IDeviceGateway&>(*netGateway)
+                                              : static_cast<ewr::IDeviceGateway&>(usbGateway);
 
     if (cli.findKey)
         return RunReadKeySearch(gateway, smartModels, cli, detectedMdl, detectedMatch);
@@ -2516,11 +2694,14 @@ int main(int argc, char* argv[])
         if (resetInk)
             return true;
 
+        // Over the network the model name alone could be anyone's printer.
+        const std::string where = netGateway ? " at " + cli.ip : std::string();
+
         // The one prompt --yes exists to answer.
         if (cli.assumeYes)
         {
             std::cout << "\n[i] --yes: resetting the waste ink pad counters of "
-                      << selected.smartModel.name << " without asking." << std::endl;
+                      << selected.smartModel.name << where << " without asking." << std::endl;
             return true;
         }
 
@@ -2531,7 +2712,7 @@ int main(int argc, char* argv[])
         }
 
         std::cout << "\nReset the waste ink pad counters of " << selected.smartModel.name
-                  << " now? [y/N]: ";
+                  << where << " now? [y/N]: ";
 
         std::string answer;
         std::getline(std::cin, answer);
@@ -2575,6 +2756,8 @@ int main(int argc, char* argv[])
             JsonFail("blocked", outcome.error);
         else if (outcome.phase == ewr::ResetPhase::DeviceNotFound)
             JsonFail("device_not_found", outcome.error);
+        else if (outcome.phase == ewr::ResetPhase::NotSupported)
+            JsonFail("not_supported", outcome.error);
         else if (outcome.verificationRan && outcome.verifyMismatches > 0)
             JsonFail("write_unverified", outcome.error);
         else
@@ -2583,10 +2766,13 @@ int main(int argc, char* argv[])
 
     // The session already narrated why it stopped; skip the FAILED banner.
     if (outcome.phase == ewr::ResetPhase::Aborted
-        || outcome.phase == ewr::ResetPhase::DeviceNotFound)
+        || outcome.phase == ewr::ResetPhase::DeviceNotFound
+        || outcome.phase == ewr::ResetPhase::NotSupported)
     {
         if (outcome.phase == ewr::ResetPhase::Aborted)
             JsonFail("blocked", "The run stopped at a gate; nothing was written.");
+        else if (outcome.phase == ewr::ResetPhase::NotSupported)
+            JsonFail("not_supported", outcome.error);
         else
             JsonFail("device_not_found", "No Epson interface answered at write time.");
 

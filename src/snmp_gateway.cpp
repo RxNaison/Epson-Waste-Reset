@@ -3,7 +3,10 @@
 #include "ewr/deviceid.h"
 #include "ewr/version.h"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cstdio>
 
 namespace ewr {
 
@@ -42,11 +45,124 @@ namespace ewr {
             return command.size() >= 2 && command[0] == 's' && command[1] == 't';
         }
 
+        // '||', the length, the read key, then 'A'.
+        bool IsEepromReadCommand(const std::vector<unsigned char>& command)
+        {
+            return command.size() >= 7 && command[0] == '|' && command[1] == '|' && command[6] == 'A';
+        }
+
         // UsbDeviceGateway's wording, so a host sees one reason either way.
         const char* const kAnotherRunError =
             "Another EWR run is already driving a printer on this machine.";
 
+        // One question for the whole search, so an answer to either round
+        // is an answer.
+        constexpr int32_t kDiscoveryRequestId = 0x0E57;
+
+        bool MadeByEpson(const DeviceIdInfo& info)
+        {
+            std::string maker = info.manufacturer;
+            std::transform(maker.begin(), maker.end(), maker.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+            return maker.find("EPSON") != std::string::npos;
+        }
+
+        // 192.168.1.9 before 192.168.1.10, which a string sort gets wrong.
+        uint32_t AddressOrder(const std::string& address)
+        {
+            unsigned a = 0, b = 0, c = 0, d = 0;
+            char tail = 0;
+            if (std::sscanf(address.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4
+                || a > 255 || b > 255 || c > 255 || d > 255)
+                return 0;
+            return (a << 24) | (b << 16) | (c << 8) | d;
+        }
+
     } // namespace
+
+    std::vector<NetworkPrinter> DiscoverNetworkPrinters(snmp::IBroadcastChannel& channel,
+                                                        const std::vector<std::string>& targets,
+                                                        int waitMs, std::string& error)
+    {
+        const std::vector<unsigned char> request =
+            snmp::EncodeGetRequest(kCommunity, kDiscoveryRequestId, SnmpDeviceIdOid());
+        auto ask = [&]()
+        {
+            bool anySent = false;
+            for (const std::string& target : targets)
+                anySent = channel.SendTo(target, snmp::kPort, request) || anySent;
+            return anySent;
+        };
+
+        using Clock = std::chrono::steady_clock;
+        const auto start = Clock::now();
+        const auto deadline = start + std::chrono::milliseconds(waitMs);
+        const auto askAgain = start + std::chrono::milliseconds(waitMs / 3);
+        bool askedAgain = false;
+
+        std::vector<NetworkPrinter> found;
+
+        // macOS refuses a terminal without the Local Network permission
+        // locally, broadcasts and all; listening for answers would only end
+        // in "none found", which blames the network.
+        if (!ask())
+        {
+            error = "This computer refused to send to the local network, so the search says nothing"
+                    " about the printers on it. Usual causes: a VPN or firewall that cuts off the"
+                    " local network, or on macOS a terminal app without the Local Network permission"
+                    " (System Settings > Privacy & Security > Local Network; sudo also gets past it).";
+            return found;
+        }
+
+        for (auto now = Clock::now(); now < deadline; now = Clock::now())
+        {
+            if (!askedAgain && now >= askAgain)
+            {
+                ask();
+                askedAgain = true;
+            }
+
+            const auto until = askedAgain ? deadline : askAgain;
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(until - now).count();
+
+            std::string from;
+            std::vector<unsigned char> datagram;
+            if (!channel.ReceiveFrom(static_cast<int>(std::max<long long>(left, 1)), from, datagram))
+                continue;
+
+            snmp::GetResponse response;
+            if (!snmp::DecodeGetResponse(datagram, response) || response.requestId != kDiscoveryRequestId
+                || response.errorStatus != 0 || response.valueTag != snmp::kTagOctetString)
+                continue;
+
+            const std::string deviceId = ExtractDeviceIdString(response.value.data(), response.value.size());
+            const DeviceIdInfo info = ParseIeee1284DeviceId(deviceId);
+            if (!MadeByEpson(info))
+                continue;
+
+            const bool seen = std::any_of(found.begin(), found.end(),
+                                          [&from](const NetworkPrinter& printer) { return printer.address == from; });
+            if (!seen)
+                found.push_back({ from, deviceId, info.model });
+        }
+
+        std::sort(found.begin(), found.end(), [](const NetworkPrinter& a, const NetworkPrinter& b)
+        {
+            const uint32_t left = AddressOrder(a.address);
+            const uint32_t right = AddressOrder(b.address);
+            return left != right ? left < right : a.address < b.address;
+        });
+        return found;
+    }
+
+    std::vector<NetworkPrinter> DiscoverNetworkPrinters(int waitMs, std::string& error)
+    {
+        const std::unique_ptr<snmp::IBroadcastChannel> channel = snmp::OpenBroadcastChannel(error);
+        if (!channel)
+            return {};
+
+        return DiscoverNetworkPrinters(*channel, snmp::LocalBroadcastAddresses(), waitMs, error);
+    }
 
     snmp::Oid SnmpDeviceIdOid()
     {
@@ -104,6 +220,12 @@ namespace ewr {
         return true;
     }
 
+    void SnmpDeviceGateway::AdoptRunLock(std::unique_ptr<RunLock> lock)
+    {
+        if (lock && lock->Held())
+            m_runLock = std::move(lock);
+    }
+
     // The first device call starts the trace fresh, as on USB: a session
     // opened only for the database calls leaves the last run's trace alone.
     void SnmpDeviceGateway::StartTrace()
@@ -123,6 +245,17 @@ namespace ewr {
 
         if (!m_openError.empty())
             Trace("[!] " + m_openError + "\n");
+    }
+
+    // A read answered with a value anywhere in the run settles it: the lock is
+    // the whole EEPROM or nothing, and silence proves neither.
+    std::string SnmpDeviceGateway::EepromUnreachable() const
+    {
+        if (m_eepromReadsRefused == 0 || m_eepromReadsAnswered > 0)
+            return {};
+
+        return "the printer refused every EEPROM read over the network. Many recent Epson models lock"
+               " the EEPROM over the network but not over USB: connect it by USB and run EWR again.";
     }
 
     void SnmpDeviceGateway::Trace(const std::string& text)
@@ -295,6 +428,17 @@ namespace ewr {
                 heard = Get(SnmpControlOid(command), value);
             }
 
+            // An SNMP error counts as a refusal too: some firmware drops the
+            // EEPROM commands from its agent rather than answering ':NA;'.
+            if (heard && IsEepromReadCommand(command))
+            {
+                const std::string text(value.begin(), value.end());
+                if (text.find("EE:") != std::string::npos)
+                    m_eepromReadsAnswered++;
+                else
+                    m_eepromReadsRefused++;
+            }
+
             run.query.packetsSent++;
 
             if (!value.empty())
@@ -315,6 +459,20 @@ namespace ewr {
         run.query.success = m_answered;
         if (!m_answered)
             run.query.error = SilenceError();
+
+        // Once per run, where --status and --dry-run see it as well as a reset.
+        if (!m_eepromLockReported && !EepromUnreachable().empty())
+        {
+            m_eepromLockReported = true;
+            Trace("[!] Every EEPROM read was refused over the network.\n");
+            log::Log(log::Level::Warning, log::Stage::Read, "snmp.eeprom_refused",
+                     "[!] The printer answers over the network but refused every EEPROM read, so its\n"
+                     "    counters cannot be read or reset this way. Many recent Epson models, and\n"
+                     "    older ones after a firmware update, lock the EEPROM over the network and\n"
+                     "    still allow it over USB: connect this printer by USB and run EWR again.\n"
+                     "    (A wrong read key in the database looks the same; over USB, ewr --find-key\n"
+                     "    tells the two apart.)");
+        }
 
         Trace("==================================================\n"
               "QUERY SESSION COMPLETE\n"

@@ -60,6 +60,7 @@ Running with no options is the supported path. These exist for diagnosis and for
 | `--list`, `-l` | List every Epson USB interface, and every Epson printer that answers on the network, with its IEEE 1284 device ID and database match, then exit. Read-only. |
 | `--model <name>` | Skip the menu. Takes the exact name, an alias, or the name the printer reports (`--model "EPSON ET-2803 Series"`). |
 | `--ip <address>` | Reach a printer on the network instead of USB, over SNMP (UDP 161): `ewr --ip 192.168.1.100`. Works with `--status`, `--dry-run` and the waste ink pad reset, with the same gates, confirmation and read-back as USB. Replay dumps and the other modes still need USB. |
+| `--ip auto` | Search the network and pick the printer from a list, even when another printer is on USB. It asks at the keyboard, so it does not combine with `--yes` or `--json`: pass the address from `--list` instead. |
 | `--interface <n>` | Pin the run to interface `<n>` from `--list` and disable the automatic fallback. |
 | `--dry-run` | Detect, read, and show exactly what a reset *would* write - then stop. |
 | `--dump` | Read the EEPROM into a timestamped file. Dump twice around a change and diff to map an unknown printer. |

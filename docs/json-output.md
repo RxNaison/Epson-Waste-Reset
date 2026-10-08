@@ -59,7 +59,7 @@ Every line carries these:
 | `platform` | string | `windows`, `linux` or `macos`. |
 | `command` | string | `status`, `dump`, `list`, `dry-run`, `reset`, `find-addresses` or `find-key`. |
 | `model` | string/null | What `--model` named, before matching. `null` when not given. |
-| `flags` | object | The switches that change behavior: `no_update`, `yes`, `force_yes`, `cartridge`, `usb_soft_reset`, `interface` (int, 0 = automatic), `ip` (string, the `--ip` address; `null` on a USB run). |
+| `flags` | object | The switches that change behavior: `no_update`, `yes`, `force_yes`, `cartridge`, `usb_soft_reset`, `interface` (int, 0 = automatic), `ip` (string, the `--ip` address, or `auto`; `null` on a USB run). |
 
 ## `event`
 

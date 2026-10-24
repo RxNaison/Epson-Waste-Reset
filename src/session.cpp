@@ -1,5 +1,6 @@
 #include "ewr/session.h"
 #include "ewr/deviceid.h"
+#include "ewr/version.h"
 
 #include <algorithm>
 #include <map>
@@ -489,9 +490,154 @@ namespace ewr {
         return ReadStateFor(nullptr);
     }
 
+    namespace {
+
+        // Below this a range read saves less than its probe costs.
+        constexpr size_t kRangeReadMinimum = 24;
+        // One reply carries 2 hex digits per byte: 32 keeps it well inside
+        // the 256-byte packets the session negotiates.
+        constexpr uint8_t kRangeChunk = 32;
+        constexpr uint8_t kRangeProbe = 8;
+
+    } // namespace
+
+    StateSnapshot Session::ReadRanges(const std::vector<std::pair<uint16_t, uint8_t>>& chunks,
+                                      std::vector<bool>& parsed) const
+    {
+        StateSnapshot out;
+        parsed.assign(chunks.size(), false);
+
+        std::vector<std::vector<unsigned char>> queries;
+        queries.push_back(UniversalGenerator::GenerateStatusQueryPacket());
+        for (const auto& chunk : chunks)
+            queries.push_back(UniversalGenerator::GenerateRangeReadPacket(
+                m_model.rkey, chunk.first, chunk.second, m_model.ReadAddressLength()));
+
+        const QueryRunResult run =
+            m_gateway.RunQuery(UniversalGenerator::GenerateHandshake(), queries, m_queryOptions);
+
+        if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
+            return out;
+
+        out.available = true;
+        out.status = ParseStatusReply(run.query.replies[0]);
+
+        for (size_t i = 0; i < chunks.size(); ++i)
+        {
+            if (i + 1 >= run.query.replies.size())
+                break;
+
+            std::vector<uint8_t> bytes;
+            if (!ParseEepromRangeReply(run.query.replies[i + 1], chunks[i].first, chunks[i].second, bytes))
+                continue;
+
+            parsed[i] = true;
+            for (size_t k = 0; k < bytes.size(); ++k)
+                out.values.push_back({ static_cast<uint16_t>(chunks[i].first + k), bytes[k] });
+        }
+
+        return out;
+    }
+
     StateSnapshot Session::ReadAddresses(const std::vector<uint16_t>& addresses) const
     {
-        return ReadStateFor(&addresses);
+        std::vector<uint16_t> wanted;
+        for (uint16_t addr : addresses)
+        {
+            if (addr <= m_model.mem_high)
+                wanted.push_back(addr);
+        }
+
+        if (m_rangeReads == RangeReads::Refused || wanted.size() < kRangeReadMinimum)
+            return ReadStateFor(&addresses);
+
+        // Runs of consecutive addresses, each cut to what one reply carries.
+        std::vector<std::pair<uint16_t, uint8_t>> chunks;
+        for (size_t i = 0; i < wanted.size();)
+        {
+            size_t j = i + 1;
+            while (j < wanted.size() && wanted[j] == wanted[j - 1] + 1 && j - i < kRangeChunk)
+                ++j;
+            chunks.push_back({ wanted[i], static_cast<uint8_t>(j - i) });
+            i = j;
+        }
+
+        if (m_rangeReads == RangeReads::Unknown)
+        {
+            // The same bytes both ways. Anything but full agreement - a
+            // refusal, a reply of another shape, a different value - and this
+            // session reads byte by byte.
+            const uint16_t start = chunks.front().first;
+            const uint8_t count = std::min<uint8_t>(chunks.front().second, kRangeProbe);
+
+            std::vector<uint16_t> probe;
+            for (uint8_t k = 0; k < count; ++k)
+                probe.push_back(static_cast<uint16_t>(start + k));
+
+            std::vector<bool> parsed;
+            const StateSnapshot ranged = ReadRanges({ { start, count } }, parsed);
+            const StateSnapshot single = ReadStateFor(&probe);
+
+            bool agree = ranged.available && single.available && parsed[0]
+                         && ranged.values.size() == single.values.size();
+            for (size_t k = 0; agree && k < single.values.size(); ++k)
+                agree = single.values[k].second >= 0 && single.values[k] == ranged.values[k];
+
+            m_rangeReads = agree ? RangeReads::Work : RangeReads::Refused;
+
+            m_reporter.Log(log::Level::Info, log::Stage::Read, agree ? "session.range_reads" : "session.single_reads",
+                           agree ? "[i] The printer answers range reads: reading " + std::to_string(wanted.size()) +
+                                       " bytes in " + std::to_string(chunks.size()) + " request(s)."
+                                 : std::string("[i] Reading byte by byte: this printer does not answer range reads"
+                                               " the way it answers single ones."),
+                           { { "bytes", std::to_string(wanted.size()) }, { "requests", std::to_string(chunks.size()) } });
+
+            if (!agree)
+                return ReadStateFor(&addresses);
+        }
+
+        std::vector<bool> parsed;
+        StateSnapshot out = ReadRanges(chunks, parsed);
+        if (!out.available)
+            return ReadStateFor(&addresses);
+
+        // A chunk that did not come back as values is read byte by byte, and
+        // ends range reads for the session: one odd reply is enough doubt.
+        std::vector<uint16_t> leftover;
+        for (size_t i = 0; i < chunks.size(); ++i)
+        {
+            if (parsed[i])
+                continue;
+            for (uint8_t k = 0; k < chunks[i].second; ++k)
+                leftover.push_back(static_cast<uint16_t>(chunks[i].first + k));
+        }
+
+        if (!leftover.empty())
+        {
+            m_rangeReads = RangeReads::Refused;
+            const StateSnapshot single = ReadStateFor(&leftover);
+            out.values.insert(out.values.end(), single.values.begin(), single.values.end());
+        }
+
+        // The caller's order, -1 for anything that never answered.
+        StateSnapshot ordered;
+        ordered.available = true;
+        ordered.status = out.status;
+        for (uint16_t addr : wanted)
+        {
+            int value = -1;
+            for (const auto& entry : out.values)
+            {
+                if (entry.first == addr)
+                {
+                    value = entry.second;
+                    break;
+                }
+            }
+            ordered.values.push_back({ addr, value });
+        }
+
+        return ordered;
     }
 
     // `addressOverride` reads an explicit address list instead of the model's
@@ -668,6 +814,15 @@ namespace ewr {
 
         ResetFlow flow;
         flow.sequence = generator.GenerateSequence(m_model);
+        flow.target = "waste";
+
+        // What GenerateSequence writes: the same two guards, the same order.
+        for (uint16_t addr : m_model.GetAllAddresses())
+        {
+            if (addr <= m_model.mem_high && m_model.CanEncodeWriteAddress(addr))
+                flow.writeAddresses.push_back(addr);
+        }
+
         flow.verifyAddresses = m_model.GetAllAddresses();
         flow.verifyValues = m_model.GetAllResetValues();
         flow.classify = [](const PrinterStatus& status) { return EvaluateBlocker(status); };
@@ -727,6 +882,8 @@ namespace ewr {
 
         ResetFlow flow;
         flow.sequence = BuildWriteSession(writes);
+        flow.writeAddresses = writeAddresses;
+        flow.target = "ink";
         flow.readAddresses = writeAddresses;
         flow.verifyAddresses = writeAddresses;
         flow.verifyValues = writeValues;
@@ -752,7 +909,242 @@ namespace ewr {
         return result;
     }
 
-    ResetOutcome Session::RunLifecycle(const ResetFlow& flow, const ResetHandlers& handlers)
+    ResetOutcome Session::Restore(const RestorePlan& plan, const ResetHandlers& handlers)
+    {
+        ResetOutcome out;
+
+        if (plan.model != m_model.name)
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Database, "session.restore_wrong_model",
+                           "[ERROR] The restore was planned for " + plan.model + ", not " + m_model.name + ".");
+            out.error = "The restore was planned for " + plan.model + ", not " + m_model.name + ".";
+            return out;
+        }
+
+        if (plan.writes.empty())
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Database, "session.restore_empty",
+                           "[ERROR] The file holds none of the bytes EWR writes on " + m_model.name +
+                               ", so there is nothing it could restore.");
+            out.error = "The file holds none of the bytes EWR writes on " + m_model.name + ".";
+            return out;
+        }
+
+        // As the ink reset itself: it has never been sent over the network.
+        if (plan.touchesInk && m_gateway.OverNetwork())
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Database, "session.restore_ink_needs_usb",
+                           "[!] The file holds cartridge ink bytes, and writing those needs USB. Nothing was written.");
+            out.phase = ResetPhase::NotSupported;
+            out.error = "Restoring cartridge ink bytes needs USB.";
+            return out;
+        }
+
+        m_reporter.Log(log::Level::Info, log::Stage::Database, "session.restore_generating",
+                       "[*] Planning the restore of " + std::to_string(plan.writes.size()) +
+                           " byte(s) on " + m_model.name + "...");
+
+        ResetFlow flow;
+        flow.target = "restore";
+
+        // The counters' own bytes too, so the host can show what the restore
+        // does to each pad, not only which bytes it writes.
+        std::vector<uint16_t> reads = m_model.GetReadAddresses();
+        for (const auto& w : plan.writes)
+        {
+            if (std::find(reads.begin(), reads.end(), w.first) == reads.end())
+                reads.push_back(w.first);
+        }
+        flow.readAddresses = reads;
+
+        const bool wasteBytes = plan.touchesWaste;
+        flow.classify = [wasteBytes](const PrinterStatus& status) {
+            return wasteBytes ? EvaluateBlocker(status) : EvaluateInkBlocker(status);
+        };
+        flow.expectedErrorNote = " - the restore does not need it cleared. Proceeding.";
+        flow.counterNoun = "byte";
+        flow.expectedValueNoun = "restored value";
+        flow.runNoun = "restore";
+        flow.recheckCommand = "'ewr --dump'";
+        flow.commit = wasteBytes && m_model.HasCloseOps();
+        flow.requirePreflight = true; // it has to know what it is about to change
+
+        flow.afterPreflight = [this, &plan](const StateSnapshot& before, ResetFlow& f, ResetOutcome& o,
+                                            const ResetHandlers& h) -> bool
+        {
+            const std::string& printerSerial = before.status.serial;
+            if (!plan.serial.empty() && !printerSerial.empty() && plan.serial != printerSerial)
+            {
+                m_reporter.Log(log::Level::Warning, log::Stage::Read, "session.restore_other_printer",
+                               "[!] The file was taken from the printer with serial " + plan.serial +
+                                   ", and this one reports " + printerSerial + ".",
+                               { { "file_serial", plan.serial }, { "printer_serial", printerSerial } });
+
+                Blocker other;
+                other.errorName = "DIFFERENT PRINTER";
+                other.explanation =
+                    "These are another printer's counter values. Writing them here does not\n"
+                    "    restore this printer's own state; it gives it the other one's.";
+
+                if (!(h.onBlocker && h.onBlocker(other)))
+                {
+                    m_reporter.Log(log::Level::Info, log::Stage::Read, "session.aborted",
+                                   "[i] Aborted before any EEPROM write. Nothing was changed.");
+                    o.phase = ResetPhase::Aborted;
+                    o.error = "Aborted: the file comes from another printer (serial " + plan.serial + ").";
+                    return false;
+                }
+
+                o.overrides.push_back({ "unit_mismatch", plan.serial, -1 });
+            }
+            else if (plan.serial.empty() || printerSerial.empty())
+            {
+                m_reporter.Log(log::Level::Info, log::Stage::Read, "session.restore_unit_unknown",
+                               std::string("[i] EWR cannot confirm this is the printer the file came from: ") +
+                                   (plan.serial.empty() ? "the file" : "the printer") + " names no serial number.");
+            }
+
+            std::vector<std::pair<uint16_t, uint8_t>> writes;
+            for (const auto& w : plan.writes)
+            {
+                int now = -1;
+                for (const auto& entry : before.values)
+                {
+                    if (entry.first == w.first)
+                    {
+                        now = entry.second;
+                        break;
+                    }
+                }
+
+                if (now == w.second)
+                    o.unchanged.push_back(w.first);
+                else
+                    writes.push_back(w);
+            }
+
+            if (writes.empty())
+            {
+                m_reporter.Log(log::Level::Info, log::Stage::Read, "session.restore_unchanged",
+                               "[i] Nothing to restore: every byte already holds the file's value. Nothing was written.");
+                o.phase = ResetPhase::Done;
+                o.success = true;
+                return false;
+            }
+
+            f.sequence = BuildWriteSession(writes);
+            f.writeAddresses.clear();
+            f.verifyAddresses.clear();
+            f.verifyValues.clear();
+            for (const auto& w : writes)
+            {
+                f.writeAddresses.push_back(w.first);
+                f.verifyAddresses.push_back(w.first);
+                f.verifyValues.push_back(w.second);
+            }
+
+            return true;
+        };
+
+        return RunLifecycle(flow, handlers);
+    }
+
+    bool Session::KeepBackup(const ResetFlow& flow, const ResetHandlers& handlers, ResetOutcome& out)
+    {
+        Backup& backup = out.backup;
+        backup.model = m_model.name;
+        backup.target = flow.target;
+        backup.created = UtcTimestamp();
+        backup.ewrVersion = EWR_VERSION;
+        backup.transport = m_gateway.OverNetwork() ? "network" : "usb";
+        backup.serial = out.before.status.serial;
+        backup.addressLength = m_model.WriteAddressLength();
+
+        for (uint16_t addr : flow.writeAddresses)
+        {
+            bool seen = false;
+            for (const auto& entry : backup.bytes)
+                seen = seen || (entry.first == addr);
+            if (seen)
+                continue;
+
+            int value = -1;
+            for (const auto& entry : out.before.values)
+            {
+                if (entry.first == addr)
+                {
+                    value = entry.second;
+                    break;
+                }
+            }
+            backup.bytes.push_back({ addr, value });
+        }
+
+        out.backupTaken = true;
+
+        if (!handlers.saveBackup)
+            return true;
+
+        const std::string answered = std::to_string(backup.Answered());
+        const std::string total = std::to_string(backup.bytes.size());
+
+        // Same policy as a printer error: nobody to ask means no write.
+        auto askToGoOn = [&](const char* name, const std::string& explanation, const char* detail) -> bool
+        {
+            Blocker blocker;
+            blocker.errorName = name;
+            blocker.explanation = explanation;
+
+            if (!(handlers.onBlocker && handlers.onBlocker(blocker)))
+            {
+                m_reporter.Log(log::Level::Info, log::Stage::Read, "session.aborted",
+                               "[i] Aborted before any EEPROM write. Nothing was changed.");
+                out.phase = ResetPhase::Aborted;
+                out.error = std::string("Aborted: ") + (std::string(detail) == "incomplete"
+                    ? "the backup is incomplete." : "the backup could not be saved.");
+                return false;
+            }
+
+            out.overrides.push_back({ "backup", detail, -1 });
+            return true;
+        };
+
+        if (!backup.Complete())
+        {
+            m_reporter.Log(log::Level::Warning, log::Stage::Read, "session.backup_incomplete",
+                           "[!] The preflight answered " + answered + " of the " + total +
+                               " byte(s) this run overwrites, so a backup could not undo all of it.",
+                           { { "answered", answered }, { "total", total } });
+
+            if (!askToGoOn("BACKUP INCOMPLETE",
+                           "Running EWR again usually reads every byte; a backup that is missing some\n"
+                           "    cannot put them back if this write has to be undone.",
+                           "incomplete"))
+                return false;
+        }
+
+        std::string location;
+        if (handlers.saveBackup(backup, location))
+        {
+            out.backupLocation = location;
+            m_reporter.Log(log::Level::Info, log::Stage::Read, "session.backup_saved",
+                           "[*] Backup of the " + total + " byte(s) this run overwrites: " +
+                               (location.empty() ? std::string("kept by the host") : location),
+                           { { "file", location }, { "bytes", total } });
+            return true;
+        }
+
+        m_reporter.Log(log::Level::Warning, log::Stage::Read, "session.backup_failed",
+                       "[!] The backup of the " + total + " byte(s) this run overwrites could not be saved.",
+                       { { "bytes", total } });
+
+        return askToGoOn("BACKUP NOT SAVED",
+                         "Without it this write cannot be undone. Free some disk space, or run EWR from\n"
+                         "    a folder it can write to, and try again.",
+                         "not_saved");
+    }
+
+    ResetOutcome Session::RunLifecycle(ResetFlow flow, const ResetHandlers& handlers)
     {
         ResetOutcome out;
 
@@ -805,6 +1197,9 @@ namespace ewr {
                                "\n[i] The printer reports " + out.before.status.errorName +
                                    flow.expectedErrorNote);
             }
+
+            if (flow.afterPreflight && !flow.afterPreflight(out.before, flow, out, handlers))
+                return out;
         }
         else if (flow.requirePreflight)
         {
@@ -864,6 +1259,20 @@ namespace ewr {
             return out;
         }
 
+        // ---- Backup, after every gate and before the first write: a run
+        // that stopped at a gate leaves no file behind.
+        if (preflightRan)
+        {
+            if (!KeepBackup(flow, handlers, out))
+                return out;
+        }
+        else
+        {
+            m_reporter.Log(log::Level::Info, log::Stage::Read, "session.backup_unavailable",
+                           "[i] No backup: the printer did not answer the preflight, so there are no\n"
+                           "    values to keep. The reset goes ahead as it always has.");
+        }
+
         const bool overUsb = !m_gateway.OverNetwork();
 
         m_reporter.Log(log::Level::Info, log::Stage::Detect, "session.scanning",
@@ -915,7 +1324,7 @@ namespace ewr {
         if (preflightRan)
         {
             m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verifying",
-                           "\n[*] Verifying the reset by reading the counters back...");
+                           "\n[*] Verifying the " + flow.runNoun + " by reading the " + flow.counterNoun + "s back...");
 
             out.after = flow.readAddresses.has_value() ? ReadStateFor(&flow.readAddresses.value())
                                                        : ReadState();
@@ -951,11 +1360,11 @@ namespace ewr {
                 if (out.verifyMismatches == 0 && out.verifyUnread == 0)
                     m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verified",
                                    "[SUCCESS] Read-back verification: every " + flow.counterNoun +
-                                       " now holds its reset value.");
+                                       " now holds its " + flow.expectedValueNoun + ".");
                 else if (out.verifyMismatches > 0)
                     m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_mismatch",
                                    "[!] Read-back verification: " + std::to_string(out.verifyMismatches) +
-                                       " " + flow.counterNoun + "(s) do not match their reset value. Power-cycle the printer and run " +
+                                       " " + flow.counterNoun + "(s) do not match their " + flow.expectedValueNoun + ". Power-cycle the printer and run " +
                                        flow.recheckCommand + " to re-check.");
                 else
                     m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_incomplete",

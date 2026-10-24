@@ -16,9 +16,23 @@ int main(void)
     ewr_event event;
     const char* name;
 
-    if (ewr_abi_version() < 2)
+    if (ewr_abi_version() < 3)
     {
-        printf("[FAIL] ewr_abi_version() < 2\n");
+        printf("[FAIL] ewr_abi_version() < 3\n");
+        return 1;
+    }
+
+    /* Revision 3's additions. */
+    if (ewr_restore(NULL, NULL, NULL, NULL) != EWR_ERR_INVALID_ARGUMENT)
+    {
+        printf("[FAIL] ewr_restore accepted a NULL session\n");
+        return 1;
+    }
+    ewr_session_set_backup_callback(NULL, NULL, NULL);
+    ewr_set_data_dir(NULL);
+    if (strcmp(ewr_status_name(EWR_ERR_BAD_BACKUP), "bad_backup") != 0)
+    {
+        printf("[FAIL] EWR_ERR_BAD_BACKUP has no name\n");
         return 1;
     }
 

@@ -111,6 +111,8 @@ namespace ewr {
 
         bool OverNetwork() const override { return true; }
 
+        const std::string& Host() const { return m_host; }
+
         // Set once the printer has answered EEPROM reads and refused every
         // one: firmware that locks the EEPROM over the network, or a wrong
         // read key. Writes would be refused the same way.

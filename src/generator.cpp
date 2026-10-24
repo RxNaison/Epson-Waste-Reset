@@ -425,6 +425,40 @@ namespace ewr {
         return WrapD4DataPacket(epson_cmd);
     }
 
+    std::vector<unsigned char> UniversalGenerator::GenerateFactoryPacket(uint16_t rkey, uint8_t action,
+                                                                         const std::vector<unsigned char>& payload)
+    {
+        std::vector<unsigned char> inner;
+        inner.push_back(rkey & 0xFF);
+        inner.push_back((rkey >> 8) & 0xFF);
+        inner.push_back(action);
+        inner.push_back(static_cast<unsigned char>(~action & 0xFF));
+        inner.push_back(static_cast<unsigned char>(((action >> 1) & 0x7F) | ((action << 7) & 0x80)));
+        inner.insert(inner.end(), payload.begin(), payload.end());
+
+        std::vector<unsigned char> epson_cmd;
+        epson_cmd.push_back(EpsonD4::PREFIX_PIPE);
+        epson_cmd.push_back(EpsonD4::PREFIX_PIPE);
+        const uint16_t len = static_cast<uint16_t>(inner.size());
+        epson_cmd.push_back(len & 0xFF);
+        epson_cmd.push_back((len >> 8) & 0xFF);
+        epson_cmd.insert(epson_cmd.end(), inner.begin(), inner.end());
+
+        return WrapD4DataPacket(epson_cmd);
+    }
+
+    std::vector<unsigned char> UniversalGenerator::GenerateRangeReadPacket(uint16_t rkey, uint16_t address,
+                                                                           uint8_t count, uint8_t addressLength)
+    {
+        std::vector<unsigned char> payload;
+        payload.push_back(address & 0xFF);
+        if (addressLength != 1)
+            payload.push_back((address >> 8) & 0xFF);
+        payload.push_back(count);
+
+        return GenerateFactoryPacket(rkey, EpsonD4::CMD_EEPROM_READ_RANGE, payload);
+    }
+
     std::vector<unsigned char> UniversalGenerator::WrapD4DataPacket(const std::vector<unsigned char>& payload)
     {
         // D4 header uses Big-Endian length; inner Epson frames use Little-Endian length

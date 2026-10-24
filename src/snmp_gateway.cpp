@@ -1,6 +1,7 @@
 #include "ewr/snmp_gateway.h"
 #include "ewr/d4session.h"
 #include "ewr/deviceid.h"
+#include "ewr/paths.h"
 #include "ewr/version.h"
 
 #include <algorithm>
@@ -285,7 +286,7 @@ namespace ewr {
             return;
 
         m_traceStarted = true;
-        m_traceFile.open("ewr_trace.log", std::ios::out | (m_traceAppends ? std::ios::app : std::ios::trunc));
+        m_traceFile.open(paths::InDataDir("ewr_trace.log"), std::ios::out | (m_traceAppends ? std::ios::app : std::ios::trunc));
         m_trace = &m_traceFile;
 
         Trace("==================================================\n"

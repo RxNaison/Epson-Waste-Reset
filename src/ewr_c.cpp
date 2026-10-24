@@ -4,6 +4,7 @@
 #include "ewr/generator.h"
 #include "ewr/json_out.h"
 #include "ewr/log.h"
+#include "ewr/paths.h"
 #include "ewr/session.h"
 #include "ewr/snmp_gateway.h"
 #include "ewr/version.h"
@@ -60,6 +61,8 @@ struct ewr_session
     void* blockerUser = nullptr;
     ewr_decision_cb confirmCallback = nullptr;
     void* confirmUser = nullptr;
+    ewr_backup_cb backupCallback = nullptr;
+    void* backupUser = nullptr;
     bool allowModelMismatch = false;
 
     // Owned by the session, handed out by ewr_session_last_error.
@@ -223,6 +226,107 @@ namespace {
         return EWR_OK;
     }
 
+    // The CLI refuses a wrong-model write at its own gate; an embedder has no
+    // such gate, so the check lives here. Only a printer that names a
+    // database entry can contradict the caller: an unlisted one says nothing
+    // either way. Allowed, the mismatch still goes on record.
+    int CheckReportedModel(ewr_session* session, const ewr::DbPrinterModel& target,
+                           std::string& mismatchPassed, std::string& deviceId)
+    {
+        const ewr::DeviceIdQueryResult query = session->QueryDeviceId();
+
+        // As the CLI stops at --ip silence: there is no other interface to
+        // try, and the confirm callback would be asked about a printer that
+        // has never answered.
+        if (!query.found && session->net && !session->net->Answered())
+        {
+            session->Fail(session->net->SilenceError());
+            return EWR_ERR_DEVICE_NOT_FOUND;
+        }
+
+        if (!query.found)
+            return EWR_OK;
+
+        deviceId = query.deviceId;
+
+        const ewr::DeviceIdInfo reported = ewr::ParseIeee1284DeviceId(query.deviceId);
+        if (reported.model.empty())
+            return EWR_OK;
+
+        std::vector<ewr::ModelNameEntry> entries;
+        for (const auto& known : session->database.GetAvailableModels())
+            entries.push_back({ known.name, known.aliases });
+
+        const std::vector<std::string> matches = ewr::MatchModelEntries(reported.model, entries);
+        if (matches.empty() || matches[0] == target.name)
+            return EWR_OK;
+
+        if (!session->allowModelMismatch)
+        {
+            session->Fail("The printer reports \"" + reported.model + "\" (" + matches[0]
+                          + "), not " + target.name + ".");
+            return EWR_ERR_MODEL_MISMATCH;
+        }
+
+        mismatchPassed = matches[0];
+        return EWR_OK;
+    }
+
+    // The host's callbacks as the lifecycle's hooks. Nobody to ask means no:
+    // a blocker or a missing confirmation stops the write.
+    ewr::ResetHandlers WriteHandlers(ewr_session* session, const ewr::DbPrinterModel& target,
+                                     const std::string& what, const std::string& deviceId)
+    {
+        ewr::ResetHandlers handlers;
+
+        handlers.onBlocker = [session](const ewr::Blocker& blocker) -> bool
+        {
+            if (!session->blockerCallback)
+                return false; // no host to ask: never assume consent
+
+            return session->blockerCallback(ewr::JsonBlocker(blocker).dump().c_str(), session->blockerUser) != 0;
+        };
+
+        handlers.confirmWrite = [session, target, what](const ewr::StateSnapshot& state) -> bool
+        {
+            if (!session->confirmCallback)
+                return false;
+
+            nlohmann::json ask = ewr::JsonStateData(target, state);
+            ask["target"] = what;
+            return session->confirmCallback(ask.dump().c_str(), session->confirmUser) != 0;
+        };
+
+        // Unset keeps ABI 2's behavior: nothing is gated on a backup.
+        if (session->backupCallback)
+        {
+            handlers.saveBackup = [session, deviceId](const ewr::Backup& taken, std::string&) -> bool
+            {
+                ewr::Backup backup = taken;
+                backup.deviceId = deviceId;
+                if (session->net)
+                    backup.host = session->net->Host();
+                return session->backupCallback(ewr::BackupToJson(backup).c_str(), session->backupUser) != 0;
+            };
+        }
+
+        return handlers;
+    }
+
+    int OutcomeStatus(const ewr::ResetOutcome& outcome)
+    {
+        switch (outcome.phase)
+        {
+            case ewr::ResetPhase::Aborted:        return EWR_ERR_BLOCKED;
+            case ewr::ResetPhase::DeviceNotFound: return EWR_ERR_DEVICE_NOT_FOUND;
+            case ewr::ResetPhase::NotSupported:   return EWR_ERR_NOT_SUPPORTED;
+            default: break;
+        }
+
+        return (outcome.verificationRan && outcome.verifyMismatches > 0)
+            ? EWR_ERR_WRITE_UNVERIFIED : EWR_ERR_WRITE_FAILED;
+    }
+
     // `host` null is a USB session.
     int OpenSession(const char* databasePath, const char* host, ewr_session** out)
     {
@@ -287,7 +391,7 @@ const char* ewr_version(void)
 
 int ewr_abi_version(void)
 {
-    return 2;
+    return 3;
 }
 
 int ewr_json_contract_version(void)
@@ -314,6 +418,7 @@ const char* ewr_status_name(int status)
         case EWR_ERR_WRITE_UNVERIFIED: return "write_unverified";
         case EWR_ERR_IO:               return "io_error";
         case EWR_ERR_MODEL_MISMATCH:   return "model_mismatch";
+        case EWR_ERR_BAD_BACKUP:       return "bad_backup";
         default:                       return "unknown";
     }
 }
@@ -381,6 +486,20 @@ void ewr_session_set_confirm_callback(ewr_session* session, ewr_decision_cb call
 
     session->confirmCallback = callback;
     session->confirmUser = user;
+}
+
+void ewr_session_set_backup_callback(ewr_session* session, ewr_backup_cb callback, void* user)
+{
+    if (!session)
+        return;
+
+    session->backupCallback = callback;
+    session->backupUser = user;
+}
+
+void ewr_set_data_dir(const char* dir)
+{
+    ewr::paths::SetDataDir(dir ? dir : "");
 }
 
 void ewr_session_set_interface(ewr_session* session, int candidate)
@@ -607,10 +726,7 @@ int ewr_dump(ewr_session* session, const char* model, char** out_json)
         if (session->RefuseOverNetwork("An EEPROM dump"))
             return EWR_ERR_NOT_SUPPORTED;
 
-        std::vector<uint16_t> addresses;
-        const uint32_t end = std::min<uint32_t>(target.mem_high, 0xFF);
-        for (uint32_t address = 0; address <= end; ++address)
-            addresses.push_back(static_cast<uint16_t>(address));
+        const std::vector<uint16_t> addresses = ewr::DumpAddresses(target);
 
         ewr::Session reader(target, session->Gateway(), ewr::log::Default(), session->options);
         const ewr::StateSnapshot state = reader.ReadAddresses(addresses);
@@ -666,67 +782,13 @@ int ewr_reset(ewr_session* session, const char* model, int ink, char** out_json)
         if (ink && session->RefuseOverNetwork("The cartridge ink reset"))
             return EWR_ERR_NOT_SUPPORTED;
 
-        // The CLI refuses a wrong-model write at its own gate; an embedder
-        // has no such gate, so the check lives here. Only a printer that
-        // names a database entry can contradict the caller: an unlisted one
-        // says nothing either way. Allowed, the mismatch still goes on record.
         std::string mismatchPassed;
-        {
-            const ewr::DeviceIdQueryResult query = session->QueryDeviceId();
+        std::string deviceId;
+        const int reported = CheckReportedModel(session, target, mismatchPassed, deviceId);
+        if (reported != EWR_OK)
+            return reported;
 
-            // As the CLI stops at --ip silence: there is no other interface to
-            // try, and the confirm callback would be asked about a printer
-            // that has never answered.
-            if (!query.found && session->net && !session->net->Answered())
-            {
-                session->Fail(session->net->SilenceError());
-                return EWR_ERR_DEVICE_NOT_FOUND;
-            }
-
-            if (query.found)
-            {
-                const ewr::DeviceIdInfo reported = ewr::ParseIeee1284DeviceId(query.deviceId);
-                if (!reported.model.empty())
-                {
-                    std::vector<ewr::ModelNameEntry> entries;
-                    for (const auto& known : session->database.GetAvailableModels())
-                        entries.push_back({ known.name, known.aliases });
-
-                    const std::vector<std::string> matches = ewr::MatchModelEntries(reported.model, entries);
-                    if (!matches.empty() && matches[0] != target.name)
-                    {
-                        if (!session->allowModelMismatch)
-                        {
-                            session->Fail("The printer reports \"" + reported.model + "\" (" + matches[0]
-                                          + "), not " + target.name + ".");
-                            return EWR_ERR_MODEL_MISMATCH;
-                        }
-
-                        mismatchPassed = matches[0];
-                    }
-                }
-            }
-        }
-
-        ewr::ResetHandlers handlers;
-
-        handlers.onBlocker = [session](const ewr::Blocker& blocker) -> bool
-        {
-            if (!session->blockerCallback)
-                return false; // no host to ask: never assume consent
-
-            return session->blockerCallback(ewr::JsonBlocker(blocker).dump().c_str(), session->blockerUser) != 0;
-        };
-
-        handlers.confirmWrite = [session, &target, ink](const ewr::StateSnapshot& state) -> bool
-        {
-            if (!session->confirmCallback)
-                return false;
-
-            nlohmann::json ask = ewr::JsonStateData(target, state);
-            ask["target"] = ink ? "ink" : "waste";
-            return session->confirmCallback(ask.dump().c_str(), session->confirmUser) != 0;
-        };
+        ewr::ResetHandlers handlers = WriteHandlers(session, target, ink ? "ink" : "waste", deviceId);
 
         ewr::Session lifecycle(target, session->Gateway(), ewr::log::Default(), session->options);
         ewr::ResetOutcome outcome = ink ? lifecycle.ResetInk(handlers) : lifecycle.Reset(handlers);
@@ -742,17 +804,72 @@ int ewr_reset(ewr_session* session, const char* model, int ink, char** out_json)
             return EWR_OK;
 
         session->Fail(outcome.error);
+        return OutcomeStatus(outcome);
+    });
+}
 
-        switch (outcome.phase)
+int ewr_restore(ewr_session* session, const char* model, const char* file_contents, char** out_json)
+{
+    return Guard(session, [&]() -> int
+    {
+        if (!file_contents)
         {
-            case ewr::ResetPhase::Aborted:        return EWR_ERR_BLOCKED;
-            case ewr::ResetPhase::DeviceNotFound: return EWR_ERR_DEVICE_NOT_FOUND;
-            case ewr::ResetPhase::NotSupported:   return EWR_ERR_NOT_SUPPORTED;
-            default: break;
+            session->Fail("No backup or dump was given.");
+            return EWR_ERR_INVALID_ARGUMENT;
         }
 
-        return (outcome.verificationRan && outcome.verifyMismatches > 0)
-            ? EWR_ERR_WRITE_UNVERIFIED : EWR_ERR_WRITE_FAILED;
+        ewr::Backup source;
+        std::string error;
+        if (!ewr::ParseBackupText(file_contents, source, error))
+        {
+            session->Fail(error);
+            return EWR_ERR_BAD_BACKUP;
+        }
+
+        ewr::DbPrinterModel target;
+        const int found = ResolveModel(session, (model && *model) ? model : source.model.c_str(), target);
+        if (found != EWR_OK)
+            return found;
+
+        if (target.name != source.model)
+        {
+            session->Fail("The file was taken from " + source.model + ", not " + target.name + ".");
+            return EWR_ERR_BAD_BACKUP;
+        }
+
+        const ewr::RestorePlan plan = ewr::PlanRestore(target, source);
+        if (plan.writes.empty())
+        {
+            session->Fail("The file holds none of the bytes EWR writes on " + target.name + ".");
+            return EWR_ERR_BAD_BACKUP;
+        }
+
+        if (plan.touchesInk && session->RefuseOverNetwork("Restoring cartridge ink bytes"))
+            return EWR_ERR_NOT_SUPPORTED;
+
+        std::string mismatchPassed;
+        std::string deviceId;
+        const int reported = CheckReportedModel(session, target, mismatchPassed, deviceId);
+        if (reported != EWR_OK)
+            return reported;
+
+        ewr::ResetHandlers handlers = WriteHandlers(session, target, "restore", deviceId);
+
+        ewr::Session lifecycle(target, session->Gateway(), ewr::log::Default(), session->options);
+        ewr::ResetOutcome outcome = lifecycle.Restore(plan, handlers);
+
+        if (!mismatchPassed.empty())
+            outcome.overrides.insert(outcome.overrides.begin(), { "model_mismatch", mismatchPassed, -1 });
+
+        const int delivered = Deliver(session, ewr::JsonRestoreData(target, source, plan, "", outcome), out_json);
+        if (delivered != EWR_OK)
+            return delivered;
+
+        if (outcome.success)
+            return EWR_OK;
+
+        session->Fail(outcome.error);
+        return OutcomeStatus(outcome);
     });
 }
 

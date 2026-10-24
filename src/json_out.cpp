@@ -226,6 +226,20 @@ namespace ewr {
         return out;
     }
 
+    nlohmann::json JsonBackup(const ResetOutcome& outcome)
+    {
+        if (!outcome.backupTaken)
+            return nullptr;
+
+        return {
+            { "file", outcome.backupLocation.empty() ? nlohmann::json(nullptr)
+                                                     : nlohmann::json(outcome.backupLocation) },
+            { "bytes", outcome.backup.bytes.size() },
+            { "complete", outcome.backup.Complete() },
+            { "values", JsonCounterValues(outcome.backup.bytes) },
+        };
+    }
+
     nlohmann::json JsonResetData(const DbPrinterModel& model, bool ink, const ResetOutcome& outcome)
     {
         nlohmann::json out;
@@ -258,9 +272,53 @@ namespace ewr {
                 { "error", blocker ? nlohmann::json(passed.detail) : nlohmann::json(nullptr) },
                 { "error_code", blocker && passed.errorCode >= 0 ? nlohmann::json(passed.errorCode)
                                                                  : nlohmann::json(nullptr) },
+                // Why a gate without a key of its own objected ("not_saved").
+                { "detail", (mismatch || blocker || passed.detail.empty()) ? nlohmann::json(nullptr)
+                                                                            : nlohmann::json(passed.detail) },
             });
         }
         out["overrides"] = overrides;
+        out["backup"] = JsonBackup(outcome);
+        return out;
+    }
+
+    nlohmann::json JsonRestorePlan(const Backup& source, const RestorePlan& plan, const std::string& file)
+    {
+        auto orNull = [](const std::string& text) {
+            return text.empty() ? nlohmann::json(nullptr) : nlohmann::json(text);
+        };
+
+        nlohmann::json planned = nlohmann::json::array();
+        for (const auto& w : plan.writes)
+            planned.push_back({ { "address", w.first }, { "value", w.second } });
+
+        nlohmann::json skipped = nlohmann::json::array();
+        for (const auto& skip : plan.skipped)
+            skipped.push_back({ { "address", skip.address }, { "reason", skip.reason } });
+
+        nlohmann::json out;
+        out["model"] = plan.model;
+        out["target"] = "restore";
+        out["source"] = {
+            { "file", orNull(file) },
+            { "kind", source.source },
+            { "model", source.model },
+            { "created", orNull(source.created) },
+            { "serial", orNull(source.serial) },
+        };
+        out["planned_writes"] = std::move(planned);
+        out["skipped"] = std::move(skipped);
+        out["missing"] = plan.missing;
+        return out;
+    }
+
+    nlohmann::json JsonRestoreData(const DbPrinterModel& model, const Backup& source, const RestorePlan& plan,
+                                   const std::string& file, const ResetOutcome& outcome)
+    {
+        nlohmann::json out = JsonResetData(model, plan.touchesInk && !plan.touchesWaste, outcome);
+        for (const auto& item : JsonRestorePlan(source, plan, file).items())
+            out[item.key()] = item.value();
+        out["unchanged"] = outcome.unchanged;
         return out;
     }
 

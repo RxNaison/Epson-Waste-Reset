@@ -54,6 +54,14 @@ namespace ewr {
     // a mismatching echo is rejected. Returns true and sets value on success.
     bool ParseEepromReadReply(const std::vector<unsigned char>& raw, uint8_t& value, int expectedAddress = -1);
 
+    // Action 0x51's answer: `count` bytes from `address`, in either of the
+    // forms above - '...:51:HHHH...;' or '...EE:<address echo><bytes>;' with
+    // a 1- or 2-byte echo. False unless exactly `count` bytes parse and an
+    // echoed address matches, so a reply of another shape is never misread
+    // as values.
+    bool ParseEepromRangeReply(const std::vector<unsigned char>& raw, uint16_t address, uint8_t count,
+                               std::vector<uint8_t>& values);
+
     // How a printer answered one EEPROM read. The refusals are kept apart
     // because they are not the same evidence: ':41:NA;' names the read and
     // turns it down (an R220 with any wrong key), while a bare '||:;' does

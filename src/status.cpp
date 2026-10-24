@@ -324,6 +324,84 @@ namespace ewr {
         return false;
     }
 
+    bool ParseEepromRangeReply(const std::vector<unsigned char>& raw, uint16_t address, uint8_t count,
+                               std::vector<uint8_t>& values)
+    {
+        values.clear();
+        if (count == 0)
+            return false;
+
+        const std::vector<unsigned char> payload = ExtractD4Payload(raw);
+        const std::string haystack(payload.begin(), payload.end());
+
+        const size_t prefix = haystack.find("@BDC PS\r\n");
+        if (prefix == std::string::npos)
+            return false;
+
+        auto hexNibble = [](char c) -> int
+        {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+
+        // The hex digits between `body` and the next ';', all of them.
+        auto digitsFrom = [&](size_t body, std::string& digits) -> bool
+        {
+            const size_t term = haystack.find(';', body);
+            if (term == std::string::npos)
+                return false;
+            digits = haystack.substr(body, term - body);
+            for (char c : digits)
+            {
+                if (hexNibble(c) < 0)
+                    return false;
+            }
+            return true;
+        };
+
+        auto bytesOf = [&](const std::string& digits, size_t from, std::vector<uint8_t>& out)
+        {
+            for (size_t i = from; i + 1 < digits.size(); i += 2)
+                out.push_back(static_cast<uint8_t>((hexNibble(digits[i]) << 4) | hexNibble(digits[i + 1])));
+        };
+
+        const size_t want = static_cast<size_t>(count) * 2;
+        std::string digits;
+
+        // Form A: the action code echoed, then the bytes.
+        const size_t marker = haystack.find(":51:", prefix);
+        if (marker != std::string::npos)
+        {
+            if (!digitsFrom(marker + 4, digits) || digits.size() != want)
+                return false;
+            bytesOf(digits, 0, values);
+            return true;
+        }
+
+        // Form B: the start address echoed (one or two bytes), then the bytes.
+        const size_t ee = haystack.find("EE:", prefix);
+        if (ee == std::string::npos || !digitsFrom(ee + 3, digits) || digits.size() < want)
+            return false;
+
+        const size_t echo = digits.size() - want;
+        if (echo != 2 && echo != 4)
+            return false;
+
+        uint32_t echoed = 0;
+        for (size_t i = 0; i < echo; ++i)
+            echoed = (echoed << 4) | static_cast<uint32_t>(hexNibble(digits[i]));
+
+        // A 1-byte echo carries only the low byte.
+        const uint32_t expected = (echo == 2) ? (address & 0xFFu) : address;
+        if (echoed != expected)
+            return false;
+
+        bytesOf(digits, echo, values);
+        return true;
+    }
+
     ReadAnswer ClassifyEepromReadReply(const std::vector<unsigned char>& raw, uint8_t& value, int expectedAddress)
     {
         if (raw.empty())

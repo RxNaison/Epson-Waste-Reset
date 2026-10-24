@@ -104,8 +104,22 @@ namespace ewr {
     // model / printer / counters / pads, as `status` and `dry-run` carry them.
     nlohmann::json JsonStateData(const DbPrinterModel& model, const StateSnapshot& state);
 
+    // {file, bytes, complete, values}: what the backup step kept, null when
+    // there was no preflight to take it from.
+    nlohmann::json JsonBackup(const ResetOutcome& outcome);
+
     // What a reset ended up doing: phase, writes, verification, before/after.
     nlohmann::json JsonResetData(const DbPrinterModel& model, bool ink, const ResetOutcome& outcome);
+
+    // What a restore was asked to do before it touched the printer: the file
+    // it came from, the bytes it would write, the ones it left alone and why,
+    // and the model's bytes the file did not hold.
+    nlohmann::json JsonRestorePlan(const Backup& source, const RestorePlan& plan, const std::string& file);
+
+    // JsonResetData of the restore's outcome, with the plan's keys, target
+    // "restore", and the bytes left alone because they already matched.
+    nlohmann::json JsonRestoreData(const DbPrinterModel& model, const Backup& source, const RestorePlan& plan,
+                                   const std::string& file, const ResetOutcome& outcome);
 
     // The contract's spelling for a reset phase.
     const char* JsonResetPhaseName(ResetPhase phase);

@@ -4,6 +4,8 @@
 #include <cctype>
 #include <filesystem>
 #include "ewr/payload.h"
+#include "ewr/paths.h"
+#include "ewr/restore.h"
 #include "ewr/parser.h"
 #include "ewr/session.h"
 #include "ewr/snmp_gateway.h"
@@ -16,6 +18,7 @@
 #include "ewr/version.h"
 #include "ewr/log.h"
 #include "ewr/json_out.h"
+#include "backup_store.h"
 #include "color.h"
 #include "console.h"
 #include <cstdint>
@@ -69,6 +72,7 @@ struct CliOptions
     bool listOnly = false;       // --list: interface survey, then exit
     bool dryRun = false;         // --dry-run: everything except the writes
     bool dump = false;           // --dump: read-only EEPROM dump to a file
+    bool dumpFull = false;       // --full (with --dump): all of 0..mem_high
     bool findAddresses = false;  // --find-addresses: repeated dumps around head cleanings
     bool findKey = false;        // --find-key: try every read key in the database, read-only
     bool noUpdate = false;       // --no-update: offline run, nothing checked or swapped
@@ -81,6 +85,7 @@ struct CliOptions
     std::string modelOverride;   // --model <name>: skip the menu
     std::string ip;              // --ip <address>: read a network printer over SNMP
     bool ipAuto = false;         // --ip auto: search the network even with a printer on USB
+    std::string restoreFile;     // --restore <file>: write back a backup's or a dump's counter bytes
 };
 
 // ---- --json (docs/json-output.md) --------------------------------------
@@ -228,7 +233,12 @@ static void PrintUsage()
               << "  --dump           Detect, select the model, then read the EEPROM into a\n"
               << "                   timestamped file next to ewr. Read-only. Dump twice\n"
               << "                   around a change and diff the files to map a printer\n"
-              << "                   the ink database does not know yet.\n"
+              << "                   the ink database does not know yet. --full reads every\n"
+              << "                   byte up to the model's mem_high instead of the low page.\n"
+              << "  --restore <file> Write back what a backup (from backups/) or a --dump file\n"
+              << "                   holds of this model's counter bytes - only those, and only\n"
+              << "                   the ones that differ. Same gates, confirmation and\n"
+              << "                   read-back as a reset; --dry-run shows the plan.\n"
               << "  --yes, -y        Answer the reset confirmation with yes, for callers that\n"
               << "                   drive EWR non-interactively. It confirms the waste ink pad\n"
               << "                   reset and nothing else: on a model that also offers the\n"
@@ -780,7 +790,8 @@ static void PrintInkSummary(const ewr::DbPrinterModel& model,
 // Diffing two dumps taken around a single change locates counters on
 // printers the database has not mapped yet.
 static std::string WriteEepromDump(const ewr::DbPrinterModel& model,
-                                   const std::vector<std::pair<uint16_t, int>>& values)
+                                   const std::vector<std::pair<uint16_t, int>>& values,
+                                   const std::string& deviceId, const std::string& serial)
 {
     std::vector<std::pair<uint16_t, std::string>> notes;
     for (const auto& g : model.pad_groups)
@@ -813,9 +824,9 @@ static std::string WriteEepromDump(const ewr::DbPrinterModel& model,
 
     // Epoch granularity: two dumps in the same second must not collide, since
     // diffing #1 against #2 is the entire point.
-    std::string filename = base + ".txt";
+    std::string filename = ewr::paths::InDataDir(base + ".txt");
     for (int n = 2; fs::exists(filename) && n < 100; ++n)
-        filename = base + "_" + std::to_string(n) + ".txt";
+        filename = ewr::paths::InDataDir(base + "_" + std::to_string(n) + ".txt");
 
     std::ofstream out(filename);
     if (!out)
@@ -825,8 +836,19 @@ static std::string WriteEepromDump(const ewr::DbPrinterModel& model,
     for (const auto& v : values)
         answered += (v.second >= 0) ? 1 : 0;
 
+    // Format 2 adds the header lines after "model"; a reader of format 1
+    // skips '#' lines it does not know, and the body is unchanged, so two
+    // dumps of either format still diff line for line.
     out << "# EWR EEPROM dump\n";
+    out << "# format: 2\n";
     out << "# model: " << model.name << "\n";
+    out << "# ewr: " << kEwrCurrentVersion << "\n";
+    out << "# created: " << ewr::UtcTimestamp() << "\n";
+    if (!deviceId.empty())
+        out << "# device_id: " << deviceId << "\n";
+    if (!serial.empty())
+        out << "# serial: " << serial << "\n";
+    out << "# address_length: " << static_cast<int>(model.ReadAddressLength()) << "\n";
     out << "# answered: " << answered << " of " << values.size() << "\n";
     out << "# address,value,note ('--' = no reply: unknown)\n";
     for (const auto& v : values)
@@ -983,8 +1005,320 @@ static int RunReadKeySearch(ewr::IDeviceGateway& gateway,
     return FinishRun(0);
 }
 
+// `values` with the plan's bytes written in, for showing what a restore
+// leaves each pad at before it happens.
+static std::vector<std::pair<uint16_t, int>> WithRestoredBytes(std::vector<std::pair<uint16_t, int>> values,
+                                                               const ewr::RestorePlan& plan)
+{
+    for (const auto& w : plan.writes)
+    {
+        bool found = false;
+        for (auto& entry : values)
+        {
+            if (entry.first == w.first)
+            {
+                entry.second = w.second;
+                found = true;
+            }
+        }
+        if (!found)
+            values.push_back({ w.first, w.second });
+    }
+    return values;
+}
+
+// One line per planned byte: what it holds now, what the file says.
+static size_t PrintRestoreDiff(const ewr::RestorePlan& plan, const std::vector<std::pair<uint16_t, int>>& now)
+{
+    size_t changing = 0;
+    std::cout << "  Bytes the restore writes back:" << std::endl;
+    for (const auto& w : plan.writes)
+    {
+        int current = -1;
+        for (const auto& entry : now)
+        {
+            if (entry.first == w.first)
+                current = entry.second;
+        }
+
+        char line[96];
+        if (current == w.second)
+            snprintf(line, sizeof(line), "    EEPROM 0x%04X = 0x%02X already - left alone", w.first, w.second);
+        else if (current >= 0)
+            snprintf(line, sizeof(line), "    EEPROM 0x%04X: 0x%02X -> 0x%02X", w.first, current, w.second);
+        else
+            snprintf(line, sizeof(line), "    EEPROM 0x%04X: (no reply) -> 0x%02X", w.first, w.second);
+        std::cout << line << std::endl;
+
+        changing += (current == w.second) ? 0 : 1;
+    }
+    return changing;
+}
+
+// A restore can put a pad back at its service limit: say so before asking.
+static void WarnOnFullPads(const ewr::DbPrinterModel& model, const std::vector<std::pair<uint16_t, int>>& after)
+{
+    for (const auto& spec : model.GetAllCounters())
+    {
+        const ewr::CounterReading reading = ewr::EvaluateCounter(spec, after);
+        if (reading.complete && reading.Percent() >= 100)
+        {
+            std::cout << "\n[!] After the restore, " << (reading.description.empty() ? "a counter" : reading.description)
+                      << " reads " << reading.Percent() << "%: the printer will report its" << std::endl;
+            std::cout << "    waste ink pads full again and may refuse to print until they are reset." << std::endl;
+        }
+    }
+}
+
+// --restore: write back what a backup or a dump holds of this model's own
+// counter bytes, through the reset's lifecycle and its gates.
+static int RunRestore(const ewr::DbPrinterModel& model, const ewr::Backup& source, const std::string& file,
+                      ewr::IDeviceGateway& gateway, const ewr::ExecutorOptions& options, const CliOptions& cli,
+                      const std::string& deviceId, const std::string& mismatchPassed)
+{
+    const ewr::RestorePlan plan = ewr::PlanRestore(model, source);
+    const bool overNetwork = gateway.OverNetwork();
+
+    // In place before any early exit, so a refused restore still names
+    // what it was asked to write.
+    g_jsonData = ewr::JsonRestorePlan(source, plan, file);
+
+    std::cout << "\n[*] RESTORE for " << model.name << " from " << file << std::endl;
+    std::cout << "    " << (source.source == "dump" ? "An EEPROM dump" : "A backup EWR kept before a write");
+    if (!source.created.empty())
+        std::cout << ", taken " << source.created;
+    if (!source.serial.empty())
+        std::cout << ", of the printer with serial " << source.serial;
+    std::cout << "." << std::endl;
+
+    size_t unmapped = 0;
+    size_t unread = 0;
+    size_t other = 0;
+    for (const auto& skip : plan.skipped)
+    {
+        if (skip.reason == "unmapped")
+            unmapped++;
+        else if (skip.reason == "unread")
+            unread++;
+        else
+            other++;
+    }
+
+    if (unmapped > 0)
+        std::cout << "    " << unmapped << " byte(s) in the file are not bytes EWR writes on " << model.name
+                  << ", and are left alone." << std::endl;
+    if (unread > 0)
+        std::cout << "    " << unread << " counter byte(s) in the file were never read ('--'), and are left alone."
+                  << std::endl;
+    if (other > 0)
+        std::cout << "    " << other << " byte(s) lie beyond what this model's EEPROM commands can reach, and are"
+                  << " left alone." << std::endl;
+
+    if (!plan.missing.empty())
+    {
+        std::cout << "\n[!] The file does not hold " << plan.missing.size() << " of " << model.name
+                  << "'s counter byte(s)";
+        if (source.source == "dump")
+            std::cout << " - a dump made before EWR 1.6\n    read only up to 0xFF";
+        std::cout << ". Those stay as they are." << std::endl;
+    }
+
+    if (plan.writes.empty())
+    {
+        std::cerr << "\n[ERROR] The file holds none of the bytes EWR writes on " << model.name
+                  << ", so there is nothing to restore." << std::endl;
+        JsonFail("bad_backup", "The file holds none of the bytes EWR writes on " + model.name + ".");
+        return FinishRun(1);
+    }
+
+    if (plan.touchesInk && overNetwork)
+    {
+        std::cerr << "\n[!] The file holds cartridge ink bytes, and writing those needs USB." << std::endl;
+        JsonFail("not_supported", "Restoring cartridge ink bytes needs USB.");
+        return FinishRun(1);
+    }
+
+    ewr::Session session(model, gateway, ewr::log::Default(), options);
+
+    std::vector<uint16_t> reads = model.GetReadAddresses();
+    for (const auto& w : plan.writes)
+    {
+        if (std::find(reads.begin(), reads.end(), w.first) == reads.end())
+            reads.push_back(w.first);
+    }
+
+    if (cli.dryRun)
+    {
+        std::cout << "\n[*] DRY RUN: reading what those bytes hold now (no writes)..." << std::endl;
+        const ewr::StateSnapshot state = session.ReadAddresses(reads);
+        if (!state.available)
+        {
+            std::cerr << "[!] The printer did not answer the read-only query." << std::endl;
+            JsonFail("read_failed", "The printer did not answer the read-only query.");
+            return FinishRun(1);
+        }
+
+        PrintPrinterStatus(state.status);
+        const size_t changing = PrintRestoreDiff(plan, state.values);
+
+        const auto after = WithRestoredBytes(state.values, plan);
+        std::cout << "\n  Now:" << std::endl;
+        PrintCounterSummary(model, state.values);
+        std::cout << "  After the restore:" << std::endl;
+        PrintCounterSummary(model, after);
+        WarnOnFullPads(model, after);
+
+        if (!plan.serial.empty() && !state.status.serial.empty() && plan.serial != state.status.serial)
+            std::cout << "\n[!] The file comes from the printer with serial " << plan.serial
+                      << "; this one reports " << state.status.serial << "." << std::endl;
+
+        std::cout << "\n[DRY RUN] Nothing was written. " << changing << " byte(s) would change; run without"
+                  << " --dry-run to restore them." << std::endl;
+
+        g_jsonData["printer"] = ewr::JsonPrinterStatus(state.status);
+        g_jsonData["before"] = ewr::JsonCounterValues(state.values);
+        return FinishRun(0);
+    }
+
+    ewr::ResetHandlers handlers;
+
+    handlers.onPreflight = [&](const ewr::StateSnapshot& before)
+    {
+        PrintPrinterStatus(before.status);
+        PrintCounterSummary(model, before.values);
+    };
+
+    handlers.onBlocker = [&](const ewr::Blocker& blocker)
+    {
+        if (blocker.errorCode >= 0)
+            std::cout << "\n[!] WARNING: the printer reports an active error: " << blocker.errorName << "." << std::endl;
+        else
+            std::cout << "\n[!] WARNING: " << blocker.errorName << "." << std::endl;
+
+        if (!blocker.explanation.empty())
+            std::cout << "    " << blocker.explanation << std::endl;
+
+        if (cli.forceYes)
+        {
+            std::cout << "\n[!] --force-yes: continuing past that objection." << std::endl;
+            return true;
+        }
+
+        if (cli.json)
+        {
+            JsonFail("blocked", "EWR will not write past: " + blocker.errorName + ". Pass --force-yes to overrule it.");
+            return false;
+        }
+
+        if (cli.assumeYes)
+        {
+            std::cout << "\n[i] --yes answers the restore confirmation, not this. Pass --force-yes to overrule it."
+                      << std::endl;
+            return false;
+        }
+
+        std::cout << "\nRestore anyway? [y/N]: ";
+        std::string answer;
+        std::getline(std::cin, answer);
+        const std::string a = toLower(answer);
+        return a == "y" || a == "yes";
+    };
+
+    handlers.confirmWrite = [&](const ewr::StateSnapshot& before)
+    {
+        std::cout << std::endl;
+        PrintRestoreDiff(plan, before.values);
+
+        const auto after = WithRestoredBytes(before.values, plan);
+        std::cout << "  After the restore:" << std::endl;
+        PrintCounterSummary(model, after);
+        WarnOnFullPads(model, after);
+
+        const std::string where = overNetwork ? " at " + cli.ip : std::string();
+
+        if (cli.assumeYes)
+        {
+            std::cout << "\n[i] --yes: restoring " << model.name << where << " without asking." << std::endl;
+            return true;
+        }
+
+        if (cli.json)
+        {
+            JsonFail("blocked", "The restore confirmation was not given: pass --yes.");
+            return false;
+        }
+
+        std::cout << "\nRestore these bytes on " << model.name << where << " now? [y/N]: ";
+        std::string answer;
+        std::getline(std::cin, answer);
+        const std::string a = toLower(answer);
+        return a == "y" || a == "yes";
+    };
+
+    handlers.saveBackup = [&](const ewr::Backup& taken, std::string& location)
+    {
+        ewr::Backup backup = taken;
+        backup.deviceId = deviceId;
+        backup.host = overNetwork ? cli.ip : std::string();
+
+        std::string error;
+        if (ewr::cli::StoreBackup(backup, location, error))
+            return true;
+
+        std::cerr << "[!] " << error << std::endl;
+        return false;
+    };
+
+    handlers.onVerify = [&](const ewr::StateSnapshot& after)
+    {
+        PrintCounterSummary(model, after.values);
+    };
+
+    ewr::ResetOutcome outcome = session.Restore(plan, handlers);
+
+    if (!mismatchPassed.empty())
+        outcome.overrides.insert(outcome.overrides.begin(), { "model_mismatch", mismatchPassed, -1 });
+
+    if (outcome.verificationRan && (outcome.verifyMismatches > 0 || outcome.verifyUnread > 0))
+    {
+        PrintCounterValues(outcome.before.values, "EEPROM values BEFORE the restore:");
+        PrintCounterValues(outcome.after.values, "EEPROM values AFTER the restore:");
+    }
+
+    g_jsonData = ewr::JsonRestoreData(model, source, plan, file, outcome);
+
+    if (outcome.success && outcome.writesTotal == 0)
+        return FinishRun(0); // every byte already held the file's value
+
+    if (!outcome.success)
+    {
+        if (outcome.phase == ewr::ResetPhase::Aborted)
+            JsonFail("blocked", outcome.error.empty() ? "The run stopped at a gate; nothing was written." : outcome.error);
+        else if (outcome.phase == ewr::ResetPhase::DeviceNotFound)
+            JsonFail("device_not_found", outcome.error);
+        else if (outcome.phase == ewr::ResetPhase::NotSupported)
+            JsonFail("not_supported", outcome.error);
+        else if (outcome.phase == ewr::ResetPhase::NotStarted)
+            JsonFail("read_failed", outcome.error);
+        else if (outcome.verificationRan && outcome.verifyMismatches > 0)
+            JsonFail("write_unverified", outcome.error);
+        else
+            JsonFail("write_failed", outcome.error);
+
+        if (outcome.phase != ewr::ResetPhase::WriteFailed)
+            return FinishRun(1);
+    }
+
+    return FinishReset(outcome.success);
+}
+
 int main(int argc, char* argv[])
 {
+    // A file named on the command line is relative to where the user is,
+    // not to the folder the run moves into next.
+    std::error_code launchError;
+    const fs::path launchDir = fs::current_path(launchError);
+
     SetWorkingDirectoryToExecutable();
 
     // The core never prints on its own. Warnings and errors go to stderr so
@@ -1045,6 +1379,10 @@ int main(int argc, char* argv[])
         {
             cli.dump = true;
         }
+        else if (arg == "--full")
+        {
+            cli.dumpFull = true;
+        }
         else if (arg == "--find-addresses")
         {
             cli.findAddresses = true;
@@ -1098,7 +1436,7 @@ int main(int argc, char* argv[])
 
             cli.json = true;
         }
-        else if (arg == "--model" || arg == "--interface" || arg == "--ip")
+        else if (arg == "--model" || arg == "--interface" || arg == "--ip" || arg == "--restore")
         {
             if (i + 1 >= argc)
             {
@@ -1109,6 +1447,12 @@ int main(int argc, char* argv[])
             if (arg == "--model")
             {
                 cli.modelOverride = value;
+            }
+            else if (arg == "--restore")
+            {
+                if (value.empty())
+                    return UsageError(cli, "--restore needs a file: a backup from backups/ or an --dump file.");
+                cli.restoreFile = value;
             }
             else if (arg == "--ip")
             {
@@ -1161,6 +1505,15 @@ int main(int argc, char* argv[])
         }
     }
 
+    if (cli.dumpFull && !cli.dump)
+        return UsageError(cli, "--full belongs to --dump: ewr --dump --full reads every byte up to mem_high.");
+
+    if (!cli.restoreFile.empty()
+        && (cli.listOnly || cli.findKey || cli.statusOnly || cli.dump || cli.findAddresses || cli.cartridge))
+        return UsageError(cli, "--restore writes back what its file holds; it does not combine with --list,"
+                               " --find-key, --status, --dump, --find-addresses or --cartridge. --dry-run shows"
+                               " what it would write.");
+
     // The search is for a printer whose model is unknown; naming one would
     // only suggest that entry's key gets special treatment.
     if (cli.findKey && !cli.modelOverride.empty())
@@ -1191,6 +1544,7 @@ int main(int argc, char* argv[])
                   : cli.statusOnly     ? "status"
                   : cli.dump           ? "dump"
                   : cli.findAddresses  ? "find-addresses"
+                  : !cli.restoreFile.empty() ? "restore"
                   : cli.dryRun         ? "dry-run"
                                        : "reset";
     JsonHello(cli);
@@ -1223,6 +1577,43 @@ int main(int argc, char* argv[])
                      "    still stops the run before any write.\n" << std::endl;
 
     ewr::CleanupStaleTempFiles();
+
+    // Read before anything is asked of the printer: a file EWR cannot trust
+    // stops the run here. The file names the model, so it picks the entry
+    // unless --model does.
+    ewr::Backup restoreSource;
+    if (!cli.restoreFile.empty())
+    {
+        fs::path file(cli.restoreFile);
+        if (file.is_relative() && !launchDir.empty())
+            file = launchDir / file;
+        cli.restoreFile = file.string();
+
+        std::string error;
+        std::ifstream in(file, std::ios::binary);
+        if (!in)
+        {
+            error = "Could not open " + cli.restoreFile + ".";
+        }
+        else
+        {
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            ewr::ParseBackupText(text, restoreSource, error);
+        }
+
+        if (!error.empty())
+        {
+            std::cerr << "[ERROR] " << error << std::endl;
+            JsonFail("bad_backup", error);
+            return FinishRun(1);
+        }
+
+        if (cli.modelOverride.empty())
+            cli.modelOverride = restoreSource.model;
+
+        std::cout << "[i] RESTORE: writing back what " << file.filename().string() << " holds for "
+                  << restoreSource.model << (cli.dryRun ? " - dry run, nothing is written." : ".") << "\n" << std::endl;
+    }
 
     // No update checks, no D4 traffic, no menu - diagnostics only.
     if (cli.listOnly)
@@ -2125,12 +2516,11 @@ int main(int argc, char* argv[])
         std::cout << "\n[*] DUMP for " << selected.smartModel.name
                   << ": reading the EEPROM (read-only, no writes)..." << std::endl;
 
-        // The whole addressable space on 1-byte models, and where the counters
-        // live on the classic six-color printers.
-        const uint32_t dumpEnd = std::min<uint32_t>(selected.smartModel.mem_high, 0xFF);
-        std::vector<uint16_t> addresses;
-        for (uint32_t a = 0; a <= dumpEnd; ++a)
-            addresses.push_back(static_cast<uint16_t>(a));
+        // The low page, where the classic models keep everything, plus every
+        // byte the database names above it - a restore needs those.
+        const std::vector<uint16_t> addresses = ewr::DumpAddresses(selected.smartModel, cli.dumpFull);
+        if (cli.dumpFull)
+            std::cout << "    --full: all " << addresses.size() << " bytes up to mem_high. This takes a while." << std::endl;
 
         ewr::Session session(selected.smartModel, gateway, ewr::log::Default(), sessionOptions);
         const ewr::StateSnapshot state = session.ReadAddresses(addresses);
@@ -2155,7 +2545,8 @@ int main(int argc, char* argv[])
         g_jsonData["values"] = ewr::JsonCounterValues(state.values);
         g_jsonData["file"] = nullptr;
 
-        const std::string path = WriteEepromDump(selected.smartModel, state.values);
+        const std::string path = WriteEepromDump(selected.smartModel, state.values, devIdQuery.deviceId,
+                                                 state.status.serial);
         if (path.empty())
         {
             std::cerr << "[ERROR] Read the EEPROM, but could not write the dump file." << std::endl;
@@ -2389,6 +2780,35 @@ int main(int argc, char* argv[])
                      "    model. Checking it against a known-good capture is what turns a reading\n"
                      "    into a database entry that is safe to write." << std::endl;
         return FinishRun(0);
+    }
+
+    // ---- Restore: a backup or a dump written back; --dry-run previews it. ----
+    if (!cli.restoreFile.empty())
+    {
+        if (selected.isReplay)
+        {
+            std::cerr << "[!] --restore needs a Smart Protocol model: it reads and writes with the"
+                         " database's keys, and a Replay dump carries none." << std::endl;
+            JsonFail("not_supported", "--restore needs a Smart Protocol model; a Replay dump carries no keys.");
+            return FinishRun(1);
+        }
+
+        // A restore writes a model's own bytes back, so the entry the file
+        // names is the only one it runs on.
+        if (selected.smartModel.name != restoreSource.model)
+        {
+            std::cerr << "\n[!] The file was taken from " << restoreSource.model << ", and this run uses "
+                      << selected.smartModel.name << "." << std::endl;
+            std::cerr << "    A restore puts a model's own bytes back, so it runs only on the entry the"
+                         " file names." << std::endl;
+            std::cerr << "    Drop --model to use " << restoreSource.model << "." << std::endl;
+            JsonFail("bad_backup", "The file was taken from " + restoreSource.model + ", not "
+                                   + selected.smartModel.name + ".");
+            return FinishRun(1);
+        }
+
+        return RunRestore(selected.smartModel, restoreSource, cli.restoreFile, gateway, sessionOptions, cli,
+                          devIdQuery.deviceId, mismatchPassed);
     }
 
     // ---- Dry run: everything except the writes. ---------------------------
@@ -2788,8 +3208,9 @@ int main(int argc, char* argv[])
         {
             // Same answer as --yes, and for the same reason: only --force-yes
             // overrules what the printer reports.
-            JsonFail("blocked", "The printer reports a condition EWR will not write past: "
-                                + blocker.errorName + ". Pass --force-yes to overrule it.");
+            JsonFail("blocked", std::string(blocker.errorCode >= 0 ? "The printer reports a condition EWR will not"
+                                                                   : "EWR will not")
+                                + " write past: " + blocker.errorName + ". Pass --force-yes to overrule it.");
             return false;
         }
 
@@ -2844,6 +3265,21 @@ int main(int argc, char* argv[])
         std::getline(std::cin, answer);
         const std::string a = toLower(answer);
         return a == "y" || a == "yes";
+    };
+
+    // Kept before the first write, so --restore can undo this reset.
+    handlers.saveBackup = [&](const ewr::Backup& taken, std::string& location)
+    {
+        ewr::Backup backup = taken;
+        backup.deviceId = devIdQuery.deviceId;
+        backup.host = netGateway ? cli.ip : std::string();
+
+        std::string error;
+        if (ewr::cli::StoreBackup(backup, location, error))
+            return true;
+
+        std::cerr << "[!] " << error << std::endl;
+        return false;
     };
 
     handlers.onVerify = [&](const ewr::StateSnapshot& after)

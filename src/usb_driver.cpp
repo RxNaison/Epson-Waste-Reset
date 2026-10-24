@@ -4,6 +4,7 @@
 #include "ewr/executor.h"
 #include "ewr/generator.h"
 #include "ewr/log.h"
+#include "ewr/paths.h"
 #include "ewr/status.h"
 #include "ewr/version.h"
 
@@ -77,7 +78,7 @@ namespace ewr {
         struct TraceLog
         {
             explicit TraceLog(bool appendTraceLog)
-                : file("ewr_trace.log",
+                : file(paths::InDataDir("ewr_trace.log"),
                        appendTraceLog ? (std::ios::out | std::ios::app) : (std::ios::out | std::ios::trunc)),
                   buf(file.rdbuf()),
                   stream(&buf)

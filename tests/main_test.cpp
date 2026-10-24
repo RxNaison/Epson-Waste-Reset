@@ -10043,6 +10043,34 @@ void test_c_abi_database_check()
     fs::remove(bad, ec);
 }
 
+// An event's level as ewr_c.h numbers it. log::Level has a Debug between
+// Trace and Info, so a plain cast reported every Info event as WARNING.
+void test_c_abi_event_levels_use_the_header_numbers()
+{
+    std::cout << "[TEST] test_c_abi_event_levels_use_the_header_numbers" << std::endl;
+
+    ewr_session* session = nullptr;
+    if (ewr_session_open("database.json", &session) == EWR_ERR_ANOTHER_RUN)
+    {
+        std::cout << "  [skip] another EWR run holds the printer" << std::endl;
+        ewr_session_close(session);
+        return;
+    }
+
+    std::vector<int> levels;
+    ewr_session_set_event_callback(session, [](const ewr_event* event, void* user) {
+        if (std::string(event->code).rfind("test.level", 0) == 0)
+            static_cast<std::vector<int>*>(user)->push_back(event->level);
+    }, &levels);
+
+    ewr::log::Log(ewr::log::Level::Info, ewr::log::Stage::General, "test.level.info", "info");
+    ewr::log::Log(ewr::log::Level::Warning, ewr::log::Stage::General, "test.level.warning", "warning");
+    ewr::log::Log(ewr::log::Level::Error, ewr::log::Stage::General, "test.level.error", "error");
+
+    CHECK((levels == std::vector<int>{ EWR_LEVEL_INFO, EWR_LEVEL_WARNING, EWR_LEVEL_ERROR }));
+    ewr_session_close(session);
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -10205,6 +10233,7 @@ int main()
     test_session_restore_all_runs_only_on_the_same_unit();
     test_c_abi_restore_all_needs_its_consent();
     test_c_abi_database_check();
+    test_c_abi_event_levels_use_the_header_numbers();
     test_log_carries_fields();
     test_json_never_leaks_minus_one();
     test_json_status_separates_unknown_from_zero();

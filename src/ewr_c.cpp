@@ -42,6 +42,21 @@ namespace {
         return copy;
     }
 
+    // ewr_level's numbers, not log::Level's: that enum also has Debug, so a
+    // cast sent every Info event as EWR_LEVEL_WARNING and every error as 4.
+    int CLevel(ewr::log::Level level)
+    {
+        switch (level)
+        {
+            case ewr::log::Level::Trace:
+            case ewr::log::Level::Debug:   return EWR_LEVEL_TRACE;
+            case ewr::log::Level::Info:    return EWR_LEVEL_INFO;
+            case ewr::log::Level::Warning: return EWR_LEVEL_WARNING;
+            case ewr::log::Level::Error:   return EWR_LEVEL_ERROR;
+        }
+        return EWR_LEVEL_INFO;
+    }
+
     std::string LowerCase(std::string text)
     {
         std::transform(text.begin(), text.end(), text.begin(),
@@ -115,7 +130,7 @@ struct ewr_session
         out.size = sizeof(ewr_event);
         out.code = event.code.c_str();
         out.message = event.message.c_str();
-        out.level = static_cast<int>(event.level);
+        out.level = CLevel(event.level);
         out.stage = static_cast<int>(event.stage);
         out.index = event.HasProgress() ? event.index : -1;
         out.total = event.HasProgress() ? event.total : -1;

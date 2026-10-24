@@ -7,6 +7,8 @@ namespace ewr {
         switch (level)
         {
             case log::Level::Trace:   return "trace";
+            // The contract names three levels above trace; debug detail is info.
+            case log::Level::Debug:   return "info";
             case log::Level::Info:    return "info";
             case log::Level::Warning: return "warning";
             case log::Level::Error:   return "error";

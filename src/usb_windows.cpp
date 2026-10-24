@@ -559,7 +559,8 @@ namespace ewr {
         // not "no reply", and the read is re-posted. The deadline, the settle
         // window, kMaxDrainBytes and kMaxDrainReads each bound the loop, so a
         // mute printer fails rather than spinning.
-        std::vector<unsigned char> AsyncDrainBuffer(HANDLE hPrinter, int firstReadTimeoutMs, std::ostream& trace)
+        std::vector<unsigned char> AsyncDrainBuffer(HANDLE hPrinter, int firstReadTimeoutMs, std::ostream& trace,
+                                                    const std::function<bool(const std::vector<unsigned char>&)>& complete = {})
         {
             std::vector<unsigned char> totalData;
             BYTE buffer[kDrainReadChunkBytes];
@@ -591,6 +592,9 @@ namespace ewr {
 
                     totalData.insert(totalData.end(), buffer, buffer + bytesRead);
                     ++dataReads;
+
+                    if (complete && complete(totalData))
+                        break; // the caller has what it waits for
 
                     deadline = GetTickCount64() + kDrainFollowUpTimeoutMs;
                     continue;
@@ -641,6 +645,12 @@ namespace ewr {
             std::vector<unsigned char> Drain(int timeoutMs) override
             {
                 return AsyncDrainBuffer(handle_, timeoutMs, trace_);
+            }
+
+            std::vector<unsigned char> DrainUntil(
+                int timeoutMs, const std::function<bool(const std::vector<unsigned char>&)>& complete) override
+            {
+                return AsyncDrainBuffer(handle_, timeoutMs, trace_, complete);
             }
 
         private:

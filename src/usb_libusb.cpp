@@ -90,6 +90,12 @@ namespace ewr {
 
             std::vector<unsigned char> Drain(int timeoutMs) override
             {
+                return DrainUntil(timeoutMs, {});
+            }
+
+            std::vector<unsigned char> DrainUntil(
+                int timeoutMs, const std::function<bool(const std::vector<unsigned char>&)>& complete) override
+            {
                 // timeoutMs bounds only the wait for the first bytes; follow-up
                 // reads collect the rest of an already-flowing burst.
                 //
@@ -135,6 +141,9 @@ namespace ewr {
 
                     if (status != 0 || received == 0)
                         break;
+
+                    if (complete && complete(data))
+                        break; // the caller has what it waits for
 
                     readTimeoutMs = kDrainFollowUpTimeoutMs;
                 }

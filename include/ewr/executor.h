@@ -2,6 +2,7 @@
 #include "ewr/log.h"
 
 #include <cstddef>
+#include <functional>
 #include <ostream>
 #include <string>
 #include <vector>
@@ -18,6 +19,14 @@ namespace ewr {
         // poll: it returns whatever is already there. No value of timeoutMs
         // ever means "wait forever".
         virtual std::vector<unsigned char> Drain(int timeoutMs) = 0;
+
+        // Drain, returning as soon as `complete` accepts the bytes read so far.
+        virtual std::vector<unsigned char> DrainUntil(
+            int timeoutMs, const std::function<bool(const std::vector<unsigned char>&)>& complete)
+        {
+            (void)complete;
+            return Drain(timeoutMs);
+        }
     };
 
     struct ExecutorOptions

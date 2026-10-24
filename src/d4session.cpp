@@ -61,6 +61,21 @@ namespace ewr {
             return (buffer.size() > 3) ? buffer.size() - 3 : 0;
         }
 
+        // Whether `buffered` followed by `more` holds a whole packet, by the
+        // same rules ReadPacket frames one with.
+        bool HoldsWholePacket(const std::vector<unsigned char>& buffered, const std::vector<unsigned char>& more)
+        {
+            std::vector<unsigned char> all(buffered);
+            all.insert(all.end(), more.begin(), more.end());
+
+            const size_t start = FindPacketStart(all);
+            if (all.size() < start + 4)
+                return false;
+
+            const size_t total = (static_cast<size_t>(all[start + 2]) << 8) | all[start + 3];
+            return all.size() - start >= total;
+        }
+
     } // namespace
 
     namespace D4 {
@@ -158,7 +173,8 @@ namespace ewr {
                 return false;
             }
 
-            const std::vector<unsigned char> chunk = m_transport.Drain(remaining);
+            const std::vector<unsigned char> chunk = m_transport.DrainUntil(remaining,
+                [this](const std::vector<unsigned char>& more) { return HoldsWholePacket(m_buffer, more); });
             if (!chunk.empty())
             {
                 if (!m_sawHttpReply && LooksLikeHttpReply(chunk.data(), chunk.size()))

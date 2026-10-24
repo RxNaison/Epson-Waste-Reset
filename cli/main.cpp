@@ -218,15 +218,21 @@ static void SetWorkingDirectoryToExecutable()
 static std::string ChooseDataLocation()
 {
     std::string seed = "database.json";
+    bool installed = false;
     std::error_code ec;
     if (!fs::exists(seed, ec))
     {
         const fs::path shared = fs::path("..") / "share" / "ewr" / "database.json";
         if (fs::exists(shared, ec))
+        {
             seed = shared.string();
+            installed = true;
+        }
     }
 
-    if (ewr::paths::EnsureWritableDir("."))
+    // A packaged ewr writes to the user's folder even under sudo, where it
+    // could write beside itself: ewr_trace.log has no business in /usr/bin.
+    if (!installed && ewr::paths::EnsureWritableDir("."))
         return seed;
 
     const std::string user = ewr::paths::UserDataDir();

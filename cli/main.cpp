@@ -209,6 +209,39 @@ static void SetWorkingDirectoryToExecutable()
 #endif
 }
 
+// Where this run reads database.json and writes everything it produces.
+// Beside ewr is the classic layout, and stays the answer wherever ewr can
+// write there. An installed copy cannot - /usr/bin, a package's folder - so
+// it writes to the per-user folder instead, and keeps its own database.json
+// there, seeded from the packaged one (/usr/share/ewr beside a /usr/bin/ewr),
+// for the updater to keep fresh.
+static std::string ChooseDataLocation()
+{
+    std::string seed = "database.json";
+    std::error_code ec;
+    if (!fs::exists(seed, ec))
+    {
+        const fs::path shared = fs::path("..") / "share" / "ewr" / "database.json";
+        if (fs::exists(shared, ec))
+            seed = shared.string();
+    }
+
+    if (ewr::paths::EnsureWritableDir("."))
+        return seed;
+
+    const std::string user = ewr::paths::UserDataDir();
+    if (user.empty() || !ewr::paths::EnsureWritableDir(user))
+        return seed;
+
+    ewr::paths::SetDataDir(user);
+
+    const std::string own = ewr::paths::InDataDir("database.json");
+    if (!fs::exists(own, ec) && fs::exists(seed, ec))
+        fs::copy_file(seed, own, ec);
+
+    return fs::exists(own, ec) ? own : seed;
+}
+
 // Never hardcode the version here: the updater compares this string against
 // release tags, and it comes from project(EWR VERSION ...) via version.h.
 const std::string kEwrCurrentVersion = EWR_VERSION;
@@ -1690,6 +1723,7 @@ int main(int argc, char* argv[])
     const fs::path launchDir = fs::current_path(launchError);
 
     SetWorkingDirectoryToExecutable();
+    const std::string databasePath = ChooseDataLocation();
 
     // The core never prints on its own. Warnings and errors go to stderr so
     // they survive a redirected stdout.
@@ -2087,7 +2121,7 @@ int main(int argc, char* argv[])
     {
         ewr::UniversalGenerator listGenerator;
         std::vector<ewr::ModelNameEntry> listEntries;
-        if (listGenerator.LoadDatabase("database.json"))
+        if (listGenerator.LoadDatabase(databasePath))
         {
             for (const auto& m : listGenerator.GetAvailableModels())
                 listEntries.push_back({ m.name, m.aliases });
@@ -2205,7 +2239,7 @@ int main(int argc, char* argv[])
         // The database is refreshed before it is loaded, so this run already
         // writes with it. The release check runs alongside: offline, the two
         // wait out one connect timeout instead of one each.
-        auto database = std::async(std::launch::async, [] { return ewr::Updater::UpdateDatabaseNow("database.json"); });
+        auto database = std::async(std::launch::async, [&databasePath] { return ewr::Updater::UpdateDatabaseNow(databasePath); });
         auto release = std::async(std::launch::async, ewr::Updater::CheckLatestRelease, kEwrCurrentVersion);
 
         auto ready = [](const auto& task) { return task.wait_for(std::chrono::seconds(0)) == std::future_status::ready; };
@@ -2230,7 +2264,7 @@ int main(int argc, char* argv[])
     }
 
     ewr::UniversalGenerator generator;
-    if (!generator.LoadDatabase("database.json"))
+    if (!generator.LoadDatabase(databasePath))
         std::cerr << "[!] Could not load database.json (missing or corrupted). Smart Protocol models are unavailable this run." << std::endl;
 
     auto replayModels = ewr::ScanModelsFolder("models");

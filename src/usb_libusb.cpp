@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <memory>
+#include <mutex>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -31,8 +32,31 @@
 //
 // The run choreography (pin, retry, fallback, banners) lives in
 // usb_driver.cpp; see ewr/usb_backend.h for the seam.
+//
+// On Android an app may not enumerate USB devices itself: it asks the user,
+// opens the printer through UsbManager and hands EWR the file descriptor.
+// libusb wraps that one (libusb_wrap_sys_device) instead of enumerating, and
+// everything after - candidates, claim, bulk transfers, GET_DEVICE_ID - is
+// the same code as on Linux. The descriptor stays the app's: never closed
+// here, and no kernel driver is detached (Android does not allow it; the
+// app's claimInterface(force) already did).
 
 namespace ewr {
+
+#ifdef __ANDROID__
+    namespace {
+
+        std::mutex g_androidFdMutex;
+        std::vector<int> g_androidFds;
+
+    } // namespace
+
+    void SetAndroidUsbFds(const std::vector<int>& fds)
+    {
+        std::lock_guard<std::mutex> lock(g_androidFdMutex);
+        g_androidFds = fds;
+    }
+#endif
 
     namespace {
 
@@ -46,6 +70,8 @@ namespace ewr {
             unsigned char epIn = 0;
             unsigned char epOut = 0;
             bool printerClass = false;
+            // Android: the app opened the device; this is its wrapped handle.
+            libusb_device_handle* preopened = nullptr;
         };
 
         struct OpenInterface
@@ -53,6 +79,7 @@ namespace ewr {
             libusb_device_handle* handle = nullptr;
             int interfaceNumber = -1;
             bool detachedKernelDriver = false;
+            bool borrowed = false; // the handle is the app's: release, never close
         };
 
         class LibusbTransport final : public ITransport
@@ -251,6 +278,21 @@ namespace ewr {
 
         bool OpenCandidate(const LibusbCandidate& cand, OpenInterface& open)
         {
+            if (cand.preopened)
+            {
+                if (libusb_claim_interface(cand.preopened, cand.interfaceNumber) < 0)
+                {
+                    log::Log(log::Level::Warning, log::Stage::Detect, "usb.claim_failed",
+                             "[!] Failed to claim USB interface " + std::to_string(cand.interfaceNumber) + ".");
+                    return false;
+                }
+
+                open.handle = cand.preopened;
+                open.interfaceNumber = cand.interfaceNumber;
+                open.borrowed = true;
+                return true;
+            }
+
             libusb_device_handle* handle = nullptr;
             if (libusb_open(cand.device, &handle) != 0)
                 return false;
@@ -288,6 +330,12 @@ namespace ewr {
                 return;
 
             libusb_release_interface(open.handle, open.interfaceNumber);
+
+            if (open.borrowed)
+            {
+                open = OpenInterface{};
+                return;
+            }
 
             // Only hand the interface back to the kernel (CUPS) if we were the
             // ones who detached it; re-attaching a driver that was never bound
@@ -338,6 +386,9 @@ namespace ewr {
         public:
             explicit LibusbBackend(std::ostream& trace) : trace_(trace)
             {
+#ifdef __ANDROID__
+                libusb_set_option(nullptr, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+#endif
                 if (libusb_init(nullptr) < 0)
                 {
                     log::Log(log::Level::Error, log::Stage::Detect, "usb.libusb_init_failed", "Failed to initialize libusb.");
@@ -346,12 +397,37 @@ namespace ewr {
                 }
                 inited_ = true;
 
+#ifdef __ANDROID__
+                std::vector<int> fds;
+                {
+                    std::lock_guard<std::mutex> lock(g_androidFdMutex);
+                    fds = g_androidFds;
+                }
+
+                for (int fd : fds)
+                {
+                    libusb_device_handle* handle = nullptr;
+                    if (libusb_wrap_sys_device(nullptr, static_cast<intptr_t>(fd), &handle) == 0 && handle)
+                    {
+                        wrapped_.push_back(handle);
+                        wrappedDevices_.push_back(libusb_get_device(handle));
+                    }
+                    else
+                    {
+                        trace_ << "[!] The USB device the app handed over (fd " << fd << ") could not be used.\n";
+                    }
+                }
+
+                if (wrapped_.empty())
+                    initError_ = "No USB printer was handed over by the app: permission not granted, or none plugged in.";
+#else
                 deviceCount_ = libusb_get_device_list(nullptr, &devices_);
                 if (deviceCount_ < 0)
                 {
                     initError_ = "Failed to enumerate USB devices.";
                     devices_ = nullptr;
                 }
+#endif
             }
 
             ~LibusbBackend() override
@@ -359,6 +435,9 @@ namespace ewr {
                 Close();
                 if (devices_)
                     libusb_free_device_list(devices_, 1);
+                // Frees libusb's wrapper; the descriptor itself stays open.
+                for (libusb_device_handle* handle : wrapped_)
+                    libusb_close(handle);
                 if (inited_)
                     libusb_exit(nullptr);
             }
@@ -374,6 +453,19 @@ namespace ewr {
                 candidates_.clear();
                 if (devices_ && deviceCount_ > 0)
                     candidates_ = CollectCandidates(devices_, deviceCount_);
+
+                if (!wrappedDevices_.empty())
+                {
+                    candidates_ = CollectCandidates(wrappedDevices_.data(), static_cast<ssize_t>(wrappedDevices_.size()));
+                    for (LibusbCandidate& cand : candidates_)
+                    {
+                        for (size_t i = 0; i < wrappedDevices_.size(); ++i)
+                        {
+                            if (wrappedDevices_[i] == cand.device)
+                                cand.preopened = wrapped_[i];
+                        }
+                    }
+                }
 
                 std::vector<UsbCandidate> out;
                 for (std::size_t i = 0; i < candidates_.size(); ++i)
@@ -484,6 +576,8 @@ namespace ewr {
             bool inited_ = false;
             libusb_device** devices_ = nullptr;
             ssize_t deviceCount_ = 0;
+            std::vector<libusb_device_handle*> wrapped_;
+            std::vector<libusb_device*> wrappedDevices_;
             std::vector<LibusbCandidate> candidates_;
             OpenInterface open_;
             std::unique_ptr<LibusbTransport> transport_;

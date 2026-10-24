@@ -10014,6 +10014,35 @@ void test_c_abi_restore_all_needs_its_consent()
     ewr_session_close(session);
 }
 
+// What an app that downloads database.json itself checks before swapping.
+void test_c_abi_database_check()
+{
+    std::cout << "[TEST] test_c_abi_database_check" << std::endl;
+
+    char* json = nullptr;
+    CHECK(ewr_database_check("database.json", &json) == EWR_OK);
+    if (json)
+    {
+        const nlohmann::json out = nlohmann::json::parse(json);
+        CHECK(out["models"].get<int>() >= 1450);
+        CHECK(out["schema_version"] == 4);
+        ewr_string_free(json);
+    }
+
+    const fs::path bad = fs::temp_directory_path() / "ewr_not_a_database.json";
+    {
+        std::ofstream out(bad);
+        out << "{\"models\": {}}";
+    }
+    json = nullptr;
+    CHECK(ewr_database_check(bad.string().c_str(), &json) == EWR_ERR_DATABASE);
+    CHECK(json == nullptr);
+    CHECK(ewr_database_check("no/such/file.json", &json) == EWR_ERR_DATABASE);
+
+    std::error_code ec;
+    fs::remove(bad, ec);
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -10175,6 +10204,7 @@ int main()
     test_restore_all_plan_never_writes_identity();
     test_session_restore_all_runs_only_on_the_same_unit();
     test_c_abi_restore_all_needs_its_consent();
+    test_c_abi_database_check();
     test_log_carries_fields();
     test_json_never_leaks_minus_one();
     test_json_status_separates_unknown_from_zero();

@@ -9,10 +9,13 @@
 #include "ewr/paths.h"
 #include "ewr/session.h"
 #include "ewr/snmp_gateway.h"
+#include "ewr/updater.h"
+#include "ewr/usb.h"
 #include "ewr/version.h"
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -646,10 +649,52 @@ void ewr_session_set_backup_callback(ewr_session* session, ewr_backup_cb callbac
     session->backupUser = user;
 }
 
+int ewr_database_check(const char* path, char** out_json)
+{
+    if (!path || !*path || !out_json)
+        return EWR_ERR_INVALID_ARGUMENT;
+
+    *out_json = nullptr;
+
+    try
+    {
+        if (!ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema))
+            return EWR_ERR_DATABASE;
+
+        ewr::UniversalGenerator generator;
+        if (!generator.LoadDatabase(path) || generator.IsEmpty())
+            return EWR_ERR_DATABASE;
+
+        std::ifstream in(path);
+        const nlohmann::json root = nlohmann::json::parse(in, nullptr, false);
+        const int schema = (root.is_object() && root.contains("schema_version") && root["schema_version"].is_number_integer())
+            ? root["schema_version"].get<int>() : 0;
+
+        const nlohmann::json payload = { { "models", generator.GetAvailableModels().size() },
+                                         { "schema_version", schema } };
+        *out_json = DuplicateString(payload.dump());
+        return *out_json ? EWR_OK : EWR_ERR_FAILED;
+    }
+    catch (...)
+    {
+        return EWR_ERR_DATABASE;
+    }
+}
+
 void ewr_set_data_dir(const char* dir)
 {
     ewr::paths::SetDataDir(dir ? dir : "");
 }
+
+#if defined(__ANDROID__)
+void ewr_android_set_usb_fds(const int* fds, size_t count)
+{
+    std::vector<int> list;
+    for (size_t i = 0; fds && i < count; ++i)
+        list.push_back(fds[i]);
+    ewr::SetAndroidUsbFds(list);
+}
+#endif
 
 void ewr_session_set_interface(ewr_session* session, int candidate)
 {

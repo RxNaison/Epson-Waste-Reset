@@ -37,6 +37,11 @@ int main(void)
         return 1;
     }
     ewr_set_data_dir(NULL);
+    if (ewr_database_check(NULL, NULL) != EWR_ERR_INVALID_ARGUMENT)
+    {
+        printf("[FAIL] ewr_database_check accepted a NULL path\n");
+        return 1;
+    }
     if (strcmp(ewr_status_name(EWR_ERR_BAD_BACKUP), "bad_backup") != 0)
     {
         printf("[FAIL] EWR_ERR_BAD_BACKUP has no name\n");

@@ -172,10 +172,23 @@ EWR_API void ewr_session_set_confirm_callback(ewr_session* session, ewr_decision
  * crashes mid-write never sees. Set it to keep them before the write. */
 EWR_API void ewr_session_set_backup_callback(ewr_session* session, ewr_backup_cb callback, void* user);
 
+/* ABI 3. Whether the file at `path` is a database this EWR can load: the
+ * same check the built-in updater runs on a download before it swaps it in.
+ * For a host that downloads database.json itself. Needs no session.
+ * {"models": n, "schema_version": n}; EWR_ERR_DATABASE when it is not one. */
+EWR_API int ewr_database_check(const char* path, char** out_json);
+
 /* ABI 3. Where EWR writes ewr_trace.log, for every session in the process.
  * NULL or "" is the current directory, the default. Set it before opening a
  * session, from a folder the process may write: an app's private storage. */
 EWR_API void ewr_set_data_dir(const char* dir);
+
+#if defined(__ANDROID__)
+/* ABI 3, Android builds only. The printers the app opened through UsbManager
+ * (UsbDeviceConnection.getFileDescriptor()), for every session in the
+ * process. EWR never closes them. Call again whenever the set changes. */
+EWR_API void ewr_android_set_usb_fds(const int* fds, size_t count);
+#endif
 
 /* 1-based interface from ewr_list_interfaces; 0 (the default) is automatic. */
 EWR_API void ewr_session_set_interface(ewr_session* session, int candidate);

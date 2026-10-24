@@ -120,6 +120,13 @@ namespace ewr {
     // GET_DEVICE_ID control request. Read-only, no D4 traffic.
     DeviceIdQueryResult QueryPrinterDeviceId(bool appendTraceLog = false);
 
+#ifdef __ANDROID__
+    // The USB devices the app opened through UsbManager, as file descriptors
+    // it keeps open. Each device call wraps them afresh; an empty list means
+    // no printer is reachable over USB.
+    void SetAndroidUsbFds(const std::vector<int>& fds);
+#endif
+
     // Text from outside a device session, such as the network search, into
     // ewr_trace.log under the same start-fresh-or-append rule.
     void AppendTraceNote(const std::string& text, bool appendTraceLog = false);

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 # C is here for tests/c_header_check.c: the C ABI header has to keep
 # compiling as C, and only a C compiler can say so.
-project(EWR VERSION 1.5.1 LANGUAGES CXX C)
+project(EWR VERSION 1.6.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

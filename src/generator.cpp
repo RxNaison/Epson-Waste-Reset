@@ -13,6 +13,106 @@ namespace ewr {
 
     namespace {
 
+        std::vector<uint16_t> AddressList(const json& value)
+        {
+            std::vector<uint16_t> out;
+            if (!value.is_array())
+                return out;
+            for (const auto& a : value)
+            {
+                if (a.is_number_unsigned() && a.get<unsigned long>() <= 0xFFFF)
+                    out.push_back(a.get<uint16_t>());
+            }
+            return out;
+        }
+
+        std::map<std::string, std::vector<uint8_t>> LevelMap(const json& value)
+        {
+            std::map<std::string, std::vector<uint8_t>> out;
+            if (!value.is_object())
+                return out;
+            for (auto it = value.begin(); it != value.end(); ++it)
+            {
+                if (!it.value().is_array())
+                    continue;
+                std::vector<uint8_t> payload;
+                for (const auto& b : it.value())
+                {
+                    if (b.is_number_unsigned() && b.get<unsigned long>() <= 0xFF)
+                        payload.push_back(b.get<uint8_t>());
+                }
+                if (!payload.empty())
+                    out[it.key()] = std::move(payload);
+            }
+            return out;
+        }
+
+        void ParseMaintenanceFacts(const json& val, DbPrinterModel& model)
+        {
+            if (val.contains("cleaning") && val["cleaning"].is_object())
+            {
+                const json& c = val["cleaning"];
+                if (c.contains("clean"))
+                    model.cleaning.clean = LevelMap(c["clean"]);
+                if (c.contains("black"))
+                    model.cleaning.black = LevelMap(c["black"]);
+                if (c.contains("color"))
+                    model.cleaning.color = LevelMap(c["color"]);
+                if (c.contains("charge"))
+                    model.cleaning.charge = LevelMap(c["charge"]);
+            }
+
+            if (val.contains("serial"))
+                model.serial_addresses = AddressList(val["serial"]);
+
+            if (val.contains("identity") && val["identity"].is_object())
+            {
+                for (auto it = val["identity"].begin(); it != val["identity"].end(); ++it)
+                {
+                    for (uint16_t a : AddressList(it.value()))
+                        model.identity_addresses.push_back(a);
+                }
+            }
+
+            if (val.contains("report") && val["report"].is_array())
+            {
+                for (const auto& r : val["report"])
+                {
+                    if (!r.is_object() || !r.contains("key") || !r["key"].is_string())
+                        continue;
+                    ReportCounter counter;
+                    counter.key = r["key"].get<std::string>();
+                    if (r.contains("addresses"))
+                        counter.addresses = AddressList(r["addresses"]);
+                    if (!counter.addresses.empty() && counter.addresses.size() <= 4)
+                        model.report.push_back(std::move(counter));
+                }
+            }
+
+            if (val.contains("first_use"))
+                model.first_use = AddressList(val["first_use"]);
+
+            if (val.contains("fatal") && val["fatal"].is_array())
+            {
+                for (const auto& f : val["fatal"])
+                {
+                    if (!f.is_object())
+                        continue;
+                    FatalSlot slot;
+                    slot.kind = (f.contains("kind") && f["kind"].is_string()) ? f["kind"].get<std::string>() : "general";
+                    slot.slot = (f.contains("slot") && f["slot"].is_number_integer()) ? f["slot"].get<int>() : 1;
+                    if (f.contains("addresses"))
+                        slot.addresses = AddressList(f["addresses"]);
+                    if (!slot.addresses.empty() && slot.addresses.size() <= 2)
+                        model.fatal.push_back(std::move(slot));
+                }
+            }
+        }
+
+    } // namespace
+
+    namespace {
+
         // Schema 4 'spec' indirection: an entry inherits a shared property
         // group and overrides only what differs, so 1400+ models stop repeating
         // identical key/address tables. The merge is shallow on purpose -
@@ -335,6 +435,25 @@ namespace ewr {
                             if (!ig.addresses.empty())
                                 model.ink_groups.push_back(std::move(ig));
                         }
+                    }
+
+                    // Never what decides whether the model loads: a malformed
+                    // maintenance key costs the maintenance, not the reset.
+                    try
+                    {
+                        ParseMaintenanceFacts(val, model);
+                    }
+                    catch (const json::exception& e)
+                    {
+                        ewr::log::Log(ewr::log::Level::Warning, ewr::log::Stage::Database, "db.maintenance_skipped",
+                                      "[!] " + key + ": maintenance data in database.json is malformed and was"
+                                      " skipped (" + e.what() + ").");
+                        model.cleaning = CleaningSpec();
+                        model.serial_addresses.clear();
+                        model.identity_addresses.clear();
+                        model.report.clear();
+                        model.first_use.clear();
+                        model.fatal.clear();
                     }
 
                     fresh[key] = std::move(model);

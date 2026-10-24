@@ -9068,6 +9068,67 @@ void test_c_abi_restore_refuses_bad_files()
     ewr_session_close(session);
 }
 
+// The database's maintenance facts: present where they should be, and shaped
+// so nothing downstream has to guess.
+void test_database_maintenance_facts()
+{
+    std::cout << "[TEST] test_database_maintenance_facts" << std::endl;
+
+    ewr::UniversalGenerator generator;
+    CHECK(generator.LoadDatabase("database.json"));
+    const std::vector<ewr::DbPrinterModel> models = generator.GetAvailableModels();
+    CHECK(models.size() >= 1450); // a malformed new key must never drop a model
+
+    size_t withCleaning = 0;
+    size_t withSerial = 0;
+    size_t withReport = 0;
+    bool shapes = true;
+
+    for (const auto& model : models)
+    {
+        if (!model.cleaning.Empty())
+            withCleaning++;
+        if (!model.serial_addresses.empty())
+            withSerial++;
+        if (!model.report.empty())
+            withReport++;
+
+        for (const auto* levels : { &model.cleaning.clean, &model.cleaning.black,
+                                    &model.cleaning.color, &model.cleaning.charge })
+        {
+            for (const auto& level : *levels)
+            {
+                shapes = shapes && !level.second.empty() && level.second.size() <= 2
+                         && (level.first == "gentle" || level.first == "normal"
+                             || level.first == "medium" || level.first == "strong");
+            }
+        }
+
+        shapes = shapes && model.serial_addresses.size() <= 32;
+        for (const auto& counter : model.report)
+            shapes = shapes && !counter.key.empty() && !counter.addresses.empty() && counter.addresses.size() <= 4;
+        for (const auto& slot : model.fatal)
+            shapes = shapes && slot.slot >= 1 && !slot.addresses.empty() && slot.addresses.size() <= 2;
+    }
+
+    CHECK(shapes);
+    CHECK(withCleaning >= 800);
+    CHECK(withSerial >= 700);
+    CHECK(withReport >= 800);
+
+    // The R220 this project is verified on: cleaning 0x02, ink charge 0x07,
+    // and its head ID bytes are kept out of any full restore.
+    for (const auto& model : models)
+    {
+        if (model.name != "R220")
+            continue;
+        CHECK(model.cleaning.clean.count("normal") && model.cleaning.clean.at("normal") == std::vector<uint8_t>{ 0x02 });
+        CHECK(model.cleaning.charge.count("normal") && model.cleaning.charge.at("normal") == std::vector<uint8_t>{ 0x07 });
+        CHECK(std::find(model.identity_addresses.begin(), model.identity_addresses.end(), 0x42)
+              != model.identity_addresses.end());
+    }
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -9092,6 +9153,7 @@ int main()
     test_database_carries_no_recovery_channel();
     test_generator_local_db();
     test_database_integrity();
+    test_database_maintenance_facts();
     test_packet_structure_integrity();
     test_byte_parity();
     test_executor_success_path();

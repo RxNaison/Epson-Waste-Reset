@@ -334,6 +334,100 @@ def _parse_close(close_el, notes, spec_name):
     return out
 
 
+# Maintenance and identity facts, v1.6. Facts only - addresses, payload
+# bytes, slot numbers - never ez-reset's own wording: a label becomes a key
+# ("Total print page counter" -> "total_print_page_counter") and the exe
+# names it in its own words.
+
+_CLEAN_LEVELS = ("gentle", "normal", "medium", "strong")
+
+
+def _report_key(name):
+    """'Ink replacement counter %-% Black % (1S)' -> 'ink_replacement_counter_black_1s'."""
+    words = re.sub(r"[^a-z0-9]+", " ", name.lower().replace("%", " ")).split()
+    return "_".join(words)
+
+
+def _addresses(el):
+    if el is None:
+        return []
+    vals, bad = parse_hex_tokens(el.text)
+    return [] if bad else vals
+
+
+def _parse_cleaning(el, notes, spec_name):
+    """<cleaning> of 'service' type, the keyed factory command 0x84:
+
+        {"clean": {"normal": [2], "strong": [3]}, "charge": {"normal": [7]},
+         "black": {"normal": [7, 0]}, "color": {"normal": [8, 0]}}
+
+    Each value is the command's payload, as listed. Other types ("classic",
+    "startcl") are other commands and are left out.
+    """
+    if el is None:
+        return None
+    out = {}
+    for item in el:
+        if (item.findtext("type") or "").strip() != "service":
+            continue
+        data, bad = parse_hex_tokens(item.findtext("data"))
+        if bad or not data or any(b > 0xFF for b in data):
+            notes.append(spec_name + ": cleaning data not understood " + repr(item.findtext("data")))
+            continue
+        words = [w for w in re.split(r"[\s%]+", (item.findtext("name") or "").lower()) if w]
+        level = next((w for w in words if w in _CLEAN_LEVELS), None)
+        if level is None:
+            notes.append(spec_name + ": cleaning level not understood " + repr(item.findtext("name")))
+            continue
+        if item.tag == "charging":
+            group = "charge"
+        elif "blk" in words:
+            group = "black"
+        elif "ymc" in words:
+            group = "color"
+        else:
+            group = "clean"
+        out.setdefault(group, {})[level] = data
+    return out or None
+
+
+def _parse_report(info_el, notes, spec_name):
+    """<information><report>: the counters a printer keeps about itself.
+
+    Returns (report, first_use, fatal). Only entries read by plain
+    registers are kept; the newer 'directive' reads use other commands.
+    Registers are listed least significant first, as the waste counters are.
+    """
+    report, first_use, fatal = [], [], []
+    rep = info_el.find("report") if info_el is not None else None
+    if rep is None:
+        return report, first_use, fatal
+
+    for item in rep:
+        regs = _addresses(item.find("registers"))
+        if not regs:
+            continue
+        name = (item.findtext("name") or "").strip()
+        if item.tag == "period":
+            if not first_use and "first ti" in name.lower():
+                first_use = regs
+            continue
+        if item.tag == "fatals":
+            m = re.search(r"%\s*(\d+)\s*$", name)
+            fatal.append({
+                "kind": (item.findtext("filter") or "").strip().lower() or "general",
+                "slot": int(m.group(1)) if m else 1,
+                "addresses": regs,
+            })
+            continue
+        if item.tag == "number" and name:
+            report.append({"key": _report_key(name), "addresses": regs})
+
+    report.sort(key=lambda r: r["key"])
+    fatal.sort(key=lambda f: (f["kind"], f["slot"]))
+    return report, first_use, fatal
+
+
 def extract_ezreset(raw_bytes):
     root = _load_xml(raw_bytes)
     version = root.get("version")
@@ -422,6 +516,39 @@ def extract_ezreset(raw_bytes):
                         counters.append(c)
                 if counters:
                     spec["counters"] = counters
+
+        cleaning = _parse_cleaning(el.find("cleaning"), notes, name)
+        if cleaning:
+            spec["cleaning"] = cleaning
+
+        serial = _addresses(el.find("serial"))
+        if serial:
+            spec["serial"] = serial
+
+        # Bytes that make this unit this unit: a full restore never writes
+        # them. A head ID row reads as "<start> <length> ..."; the list is
+        # one of bytes never to write, so the wider reading is the one kept.
+        identity = {}
+        head, _ = parse_hex_tokens(el.findtext("headid"))
+        if head and len(head) % 4 == 0:
+            ids = set()
+            for start, length in zip(head[0::4], head[1::4]):
+                ids.update(range(start, start + length) if 1 <= length <= 16 else [start])
+            identity["head_id"] = sorted(ids)
+        for tag, key in (("usb-id", "usb_id"), ("net-id", "net_id")):
+            ids = _addresses(el.find(tag))
+            if ids:
+                identity[key] = ids
+        if identity:
+            spec["identity"] = identity
+
+        report, first_use, fatal = _parse_report(el.find("information"), notes, name)
+        if report:
+            spec["report"] = report
+        if first_use:
+            spec["first_use"] = first_use
+        if fatal:
+            spec["fatal"] = fatal
 
         if spec:
             specs[name] = spec
@@ -739,6 +866,12 @@ def _apply_ezreset(entry, model, spec_name, spec, rows, p):
     if "close" in spec and not entry.get("close"):
         entry["close"] = copy.deepcopy(spec["close"])
         added.append("close")
+    # Maintenance and identity facts (v1.6): read by the exe's --info,
+    # --head-clean and the full restore's deny-list, never by a reset.
+    for key in ("cleaning", "serial", "identity", "report", "first_use", "fatal"):
+        if key in spec and key not in entry:
+            entry[key] = copy.deepcopy(spec[key])
+            added.append(key)
     if "counters" in spec:
         n = _attach_counters(entry, spec["counters"])
         if n:

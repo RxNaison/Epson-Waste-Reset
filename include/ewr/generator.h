@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <map>
 #include <unordered_map>
 #include <cstdint>
 #include <mutex>
@@ -153,6 +154,38 @@ namespace ewr {
         std::vector<uint8_t> reset_values; // parallel to addresses; 0x00 == full
     };
 
+    // What the database knows of a model's own maintenance commands. Each
+    // value is the payload of the keyed factory command 0x84, as listed; only
+    // a one-byte payload is ever sent, because that is the only form verified
+    // on hardware.
+    struct CleaningSpec
+    {
+        // "gentle", "normal", "medium", "strong" -> payload.
+        std::map<std::string, std::vector<uint8_t>> clean;  // every color
+        std::map<std::string, std::vector<uint8_t>> black;
+        std::map<std::string, std::vector<uint8_t>> color;
+        std::map<std::string, std::vector<uint8_t>> charge; // ink charge: the power clean
+
+        bool Empty() const { return clean.empty() && black.empty() && color.empty() && charge.empty(); }
+    };
+
+    // A counter the printer keeps about itself: pages, cleanings, ink swaps.
+    // `key` is the database's ("total_print_page_counter"), never shown as
+    // is; the bytes are least significant first, like the waste counters.
+    struct ReportCounter
+    {
+        std::string key;
+        std::vector<uint16_t> addresses;
+    };
+
+    // Where the printer keeps the code of one of its last fatal errors.
+    struct FatalSlot
+    {
+        std::string kind; // "printer", "scanner", "general", "battery"
+        int slot = 1;     // 1 = the most recent
+        std::vector<uint16_t> addresses;
+    };
+
     // database.json spells a write keyword as one code point per byte
     // ("\u0097&\u0086..."), but the JSON parser hands back UTF-8, which sent
     // 0x97 as c2 97 and made the SC-P600's 8-byte keyword 12 (#59). False on a
@@ -177,6 +210,16 @@ namespace ewr {
         // Independent of pad_groups: a model can reset waste ink, cartridge
         // ink, both, or neither.
         std::vector<InkGroup> ink_groups;
+
+        // Maintenance and identity facts. None of them is ever part of
+        // a reset: --info reads them, --head-clean sends them, and a full
+        // restore refuses to write the identity bytes.
+        CleaningSpec cleaning;
+        std::vector<uint16_t> serial_addresses;   // ASCII, one character per byte
+        std::vector<uint16_t> identity_addresses; // head ID, USB ID, MAC
+        std::vector<ReportCounter> report;
+        std::vector<uint16_t> first_use;
+        std::vector<FatalSlot> fatal;
 
         // Marketing and family names ("ET-2800 Series", "L3260") that resolve
         // to this entry. Matching and display only, never the write path.

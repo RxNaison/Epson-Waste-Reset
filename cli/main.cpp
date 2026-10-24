@@ -272,8 +272,9 @@ static void PrintUsage()
               << "                   disable the automatic fallback. For composite\n"
               << "                   devices where detection picks the wrong interface.\n"
               << "  --ip <address>   Reach a printer on the network instead of USB, over SNMP\n"
-              << "                   (UDP 161). Works with --status, --dry-run and the waste\n"
-              << "                   ink pad reset, with the same gates and read-back as USB.\n"
+              << "                   (UDP 161). Works with --status, --dry-run, the waste ink\n"
+              << "                   pad reset, --restore, --info and maintenance, with the\n"
+              << "                   same gates and read-back as USB.\n"
               << "  --ip auto        Search the network and pick the printer from a list,\n"
               << "                   even when another one is on USB. Asks at the keyboard,\n"
               << "                   so not with --yes or --json: pass the address from\n"
@@ -325,9 +326,10 @@ static void PrintUsage()
               << "                   finish the re-initialization it starts (Windows only).\n"
               << "                   Diagnostic switch for hardware testing.\n"
               << "  --find-addresses Find the waste counters on a model the database has no\n"
-              << "                   addresses for. Reads the EEPROM three times and asks you\n"
-              << "                   to run a head cleaning between reads; the bytes that rise\n"
-              << "                   every time are the counters. Read-only.\n"
+              << "                   addresses for. Reads the EEPROM three times with a head\n"
+              << "                   cleaning between reads - EWR runs them, or you do from the\n"
+              << "                   panel - and reports the bytes that rise every time as the\n"
+              << "                   counters. No EEPROM byte is written.\n"
               << "  --find-key       For a printer the database has no entry for: try every\n"
               << "                   read key in the database and report which one, if any,\n"
               << "                   the printer answers. Takes no --model. Read-only.\n"
@@ -3278,15 +3280,17 @@ int main(int argc, char* argv[])
 
         const std::vector<ewr::ByteTrend> trends = ewr::FindTrendingBytes(snapshots);
 
+        // The shape docs/json-output.md has promised since the command had no --json.
         nlohmann::json readings = nlohmann::json::array();
         for (const ewr::ByteTrend& t : trends)
-            readings.push_back({ { "addresses", t.addresses }, { "values", t.values },
-                                 { "deltas", t.deltas }, { "rising", t.rising } });
+            readings.push_back({ { "addresses", t.addresses }, { "pair", t.IsPair() }, { "values", t.values },
+                                 { "deltas", t.deltas }, { "direction", t.rising ? "rising" : "falling" } });
         g_jsonData["model"] = selected.smartModel.name;
-        g_jsonData["passes"] = snapshots.size();
-        g_jsonData["cleanings"] = autoClean ? "ewr" : "panel";
-        g_jsonData["readings"] = readings;
         g_jsonData["file"] = nullptr;
+        g_jsonData["passes"] = snapshots.size();
+        g_jsonData["short_passes"] = shortPasses;
+        g_jsonData["cleanings"] = autoClean ? "ewr" : "panel";
+        g_jsonData["trends"] = readings;
 
         if (shortPasses > 0)
         {

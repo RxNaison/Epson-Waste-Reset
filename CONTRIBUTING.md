@@ -66,6 +66,30 @@ padding on older models. If an upstream source knows the model too, the
 build fills in anything you left out: counter maps, service limits,
 detection aliases, the commit step.
 
+### Maintenance and identity keys (1.6)
+
+The build fills these in from ez-reset where it knows the model. None of them is
+ever part of a reset, and EWR before 1.6 ignores them:
+
+| Key | What it is | Used by |
+| --- | --- | --- |
+| `cleaning` | `{"clean": {"normal": [2], ...}, "black": {...}, "color": {...}, "charge": {"normal": [7]}}` - the payload of the keyed maintenance command (action `0x84`) per level. Only a one-byte payload is ever sent, and `0xFF` never is. | `--head-clean`, `--power-clean` |
+| `serial` | The EEPROM addresses of the serial number, one ASCII character each. | `--info`, the restore's unit check |
+| `identity` | `{"head_id": [...], "usb_id": [...], "net_id": [...]}` - bytes that make the unit this unit. `--restore-all` never writes them. | `--restore-all` |
+| `report` | `[{"key": "total_print_page_counter", "addresses": [...]}]` - the printer's own counters, least significant byte first. | `--info` |
+| `first_use` | The addresses of the date the printer was first used. | `--info` |
+| `fatal` | `[{"kind": "printer", "slot": 1, "addresses": [...]}]` - where the last fatal error codes are kept. | `--info` |
+
+A malformed one of these costs the maintenance, never the model: the entry
+still loads and resets. Fill a gap the same way as any other value - by hand,
+with a source.
+
+Models read in a mode that takes no key (the SX110 family's JIG mode,
+`"access": "jig"`) live under a top-level `"keyless_models"`, not `"models"`:
+EWR before 1.6 reads only `"models"` and would load such an entry as a keyed
+model with key 0. Add one there, and never put `"access": "jig"` under
+`"models"`.
+
 ### Un-pinning a value
 
 To deliberately re-pull a field from upstream, delete the field (or the whole

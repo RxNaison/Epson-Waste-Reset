@@ -1,5 +1,5 @@
 # EWR (Epson Waste Reset)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-blue)
 ![C++](https://img.shields.io/badge/language-C++17-orange)
 ![License](https://img.shields.io/badge/license-Apache_License_2.0-green)
 
@@ -16,12 +16,15 @@ EWR bypasses the need to pay for sketchy third-party reset keys (like WIC Reset)
 ## Features
 
 * **Reads before it writes, and verifies after.** Every reset runs the same lifecycle: read the current counters, refuse to continue if the printer reports a state that makes the reset pointless or unsafe, ask you once, write, then read the counters back and compare. You see the numbers move instead of trusting an acknowledgement.
+* **Every write can be undone.** Before the first byte is written, EWR saves the bytes it is about to overwrite to `backups/`. `--restore` puts them back - from that backup, or from an `--dump` file - through the same gates and read-back as a reset.
+* **Printer maintenance, too.** Nozzle check, head cleaning, power cleaning and the printer's own counters (pages, cleanings, firmware, serial number), over USB or the network - behind flags and the API, so a double-click still does exactly one thing: the reset.
 * **Smart Protocol Engine:** Constructs exact EEPROM write packets (`|B`) on the fly for your specific model. It manages the IEEE 1284.4 (D4) credit system properly, so nothing overflows a buffer or locks the printer up.
 * **~1450 printers**, from Stylus Photo R-series to the current ET / L / XP / WF lines. Cartridge ink levels can be reset too on models that expose a per-colour map.
 * **OTA Database Sync:** The printer database refreshes itself at startup, before anything is read from or written to the printer, so a database fix applies to the run that fetched it and the database in use never changes underneath a reset. The full database also ships in the download - EWR works offline out of the box.
 * **Cross-Platform Core:**
-  * **Windows:** Native Win32 `SetupAPI` with asynchronous `OVERLAPPED` I/O to safely drain the Windows Print Spooler buffers, plus a statically linked `libusb` for the vendor-specific interfaces `usbprint.sys` cannot reach - on ET-2xxx units the maintenance engine lives on one of those. Both transports run in one pass, `usbprint.sys` first. Zero custom drivers required.
-  * **Linux & macOS:** Uses `libusb` to automatically detach the kernel driver (CUPS) for exclusive, raw hardware access.
+  * **Windows (x64 and ARM64):** Native Win32 `SetupAPI` with asynchronous `OVERLAPPED` I/O to safely drain the Windows Print Spooler buffers, plus a statically linked `libusb` for the vendor-specific interfaces `usbprint.sys` cannot reach - on ET-2xxx units the maintenance engine lives on one of those. Both transports run in one pass, `usbprint.sys` first. Zero custom drivers required.
+  * **Linux (x86_64, aarch64, armhf - a Raspberry Pi too) & macOS (one universal binary for Intel and Apple Silicon):** Uses `libusb` to automatically detach the kernel driver (CUPS) for exclusive, raw hardware access. `.deb` and `.rpm` packages install a udev rule, so no `sudo` is needed.
+  * **Android:** an app that reaches the printer over an OTG cable or Wi-Fi, built on the same library.
 * **Zero Hardcoded PIDs:** Scans your OS USB tree to find connected Epson printers and identifies them from the IEEE 1284 device ID they report.
 * **A trace log for every run.** `ewr_trace.log` records every byte in both directions next to the binary. It is what makes a bug report solvable.
 * **Replay Fallback:** If your printer is too new for the database, EWR can still parse and execute a raw Wireshark dump you supply (stripping USBPcap headers automatically).
@@ -35,7 +38,7 @@ EWR bypasses the need to pay for sketchy third-party reset keys (like WIC Reset)
    * **Linux / macOS:** `sudo ./ewr` *(raw USB access requires root)*
 4. EWR detects the printer and offers the matching database entry. Press Enter to accept it, or type part of a model name to search for another.
 5. It reads the printer's status and current counter values and prints them, then asks for confirmation once. Answer `y`.
-6. It writes, then reads the counters back and tells you whether every one now holds its reset value.
+6. It saves a backup of the bytes it is about to overwrite to `backups/`, writes, then reads the counters back and tells you whether every one now holds its reset value.
 7. **Turn the printer off and back on with its physical power button** to commit the change.
 
 No internet connection is needed - the database ships in the download. When EWR can reach GitHub it picks up database updates at startup.
@@ -48,6 +51,8 @@ Download EWR only from the [Releases page](https://github.com/RxNaison/Epson-Was
 gh attestation verify EWR-v1.5.1-win.zip -R RxNaison/Epson-Waste-Reset
 ```
 
+The same works for every archive and package: `EWR-<tag>-win.zip`, `-win-arm64.zip`, `-linux.tar.gz`, `-linux-aarch64.tar.gz`, `-linux-armhf.tar.gz`, `-macos-universal.tar.gz`, `-android.apk`, the `.deb` and `.rpm` packages, and the `EWR-SDK-*` archives.
+
 `✓ Verification succeeded!` means the file is byte for byte what this repository's release workflow built, and its `Build workflow` line ends in the tag it was built from (`@refs/tags/v1.5.1`) - check that it is the version you meant to download. A modified file fails with `HTTP 404: Not Found`: no attestation exists for its contents. If an archive from v1.4.1 or later fails, don't run it. Releases before v1.4.1 have no attestation and fail the same way, so the check cannot vouch for them. This is not code signing: Windows may still warn that the app is unrecognized.
 
 ### Command-line options
@@ -59,12 +64,18 @@ Running with no options is the supported path. These exist for diagnosis and for
 | `--status`, `-s` | Read-only: printer status, ink levels and waste counter values. Sends no writes. |
 | `--list`, `-l` | List every Epson USB interface, and every Epson printer that answers on the network, with its IEEE 1284 device ID and database match, then exit. Read-only. |
 | `--model <name>` | Skip the menu. Takes the exact name, an alias, or the name the printer reports (`--model "EPSON ET-2803 Series"`). |
-| `--ip <address>` | Reach a printer on the network instead of USB, over SNMP (UDP 161): `ewr --ip 192.168.1.100`. Works with `--status`, `--dry-run` and the waste ink pad reset, with the same gates, confirmation and read-back as USB. Replay dumps and the other modes still need USB. Many recent models lock the EEPROM over the network but not over USB; EWR says so and stops before writing anything. |
+| `--ip <address>` | Reach a printer on the network instead of USB, over SNMP (UDP 161): `ewr --ip 192.168.1.100`. Works with `--status`, `--dry-run`, the waste ink pad reset, `--restore`, `--info` and the maintenance commands, with the same gates, confirmation and read-back as USB. Replay dumps, the cartridge ink reset, `--dump` and the read-key search still need USB. Many recent models lock the EEPROM over the network but not over USB; EWR says so and stops before writing anything. |
 | `--ip auto` | Search the network and pick the printer from a list, even when another printer is on USB. It asks at the keyboard, so it does not combine with `--yes` or `--json`: pass the address from `--list` instead. |
 | `--interface <n>` | Pin the run to interface `<n>` from `--list` and disable the automatic fallback. |
 | `--dry-run` | Detect, read, and show exactly what a reset *would* write - then stop. |
-| `--dump` | Read the EEPROM into a timestamped file. Dump twice around a change and diff to map an unknown printer. |
-| `--find-addresses` | For a model with no reset addresses yet: read the EEPROM three times, asking you to run a head cleaning between reads, and report the bytes that rise every time. Read-only. |
+| `--dump` | Read the EEPROM into a timestamped file. Dump twice around a change and diff to map an unknown printer. `--full` reads every byte up to the model's memory limit instead of the low page. |
+| `--restore <file>` | Undo a write: put back what a backup from `backups/`, or an `--dump` file, holds of this model's counter bytes - only those, only the ones that differ. Same gates, confirmation and read-back as a reset; `--dry-run` shows the plan. |
+| `--info` | Read-only: firmware version, serial number, the printer's own counters (pages printed, cleanings, ink changes, scans) and the codes of its last fatal errors, where the database knows them. |
+| `--nozzle-check` | Print the nozzle check pattern. Load plain paper. `--nozzle-check alt` asks for the alternate pattern some models print. |
+| `--head-clean [level]` | A head cleaning: `gentle`, `normal` (the default), `medium` or `strong`, as far as the model lists them. `--clean-group black` or `color` cleans only those nozzles. Uses ink, and the ink goes into the waste pads. |
+| `--power-clean` | The ink charge: a much stronger cleaning that uses a lot of ink. Only when normal cleanings did not clear the nozzles. Asks you to type `charge`. |
+| `--print-data` | Send a cleaning as print data (ESC/P2 remote mode) even where the model has its own maintenance command - for a printer that refuses that one. |
+| `--find-addresses` | For a model with no reset addresses yet: read the EEPROM three times with a head cleaning between reads - EWR runs them, or you do from the panel - and report the bytes that rise every time. No EEPROM byte is written. |
 | `--find-key` | For a printer the database has no entry for: try every read key in the database and report which one, if any, the printer answers. Takes no `--model`. Read-only. |
 | `--yes`, `-y` | Answer the reset confirmation with yes, for callers driving EWR non-interactively. See below. |
 | `--force-yes` | `--yes`, and overrule the gates that would stop it: a model mismatch, a printer error, a database conflict. Last resort. |
@@ -171,6 +182,70 @@ cartridge will report full and can run dry mid-print, which damages the print he
 only holds on printers that keep ink levels in their own EEPROM: where the cartridge carries a
 smart chip, the firmware treats the chip as the truth and writes the EEPROM back from it.
 
+### Undoing a reset: backups and `--restore`
+
+Every reset - and every restore - first saves the bytes it is about to
+overwrite, as the preflight read them, to `backups/` next to `ewr` (or to your
+user folder when EWR cannot write there: `%LOCALAPPDATA%\EWR`,
+`~/.local/share/ewr`, `~/Library/Application Support/EWR`). The path is printed
+before the first write. If the backup cannot be saved, or the printer did not
+answer for every byte, EWR stops and asks rather than writing something it
+could not undo.
+
+```bash
+ewr --restore backups/L3150_X5NA012345_20261024T183651Z.json --dry-run   # what it would write
+ewr --restore backups/L3150_X5NA012345_20261024T183651Z.json             # put the bytes back
+ewr --restore ewr_dump_L3150_1736900000.txt                              # from a dump, any version
+```
+
+A restore writes only the bytes a reset of that model writes - its waste and
+ink counters - and only those that differ from what the printer holds now, so
+it is never more of a write than a reset. It names the bytes it leaves alone
+and why. A file from another model is refused; one from another printer of the
+same model (a different serial number) asks first. A dump made before 1.6
+stops at `0xFF`, so on models with counters above that the restore says which
+bytes it cannot put back.
+
+Restoring an old backup puts the counters back where they were: a printer whose
+pads were full before the reset will say so again.
+
+### Maintenance: nozzle check and head cleaning
+
+```bash
+ewr --nozzle-check                 # print the pattern (load plain paper)
+ewr --head-clean                   # a normal cleaning
+ewr --head-clean strong --clean-group black
+ewr --power-clean                  # the ink charge - a lot of ink
+ewr --info                         # firmware, serial, page and cleaning counters
+```
+
+These write no EEPROM byte, but they act on the printer: a cleaning uses ink
+and fills the waste pads. So they run the way a reset does - the printer's
+state is read first, a printer that reports an error is not sent anything
+(a cleaning with an empty cartridge draws air into the head), you are asked
+once, the command is sent exactly once, and EWR watches the printer's status
+until it is idle again, then shows what the cleaning did to the pad counters.
+A printer whose pads already count as full refuses maintenance: reset first.
+
+Where the model's database entry lists its cleaning levels, EWR uses the
+printer's own maintenance command; otherwise it sends the cleaning as print
+data (ESC/P2 remote mode), which has only the printer's normal cleaning. Over
+the network that goes to the printer's raw print port (TCP 9100).
+
+### Other platforms
+
+* **Linux packages:** `ewr_<version>_<arch>.deb` and `ewr-<version>.<arch>.rpm`
+  for `amd64`/`x86_64`, `arm64`/`aarch64` and `armhf`/`armv7hl`. They install
+  `/usr/bin/ewr`, the database and a udev rule that lets the logged-in user
+  reach an Epson printer without `sudo`. `ewr-dev`/`ewr-devel` carries the C API.
+* **Raspberry Pi:** the `linux-armhf` (32-bit) or `linux-aarch64` (64-bit)
+  archive, or the matching package.
+* **macOS:** one universal binary for Intel and Apple Silicon Macs.
+* **Android 8.0 or newer (`EWR-<tag>-android.apk`):** connect the printer with
+  a USB OTG cable, or reach it over Wi-Fi. Plugging the printer in offers to open EWR.
+  The app does what the command line does - status, reset, backups and
+  restore, maintenance, info - with the same gates and confirmations.
+
 ### Overriding the gates: `--force-yes`
 
 `--force-yes` is `--yes` plus the two refusals above: it writes to a model the printer did not
@@ -206,9 +281,10 @@ If the printer does not answer, reports as busy, or the reset fails, try these b
 ## Building from Source
 
 ### Prerequisites
-* **Windows:** Visual Studio with MSVC C++ build tools. `libusb` is fetched and built by CMake, so the first configure needs `git` and a network connection; it is then linked statically and `ewr.exe` ships alone.
-* **Linux (Arch/Debian):** `cmake`, `gcc`, `pkgconf`, `libusb-1.0-dev`, and `libcurl4-openssl-dev`.
-* **macOS:** `brew install cmake libusb curl pkgconf`
+* **Windows (x64 or ARM64):** Visual Studio with MSVC C++ build tools. `libusb` is fetched and built by CMake, so the first configure needs `git` and a network connection; it is then linked statically and `ewr.exe` ships alone.
+* **Linux (Arch/Debian, any architecture):** `cmake`, `gcc`, `git`, `pkgconf` and `libcurl4-openssl-dev`. `libusb-1.0-dev` too, unless you pass `-DEWR_BUNDLED_LIBUSB=ON`, which builds the pinned libusb and links it statically as the releases do.
+* **macOS:** `brew install cmake pkgconf` - libusb is built from the pinned source and libcurl comes with the system. Add `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"` for a universal binary.
+* **Android:** Android Studio, or the SDK with NDK `27.0.12077973` and JDK 21: `cd android && ./gradlew assembleDebug`. The app builds the library from this repository; nothing is copied.
 
 ```bash
 # 1. Generate the build files
@@ -227,6 +303,8 @@ cmake -B build -DEWR_BUILD_TESTS=ON
 cmake --build build --config Release
 ctest --test-dir build --output-on-failure -C Release
 ```
+
+`-DEWR_RESTORE_ALL=ON` adds `--restore-all`, which writes every byte of a dump of the same printer back, not only its counters. It is off in releases until it has been verified on more hardware.
 
 On macOS the downloaded binary is quarantined by Gatekeeper. Clear it with `xattr -d com.apple.quarantine ewr`, or right-click the binary and choose **Open**.
 
@@ -256,7 +334,7 @@ Either way, attach `ewr_trace.log` to an issue: it records how every key was ans
 
 Around 113 database entries carry a working read key but no reset addresses - EWR can read those printers, it just does not know which bytes hold the waste counter. They appear in the menu as `(no reset addresses yet - read-only)`.
 
-`--find-addresses` goes looking. It reads the EEPROM three times and asks you to run a head cleaning from the printer's own panel between reads, because a cleaning is the one action guaranteed to move the waste counter:
+`--find-addresses` goes looking. It reads the EEPROM three times with a head cleaning between reads, because a cleaning is the one action guaranteed to move the waste counter. EWR offers to run the cleanings itself; answer `n` to start each one from the printer's panel instead:
 
 ```
 ewr --model ET-M1180 --find-addresses --no-update
@@ -264,7 +342,7 @@ ewr --model ET-M1180 --find-addresses --no-update
 
 Bytes that move the **same way after both** cleanings are reported, rising or falling, with their three readings side by side; a byte that moves only once is a timer or a page count and is dropped. A waste counter only ever rises, so the rising rows are the candidates and a falling one is something else - an ink level, a countdown. Two intervals is the minimum that tells those apart, which is why it takes three reads. Little-endian pairs are handled, so a low byte rolling over into its neighbour is reported as one 16-bit counter rather than discarded for falling. Nothing is written to the printer at any point, and the result is saved as `<Model>-found-addresses.json`.
 
-Budget around twenty minutes: a full read of the low page takes a few minutes on older models, and you run it three times with two cleanings in between. A cleaning also uses real ink and pushes the waste counter up.
+Budget a few minutes: a read of the low page takes about a minute and a half on older models, and seconds where the printer answers range reads; it runs three times with two cleanings in between. A cleaning also uses real ink and pushes the waste counter up.
 
 **This records readings, not a reset plan.** The saved file's `pad_groups` is empty on purpose: which of these is a waste counter, and what it resets to, is a judgement no dump can make - some pad groups reset certain bytes to `0x5E` (94) rather than 0. Open an issue or a pull request with the file rather than writing anything back blind.
 

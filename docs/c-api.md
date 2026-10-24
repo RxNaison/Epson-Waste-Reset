@@ -96,6 +96,72 @@ holds the run lock, so close it before opening the network one.
   callback is asked anything. Over USB the same printer usually works.
 - The network transport's own events are namespaced `snmp.`.
 
+## Backups, restore, maintenance and Android (ABI 3)
+
+Check `ewr_abi_version() >= 3` before calling any of these.
+
+**Backups.** Every write - a reset, a restore - first builds a backup of the
+bytes it is about to overwrite, as the preflight read them, and returns it in
+the result's `"backup"` object. To keep it *before* the write, where a crash
+mid-write cannot lose it, set a backup callback:
+
+```c
+static int keep_backup(const char* backup_json, void* user)
+{
+    /* Write backup_json to a file you can find again; 1 once it is kept. */
+    return save_somewhere(backup_json) ? 1 : 0;
+}
+
+ewr_session_set_backup_callback(session, keep_backup, NULL);
+```
+
+`backup_json` is a whole backup file (format in json-output.md). A callback
+that returns 0 stops the write unless the blocker callback lets it go on
+(`error: "BACKUP NOT SAVED"`), and a backup missing bytes the preflight could
+not read asks the same way (`"BACKUP INCOMPLETE"`). Without the callback
+nothing is gated on a backup, as in ABI 2.
+
+**Restore.** `ewr_restore(session, model, file_contents, &json)` takes the
+text of a backup file or an `--dump` file and writes back what it holds of
+`model`'s own counter bytes - only those, only the ones that differ - through
+the reset's lifecycle: preflight, gates, the confirm callback (`target:
+"restore"`), a backup of what it overwrites, writes, read-back. `model` may be
+NULL for the one the file names. A file EWR cannot use, one for another model,
+or one with none of the model's bytes is `EWR_ERR_BAD_BACKUP`.
+
+`ewr_restore_all(session, model, dump_contents, 1, &json)` writes every byte of
+a dump that differs, except the serial, head-ID, USB-ID and network bytes, and
+only on the unit the dump came from. It is in builds made with
+`-DEWR_RESTORE_ALL=ON` only; elsewhere it answers `EWR_ERR_NOT_SUPPORTED`.
+
+**Maintenance.** `ewr_head_clean(session, model, level, group, power,
+print_data, &json)` and `ewr_nozzle_check(session, model, variant, &json)` run
+the printer's own maintenance with the gates and confirm callback a reset has
+(`target`: `head-clean`, `power-clean` or `nozzle-check`, plus `route`), send
+it once, and watch the printer's status until it is done - minutes, not
+seconds. `EWR_ERR_NOT_STARTED` means the printer took the command but never set
+to work; `EWR_ERR_PRINTER_ERROR` that it reported an error while at it. `group`
+is `EWR_CLEAN_ALL`, `EWR_CLEAN_BLACK` or `EWR_CLEAN_COLOR`. `model` may be NULL
+for a printer the database does not know: the cleaning then goes as print data.
+
+**Info.** `ewr_read_info(session, model, &json)` reads firmware, serial, the
+printer's own counters and its last fatal error codes. Read-only.
+
+**A host that updates the database itself.** `ewr_database_check(path, &json)`
+runs the check the built-in updater runs on a download - EWR loads the file -
+and needs no session. Swap the file in only on `EWR_OK`.
+
+**Where EWR writes.** `ewr_set_data_dir(dir)` moves `ewr_trace.log` out of
+the current directory, for every session in the process. An app sets it to
+its private storage before the first session.
+
+**Android.** The library builds with the NDK (the app in `android/` does it).
+An app may not enumerate USB devices itself, so it opens the printer through
+`UsbManager` and hands EWR the file descriptors:
+`ewr_android_set_usb_fds(fds, count)`, again whenever the set changes. EWR
+wraps them, claims the interfaces on them, and never closes them. Set
+`TMPDIR` to the app's cache directory for the one-run-at-a-time lock.
+
 ## A whole run, in C
 
 ```c
@@ -214,7 +280,11 @@ ctypes frees a thunk that nothing holds, and EWR will call it.
 | `ewr_discover_network` | on the network | `{"printers": [{"address", "device_id", "reported_model", "model_match"}]}`; `address` is what `ewr_session_open_network` takes |
 | `ewr_read_status` | yes | `{"model", "detected_model", "printer", "counters", "pads", "pads_total", "reset_covers"}`; `detected_model` stays null here, ask `ewr_detect_model` |
 | `ewr_dump` | yes | `{"model", "answered", "total", "values"}`; minutes, not seconds |
-| `ewr_reset` | yes | `{"model", "phase", "writes", "verification", "before", "after", "overrides", ...}`; `overrides` names each gate your callbacks, or `ewr_session_set_allow_model_mismatch`, let it past |
+| `ewr_reset` | yes | `{"model", "phase", "writes", "verification", "before", "after", "overrides", "backup", ...}`; `overrides` names each gate your callbacks, or `ewr_session_set_allow_model_mismatch`, let it past |
+| `ewr_restore`, `ewr_restore_all` | yes | `ewr_reset`'s keys with `target: "restore"`, plus `"source", "planned_writes", "skipped", "missing", "unchanged"` |
+| `ewr_head_clean`, `ewr_nozzle_check` | yes | `{"model", "action", "level", "group", "phase", "route", "sent", "reply", "started", "seconds", "printer_before", "printer_after", "pads_before", "pads_after", "overrides"}` |
+| `ewr_read_info` | yes | `{"model", "printer", "firmware", "serial", "serial_source", "counters", "first_use", "fatal_errors"}` |
+| `ewr_database_check` | no | `{"models", "schema_version"}` |
 
 `ewr_reset` returns the same JSON whether it worked or not: `phase` says how
 far it got, and the status code says what to tell the user.
@@ -224,7 +294,8 @@ far it got, and the status code says what to tell the user.
 | Callback | `json` |
 | --- | --- |
 | blocker | `{"error", "error_code", "explanation"}`: `error` names the objection (`INK OUT`, `PRINTER BUSY`, `DATABASE CONFLICT`, ...), `error_code` is the printer's error code and `null` when the objection is not a printer error, `explanation` is English for a dialog |
-| confirm | what `ewr_read_status` answers for the preflight, plus `"target"`: `waste` or `ink` |
+| confirm | what `ewr_read_status` answers for the preflight, plus `"target"`: `waste`, `ink`, `restore`, `head-clean`, `power-clean` or `nozzle-check`; maintenance adds `"route"` |
+| backup | a whole backup file: `{"format": "ewr-backup", "version", "created", "model", "target", "printer", "address_length", "bytes", "complete"}` |
 
 The same rules hold as for answers: keys may be added, and `null` is never a
 stand-in for zero.

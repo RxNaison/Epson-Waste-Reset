@@ -71,6 +71,14 @@ endif()
 
 add_executable(ewr cli/main.cpp)
 target_link_libraries(ewr PRIVATE ewr_core)
+
+# --restore-all writes bytes no reset ever writes. It stays out of release
+# builds until it is verified on hardware beyond the one model it was built on.
+option(EWR_RESTORE_ALL "Expose --restore-all and ewr_restore_all" OFF)
+if(EWR_RESTORE_ALL)
+    target_compile_definitions(ewr PRIVATE EWR_RESTORE_ALL)
+    target_compile_definitions(ewr_core PRIVATE EWR_RESTORE_ALL)
+endif()
 # Multi-config generators (MSVC) append the configuration name to the output
 # directory unless every per-config variant is set. The release workflow copies
 # the binary from a fixed path, so pin all of them.

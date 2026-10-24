@@ -64,6 +64,54 @@ namespace ewr {
         return plan;
     }
 
+    RestorePlan PlanRestoreAll(const DbPrinterModel& model, const Backup& dump)
+    {
+        RestorePlan plan;
+        plan.model = model.name;
+        plan.serial = dump.serial;
+        plan.requireSameUnit = true;
+
+        std::vector<uint16_t> identity = model.identity_addresses;
+        identity.insert(identity.end(), model.serial_addresses.begin(), model.serial_addresses.end());
+
+        const std::vector<uint16_t> waste = model.GetAllAddresses();
+        const std::vector<uint16_t> ink = model.GetInkAddresses();
+
+        auto contains = [](const std::vector<uint16_t>& list, uint16_t address) {
+            return std::find(list.begin(), list.end(), address) != list.end();
+        };
+
+        std::vector<uint16_t> seen;
+        for (const auto& entry : dump.bytes)
+        {
+            const uint16_t address = entry.first;
+            if (contains(seen, address))
+                continue;
+            seen.push_back(address);
+
+            if (contains(identity, address))
+            {
+                plan.skipped.push_back({ address, "identity" });
+                if (entry.second >= 0)
+                    plan.unitProof.push_back({ address, static_cast<uint8_t>(entry.second) });
+            }
+            else if (entry.second < 0)
+                plan.skipped.push_back({ address, "unread" });
+            else if (address > model.mem_high)
+                plan.skipped.push_back({ address, "above_limit" });
+            else if (!model.CanEncodeWriteAddress(address))
+                plan.skipped.push_back({ address, "unencodable" });
+            else
+            {
+                plan.writes.push_back({ address, static_cast<uint8_t>(entry.second) });
+                plan.touchesWaste = plan.touchesWaste || contains(waste, address);
+                plan.touchesInk = plan.touchesInk || contains(ink, address);
+            }
+        }
+
+        return plan;
+    }
+
     std::vector<uint16_t> DumpAddresses(const DbPrinterModel& model, bool full)
     {
         const uint32_t reachable = (model.ReadAddressLength() == 1)

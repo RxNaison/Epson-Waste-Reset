@@ -457,6 +457,78 @@ namespace {
 
 } // namespace
 
+namespace {
+
+    int RunRestore(ewr_session* session, const char* model, const char* file_contents, bool all, char** out_json)
+    {
+        if (!file_contents)
+        {
+            session->Fail("No backup or dump was given.");
+            return EWR_ERR_INVALID_ARGUMENT;
+        }
+
+        ewr::Backup source;
+        std::string error;
+        if (!ewr::ParseBackupText(file_contents, source, error))
+        {
+            session->Fail(error);
+            return EWR_ERR_BAD_BACKUP;
+        }
+
+        ewr::DbPrinterModel target;
+        const int found = ResolveModel(session, (model && *model) ? model : source.model.c_str(), target);
+        if (found != EWR_OK)
+            return found;
+
+        if (target.name != source.model)
+        {
+            session->Fail("The file was taken from " + source.model + ", not " + target.name + ".");
+            return EWR_ERR_BAD_BACKUP;
+        }
+
+        if (all && source.source != "dump")
+        {
+            session->Fail("A full restore takes an --dump file; a backup holds only what one reset wrote.");
+            return EWR_ERR_BAD_BACKUP;
+        }
+
+        const ewr::RestorePlan plan = all ? ewr::PlanRestoreAll(target, source) : ewr::PlanRestore(target, source);
+        if (plan.writes.empty())
+        {
+            session->Fail("The file holds none of the bytes EWR writes on " + target.name + ".");
+            return EWR_ERR_BAD_BACKUP;
+        }
+
+        if (plan.touchesInk && session->RefuseOverNetwork("Restoring cartridge ink bytes"))
+            return EWR_ERR_NOT_SUPPORTED;
+
+        std::string mismatchPassed;
+        std::string deviceId;
+        const int reported = CheckReportedModel(session, target, mismatchPassed, deviceId);
+        if (reported != EWR_OK)
+            return reported;
+
+        ewr::ResetHandlers handlers = WriteHandlers(session, target, "restore", deviceId);
+
+        ewr::Session lifecycle(target, session->Gateway(), ewr::log::Default(), session->options);
+        ewr::ResetOutcome outcome = lifecycle.Restore(plan, handlers);
+
+        if (!mismatchPassed.empty())
+            outcome.overrides.insert(outcome.overrides.begin(), { "model_mismatch", mismatchPassed, -1 });
+
+        const int delivered = Deliver(session, ewr::JsonRestoreData(target, source, plan, "", outcome), out_json);
+        if (delivered != EWR_OK)
+            return delivered;
+
+        if (outcome.success)
+            return EWR_OK;
+
+        session->Fail(outcome.error);
+        return OutcomeStatus(outcome);
+    }
+
+} // namespace
+
 extern "C" {
 
 const char* ewr_version(void)
@@ -885,68 +957,32 @@ int ewr_reset(ewr_session* session, const char* model, int ink, char** out_json)
     });
 }
 
+
 int ewr_restore(ewr_session* session, const char* model, const char* file_contents, char** out_json)
+{
+    return Guard(session, [&]() -> int { return RunRestore(session, model, file_contents, false, out_json); });
+}
+
+int ewr_restore_all(ewr_session* session, const char* model, const char* dump_contents,
+                    int allow_unmapped, char** out_json)
 {
     return Guard(session, [&]() -> int
     {
-        if (!file_contents)
+#ifdef EWR_RESTORE_ALL
+        if (allow_unmapped != 1)
         {
-            session->Fail("No backup or dump was given.");
+            session->Fail("A full restore writes bytes no reset writes; pass allow_unmapped = 1 to mean it.");
             return EWR_ERR_INVALID_ARGUMENT;
         }
-
-        ewr::Backup source;
-        std::string error;
-        if (!ewr::ParseBackupText(file_contents, source, error))
-        {
-            session->Fail(error);
-            return EWR_ERR_BAD_BACKUP;
-        }
-
-        ewr::DbPrinterModel target;
-        const int found = ResolveModel(session, (model && *model) ? model : source.model.c_str(), target);
-        if (found != EWR_OK)
-            return found;
-
-        if (target.name != source.model)
-        {
-            session->Fail("The file was taken from " + source.model + ", not " + target.name + ".");
-            return EWR_ERR_BAD_BACKUP;
-        }
-
-        const ewr::RestorePlan plan = ewr::PlanRestore(target, source);
-        if (plan.writes.empty())
-        {
-            session->Fail("The file holds none of the bytes EWR writes on " + target.name + ".");
-            return EWR_ERR_BAD_BACKUP;
-        }
-
-        if (plan.touchesInk && session->RefuseOverNetwork("Restoring cartridge ink bytes"))
-            return EWR_ERR_NOT_SUPPORTED;
-
-        std::string mismatchPassed;
-        std::string deviceId;
-        const int reported = CheckReportedModel(session, target, mismatchPassed, deviceId);
-        if (reported != EWR_OK)
-            return reported;
-
-        ewr::ResetHandlers handlers = WriteHandlers(session, target, "restore", deviceId);
-
-        ewr::Session lifecycle(target, session->Gateway(), ewr::log::Default(), session->options);
-        ewr::ResetOutcome outcome = lifecycle.Restore(plan, handlers);
-
-        if (!mismatchPassed.empty())
-            outcome.overrides.insert(outcome.overrides.begin(), { "model_mismatch", mismatchPassed, -1 });
-
-        const int delivered = Deliver(session, ewr::JsonRestoreData(target, source, plan, "", outcome), out_json);
-        if (delivered != EWR_OK)
-            return delivered;
-
-        if (outcome.success)
-            return EWR_OK;
-
-        session->Fail(outcome.error);
-        return OutcomeStatus(outcome);
+        return RunRestore(session, model, dump_contents, true, out_json);
+#else
+        (void)model;
+        (void)dump_contents;
+        (void)allow_unmapped;
+        (void)out_json;
+        session->Fail("This build does not include the full restore: it waits for hardware verification.");
+        return EWR_ERR_NOT_SUPPORTED;
+#endif
     });
 }
 

@@ -9873,6 +9873,147 @@ void test_database_keeps_keyless_models_from_old_loaders()
     CHECK(jig == keyless);
 }
 
+// --restore-all: every byte of a dump but the unit's own, on that unit only.
+void test_restore_all_plan_never_writes_identity()
+{
+    std::cout << "[TEST] test_restore_all_plan_never_writes_identity" << std::endl;
+
+    ewr::DbPrinterModel model = MakeSessionModel(); // 1-byte, waste 0x0C/0x0D
+    model.identity_addresses = { 0x42, 0x43, 0x44, 0x45 };
+    model.serial_addresses = { 0x60, 0x61 };
+
+    ewr::Backup dump;
+    dump.source = "dump";
+    dump.model = model.name;
+    dump.bytes = { { 0x07, 0xE0 }, { 0x0C, 0x12 }, { 0x42, 0x01 }, { 0x43, 0x02 }, { 0x44, 0x03 },
+                   { 0x45, 0x04 }, { 0x60, 'X' }, { 0x61, -1 }, { 0x70, -1 }, { 0x150, 0x01 } };
+
+    const ewr::RestorePlan plan = ewr::PlanRestoreAll(model, dump);
+    CHECK(plan.requireSameUnit);
+    CHECK(plan.writes.size() == 2); // 0x07 (unmapped) and 0x0C
+    CHECK((plan.writes[0] == std::pair<uint16_t, uint8_t>(0x07, 0xE0)));
+    CHECK(plan.touchesWaste && !plan.touchesInk);
+    CHECK(plan.unitProof.size() == 5); // four head-ID bytes and the one serial byte that answered
+
+    size_t identity = 0;
+    for (const auto& skip : plan.skipped)
+        identity += skip.reason == "identity" ? 1 : 0;
+    CHECK(identity == 6);
+
+    for (const auto& w : plan.writes)
+        CHECK(w.first != 0x42 && w.first != 0x60 && w.first != 0x150);
+}
+
+void test_session_restore_all_runs_only_on_the_same_unit()
+{
+    std::cout << "[TEST] test_session_restore_all_runs_only_on_the_same_unit" << std::endl;
+
+    const ewr::DbPrinterModel model = MakeSessionModel();
+    ewr::log::Reporter reporter;
+
+    ewr::RestorePlan plan;
+    plan.model = model.name;
+    plan.requireSameUnit = true;
+    plan.writes = { { 0x0C, 0x12 } };
+    plan.touchesWaste = true;
+    plan.unitProof = { { 0x42, 0x01 }, { 0x43, 0x02 }, { 0x44, 0x03 }, { 0x45, 0x04 } };
+
+    auto gatewayWith = [](uint8_t at45) {
+        EepromGateway gw;
+        gw.eeprom = { { 0x0C, 0x00 }, { 0x0D, 0x00 }, { 0x42, 0x01 }, { 0x43, 0x02 }, { 0x44, 0x03 }, { 0x45, at45 } };
+        return gw;
+    };
+
+    // Every proof byte matches: it runs.
+    {
+        EepromGateway gw = gatewayWith(0x04);
+        ewr::Session session(model, gw, reporter);
+        ewr::ResetHandlers handlers;
+        handlers.onBlocker = [](const ewr::Blocker&) { return true; };
+        session.Restore(plan, handlers);
+        CHECK(gw.sessions >= 1);
+    }
+
+    // One proof byte differs: nothing is written, whatever the host answers.
+    {
+        FakeGateway gw;
+        gw.queryResult.deviceFound = true;
+        gw.queryResult.query.replies = { MakeSt2State(0x04), MakeEepromReadReplyEE(0x0C, 0x00),
+                                         MakeEepromReadReplyEE(0x0D, 0x00), MakeEepromReadReplyEE(0x42, 0x01),
+                                         MakeEepromReadReplyEE(0x43, 0x02), MakeEepromReadReplyEE(0x44, 0x03),
+                                         MakeEepromReadReplyEE(0x45, 0x09) };
+        gw.resetResult.deviceFound = true;
+        gw.resetResult.exec.success = true;
+        ewr::Session session(model, gw, reporter);
+
+        int asked = 0;
+        ewr::ResetHandlers handlers;
+        handlers.onBlocker = [&](const ewr::Blocker&) { asked++; return true; };
+        const ewr::ResetOutcome out = session.Restore(plan, handlers);
+        CHECK(out.phase == ewr::ResetPhase::NotSupported);
+        CHECK(gw.resetCalls == 0);
+        CHECK(asked == 0);
+    }
+
+    // Too little proof: refused the same way.
+    {
+        FakeGateway gw;
+        gw.queryResult.deviceFound = true;
+        gw.queryResult.query.replies = { MakeSt2State(0x04), MakeEepromReadReplyEE(0x0C, 0x00),
+                                         MakeEepromReadReplyEE(0x0D, 0x00) };
+        gw.resetResult.deviceFound = true;
+        gw.resetResult.exec.success = true;
+        ewr::Session session(model, gw, reporter);
+
+        ewr::RestorePlan thin = plan;
+        thin.unitProof.resize(2);
+        ewr::ResetHandlers handlers;
+        handlers.onBlocker = [](const ewr::Blocker&) { return true; };
+        CHECK(session.Restore(thin, handlers).phase == ewr::ResetPhase::NotSupported);
+        CHECK(gw.resetCalls == 0);
+    }
+
+    // Serials both known and different: refused even with every proof byte.
+    {
+        FakeGateway gw = MakeSessionGateway(); // the printer reports X7A9000123
+        ewr::Session session(model, gw, reporter);
+        ewr::RestorePlan other = plan;
+        other.serial = "Q1Q1000001";
+        ewr::ResetHandlers handlers;
+        handlers.onBlocker = [](const ewr::Blocker&) { return true; };
+        CHECK(session.Restore(other, handlers).phase == ewr::ResetPhase::NotSupported);
+        CHECK(gw.resetCalls == 0);
+    }
+}
+
+void test_c_abi_restore_all_needs_its_consent()
+{
+    std::cout << "[TEST] test_c_abi_restore_all_needs_its_consent" << std::endl;
+
+    ewr_session* session = nullptr;
+    if (ewr_session_open("database.json", &session) == EWR_ERR_ANOTHER_RUN)
+    {
+        std::cout << "  [skip] another EWR run holds the printer" << std::endl;
+        ewr_session_close(session);
+        return;
+    }
+
+    const std::string dump = "# EWR EEPROM dump\n# model: R220\n0x0C,0x00,\n";
+    char* json = nullptr;
+    const int refused = ewr_restore_all(session, nullptr, dump.c_str(), 0, &json);
+    CHECK(refused == EWR_ERR_INVALID_ARGUMENT || refused == EWR_ERR_NOT_SUPPORTED);
+    CHECK(json == nullptr);
+
+    // A backup is not a dump.
+    ewr::Backup backup = MakeTestBackup();
+    backup.model = "R220";
+    const std::string text = ewr::BackupToJson(backup);
+    const int notDump = ewr_restore_all(session, nullptr, text.c_str(), 1, &json);
+    CHECK(notDump == EWR_ERR_BAD_BACKUP || notDump == EWR_ERR_NOT_SUPPORTED);
+
+    ewr_session_close(session);
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -10031,6 +10172,9 @@ int main()
     test_maintenance_factory_clean_runs_once_and_is_watched();
     test_maintenance_stops_where_it_should();
     test_query_path_refuses_what_is_not_a_read();
+    test_restore_all_plan_never_writes_identity();
+    test_session_restore_all_runs_only_on_the_same_unit();
+    test_c_abi_restore_all_needs_its_consent();
     test_log_carries_fields();
     test_json_never_leaks_minus_one();
     test_json_status_separates_unknown_from_zero();

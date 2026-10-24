@@ -237,6 +237,16 @@ EWR_API int ewr_reset(ewr_session* session, const char* model, int ink, char** o
  *  "missing", "unchanged", "phase", "writes", "verification", ...} */
 EWR_API int ewr_restore(ewr_session* session, const char* model, const char* file_contents, char** out_json);
 
+/* ABI 3. The expert restore: every byte of an --dump file that differs from
+ * the printer, not only the counters - except the serial, head ID, USB ID and
+ * network address, which are never written. It runs only on the unit the dump
+ * came from (the serial both name, or else the dump's identity bytes all read
+ * back unchanged); no callback can overrule that. `allow_unmapped` must be 1:
+ * it says the caller knows these are bytes no reset writes. Builds without
+ * EWR_RESTORE_ALL answer EWR_ERR_NOT_SUPPORTED. Same answer as ewr_restore. */
+EWR_API int ewr_restore_all(ewr_session* session, const char* model, const char* dump_contents,
+                            int allow_unmapped, char** out_json);
+
 /* ABI 3. Read-only. {"model", "printer", "firmware", "serial", "serial_source",
  * "counters": [{"key", "value"}], "first_use", "fatal_errors": [{"kind",
  * "slot", "code"}]}. `model` may be NULL: then only the status and firmware. */

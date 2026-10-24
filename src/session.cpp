@@ -1054,13 +1054,17 @@ namespace ewr {
         flow.target = "restore";
 
         // The counters' own bytes too, so the host can show what the restore
-        // does to each pad, not only which bytes it writes.
+        // does to each pad, not only which bytes it writes - and for a full
+        // restore the bytes that prove which unit this is.
         std::vector<uint16_t> reads = m_model.GetReadAddresses();
+        auto addRead = [&reads](uint16_t address) {
+            if (std::find(reads.begin(), reads.end(), address) == reads.end())
+                reads.push_back(address);
+        };
         for (const auto& w : plan.writes)
-        {
-            if (std::find(reads.begin(), reads.end(), w.first) == reads.end())
-                reads.push_back(w.first);
-        }
+            addRead(w.first);
+        for (const auto& p : plan.unitProof)
+            addRead(p.first);
         flow.readAddresses = reads;
 
         const bool wasteBytes = plan.touchesWaste;
@@ -1079,7 +1083,65 @@ namespace ewr {
                                             const ResetHandlers& h) -> bool
         {
             const std::string& printerSerial = before.status.serial;
-            if (!plan.serial.empty() && !printerSerial.empty() && plan.serial != printerSerial)
+
+            // A full restore writes bytes no reset writes. No gate can be
+            // argued past this one: it runs on the unit the dump came from
+            // or not at all.
+            if (plan.requireSameUnit)
+            {
+                std::string unproven;
+                if (!plan.serial.empty() && !printerSerial.empty())
+                {
+                    if (plan.serial != printerSerial)
+                        unproven = "the dump names serial " + plan.serial + " and this printer reports " + printerSerial;
+                }
+                else if (plan.unitProof.size() < kMinimumUnitProof)
+                {
+                    unproven = "neither a serial number nor enough of the printer's own identity bytes are on"
+                               " record to show it is the unit the dump came from";
+                }
+                else
+                {
+                    for (const auto& p : plan.unitProof)
+                    {
+                        int now = -1;
+                        for (const auto& entry : before.values)
+                        {
+                            if (entry.first == p.first)
+                                now = entry.second;
+                        }
+                        if (now != p.second)
+                        {
+                            char where[8];
+                            snprintf(where, sizeof(where), "0x%04X", p.first);
+                            unproven = std::string("identity byte ") + where + " differs from the dump's";
+                            break;
+                        }
+                    }
+                }
+
+                if (!unproven.empty())
+                {
+                    m_reporter.Log(log::Level::Error, log::Stage::Read, "session.restore_all_other_unit",
+                                   "[!] Nothing was written: " + unproven + ". A full restore runs only on the\n"
+                                   "    printer the dump was taken from.");
+                    o.phase = ResetPhase::NotSupported;
+                    o.error = "Nothing was written: " + unproven + ".";
+                    return false;
+                }
+
+                m_reporter.Log(log::Level::Info, log::Stage::Read, "session.restore_unit_confirmed",
+                               (!plan.serial.empty() && !printerSerial.empty())
+                                   ? "[i] Same printer: the serial number matches the dump's."
+                                   : "[i] Same printer: all " + std::to_string(plan.unitProof.size()) +
+                                         " identity bytes match the dump's.");
+            }
+
+            if (plan.requireSameUnit)
+            {
+                // Proven above; the softer checks below are for --restore.
+            }
+            else if (!plan.serial.empty() && !printerSerial.empty() && plan.serial != printerSerial)
             {
                 m_reporter.Log(log::Level::Warning, log::Stage::Read, "session.restore_other_printer",
                                "[!] The file was taken from the printer with serial " + plan.serial +

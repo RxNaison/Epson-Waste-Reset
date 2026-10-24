@@ -14,6 +14,7 @@
 #include "ewr/deviceid.h"
 #include "ewr/updater.h"
 #include "ewr/end4.h"
+#include "ewr/jig.h"
 
 #include "ewr/d4session.h"
 #include "ewr/log.h"
@@ -751,6 +752,7 @@ void test_database_integrity()
     bool keysOk = true;
     bool keyBytesOk = true;
     bool arraysOk = true;
+    bool jigResettable = false;
 
     for (const auto& m : models)
     {
@@ -758,7 +760,8 @@ void test_database_integrity()
             namesOk = false;
 
         // A keyword is 8 bytes on the wire; UTF-8 made three families' 12 (#59).
-        if (m.wkey.size() != 8 || (!m.wkey1.empty() && m.wkey1.size() != 8))
+        // A JIG model has none to send.
+        if (!m.jig && (m.wkey.size() != 8 || (!m.wkey1.empty() && m.wkey1.size() != 8)))
             keyBytesOk = false;
 
         if (!m.HasResettableCounters())
@@ -768,16 +771,23 @@ void test_database_integrity()
         }
 
         withCounters++;
-        if (m.rkey == 0 || m.wkey.empty())
+
+        // A keyed model needs both keys; a JIG model must carry none, since
+        // nothing it is read or written with uses them.
+        if (m.jig ? (m.rkey != 0 || !m.wkey.empty() || !m.wkey1.empty())
+                  : (m.rkey == 0 || m.wkey.empty()))
             keysOk = false;
         if (m.GetAllAddresses().size() != m.GetAllResetValues().size())
             arraysOk = false;
+        if (m.jig && m.CanReset())
+            jigResettable = true;
     }
 
     CHECK(namesOk);
     CHECK(keysOk);
     CHECK(keyBytesOk);
     CHECK(arraysOk);
+    CHECK(!jigResettable);
     CHECK(withCounters > 1000);
 
     std::cout << "  " << withCounters << " models with resettable counters, "
@@ -3035,6 +3045,146 @@ void test_d4_transport_failure_closes_channel()
 // framer, to be handed back as the answer to the NEXT query - and callers match
 // replies to addresses positionally, so one truncation shifts every value after
 // it onto the wrong EEPROM address.
+// Every byte below is from a WIC Reset capture on a real SX110 (discussion
+// #48): the packets EWR builds must be the ones that printer was seen to take.
+void test_jig_packets_match_the_wic_capture()
+{
+    std::cout << "[TEST] test_jig_packets_match_the_wic_capture" << std::endl;
+
+    using bytes = std::vector<unsigned char>;
+
+    CHECK(ewr::jig::kLeavePacketMode == bytes({ 0x00, 0x00, 0x00, 0x1b, 0x01, '@', 'E', 'J', 'L', ' ', '1', '2', '8', '4',
+                                                '.', '4', '\n', '@', 'E', 'J', 'L', ' ', ' ', ' ', ' ', ' ', '\n' }));
+    CHECK(ewr::jig::BuildEnterJigMode() == bytes({ 0x1b, 0x28, 0x52, 0x08, 0x00, 0x00, 'J', 'I', 'G', 'M', 'O', 'D', 'E' }));
+    CHECK(ewr::jig::BuildReadPacket(0x214) == bytes({ 'J', 'G', 'P', 'G', 0x05, 0x00, 0x02, 0x14, 0x00, 0x01, 0x00 }));
+    CHECK(ewr::jig::BuildReadPacket(0x138) == bytes({ 'J', 'G', 'P', 'G', 0x05, 0x00, 0x01, 0x38, 0x00, 0x01, 0x00 }));
+    CHECK(ewr::jig::BuildExit() == bytes({ 'J', 'G', 0x1b, 0x00, 0x00, 0x00 }));
+
+    CHECK(ewr::jig::ReadPacketAddress(ewr::jig::BuildReadPacket(0x214)) == 0x214);
+    CHECK(ewr::jig::ReadPacketAddress(ewr::jig::BuildReadPacket(0x138)) == 0x138);
+    CHECK(ewr::jig::ReadPacketAddress(ewr::jig::BuildReadPacket(0x2FF)) == 0x2FF);
+    CHECK(ewr::jig::ReadPacketAddress(ewr::jig::BuildExit()) == -1);
+    CHECK(ewr::jig::ReadPacketAddress(OkAck()) == -1);
+
+    uint8_t value = 0;
+    CHECK(ewr::jig::ParseReadReply({ 'J', 'G', 'P', 'G', 0x01, 0x00, 0xe0 }, value));
+    CHECK(value == 0xe0);
+    CHECK(!ewr::jig::ParseReadReply({ 'J', 'G', 'P', 'G', 0x01, 0x00 }, value));       // cut short
+    CHECK(!ewr::jig::ParseReadReply({ 'J', 'G', 'P', 'G', 0x00, 0x00, 0x05 }, value)); // no byte declared
+    CHECK(!ewr::jig::ParseReadReply({ '|', '|', ':', ';', 0x0c }, value));
+    CHECK(!ewr::jig::ParseReadReply({}, value));
+}
+
+// Answers like the SX110 did: D4 replies until the packet-mode exit, then
+// plain "JGPG" replies with the bytes WIC read.
+static FakeTransport MakeJigPrinter(std::map<int, uint8_t> memory, bool takesJigMode = true)
+{
+    FakeTransport t;
+    t.replyFor = [memory, takesJigMode](const std::vector<unsigned char>& sent) -> std::vector<unsigned char> {
+        if (sent.size() == 27 && sent[5] == '@')                                  // EJL enter or leave
+            return { 0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0xc5, 0x00 };
+        if (sent == std::vector<unsigned char>({ 0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00, 0x10 }))
+            return { 0x00, 0x00, 0x00, 0x09, 0x01, 0x00, 0x80, 0x00, 0x10 };     // D4 Init
+        const int address = ewr::jig::ReadPacketAddress(sent);
+        if (address >= 0 && takesJigMode)
+        {
+            auto it = memory.find(address);
+            return { 'J', 'G', 'P', 'G', 0x01, 0x00, it == memory.end() ? uint8_t(0) : it->second };
+        }
+        return {};
+    };
+    return t;
+}
+
+void test_jig_read_session_replays_the_capture()
+{
+    std::cout << "[TEST] test_jig_read_session_replays_the_capture" << std::endl;
+
+    FakeTransport t = MakeJigPrinter({ { 0x214, 0xe0 }, { 0x215, 0x01 }, { 0x216, 0x00 }, { 0x217, 0x94 } });
+
+    std::vector<std::vector<unsigned char>> queries;
+    for (uint16_t address = 0x214; address <= 0x217; ++address)
+        queries.push_back(ewr::jig::BuildReadPacket(address));
+
+    // Through the same entry point a query session uses.
+    ewr::ExecutorOptions options = FastOptions();
+    options.jigMode = true;
+    options.useSessionLayer = true; // jigMode wins
+    std::ofstream log = NullLog();
+    std::ostringstream out;
+    const ewr::QuerySessionResult result = ewr::ExecuteQuerySession(t, {}, queries, out, log, options);
+
+    CHECK(result.success);
+    CHECK(result.handshakeConfirmed);
+    CHECK(result.packetsSent == 4);
+    CHECK(result.replies.size() == 4);
+
+    const uint8_t expected[] = { 0xe0, 0x01, 0x00, 0x94 };
+    for (size_t i = 0; i < result.replies.size() && i < 4; ++i)
+    {
+        uint8_t value = 0;
+        CHECK(ewr::jig::ParseReadReply(result.replies[i], value));
+        CHECK(value == expected[i]);
+    }
+
+    // WIC's order, packet for packet: EJL, Init, leave, JIGMODE, reads, exit.
+    CHECK(t.sent.size() == 9);
+    if (t.sent.size() == 9)
+    {
+        CHECK(t.sent[0] == ewr::UniversalGenerator::GenerateHandshake()[0]);
+        CHECK(t.sent[1] == std::vector<unsigned char>({ 0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00, 0x10 }));
+        CHECK(t.sent[2] == ewr::jig::kLeavePacketMode);
+        CHECK(t.sent[3] == ewr::jig::BuildEnterJigMode());
+        for (size_t i = 0; i < 4; ++i)
+            CHECK(t.sent[4 + i] == queries[i]);
+        CHECK(t.sent[8] == ewr::jig::BuildExit());
+    }
+
+    // Nothing keyed, nothing that writes: no '||' command anywhere.
+    const unsigned char bars[] = { '|', '|' };
+    for (const auto& packet : t.sent)
+        CHECK(std::search(packet.begin(), packet.end(), bars, bars + 2) == packet.end());
+}
+
+void test_jig_read_session_refuses_cleanly()
+{
+    std::cout << "[TEST] test_jig_read_session_refuses_cleanly" << std::endl;
+
+    std::vector<std::vector<unsigned char>> queries;
+    for (uint16_t address = 0x214; address <= 0x217; ++address)
+        queries.push_back(ewr::jig::BuildReadPacket(address));
+
+    const ewr::ExecutorOptions options = FastOptions();
+
+    // A D4 printer that is not of this platform: the first read goes
+    // unanswered, so the rest are not asked, and JIG mode is still left.
+    {
+        FakeTransport t = MakeJigPrinter({}, /*takesJigMode=*/false);
+        ewr::log::Reporter reporter;
+        const ewr::QuerySessionResult result = ewr::ExecuteJigReadSession(t, queries, reporter, options);
+        CHECK(!result.success);
+        CHECK(result.handshakeConfirmed);
+        CHECK(!result.handshakeFailed);
+        CHECK(!result.error.empty());
+        CHECK(result.packetsSent == 1);
+        CHECK(result.replies.size() == queries.size());
+        CHECK(!t.sent.empty() && t.sent.back() == ewr::jig::BuildExit());
+    }
+
+    // An interface that answers nothing at all is a handshake failure, so the
+    // driver moves on to the next one - and no read is sent into it.
+    {
+        FakeTransport t;
+        ewr::log::Reporter reporter;
+        const ewr::QuerySessionResult result = ewr::ExecuteJigReadSession(t, queries, reporter, options);
+        CHECK(result.handshakeFailed);
+        CHECK(!result.success);
+        CHECK(result.packetsSent == 0);
+        for (const auto& packet : t.sent)
+            CHECK(ewr::jig::ReadPacketAddress(packet) < 0);
+    }
+}
+
 void test_d4_reassembles_a_fragmented_reply()
 {
     std::cout << "[TEST] test_d4_reassembles_a_fragmented_reply" << std::endl;
@@ -3939,6 +4089,209 @@ void test_session_names_its_model_in_the_trace_context()
     CHECK(told.lastResetOptions.trace.selectedBy == "--model \"testjet\"");
 }
 
+// The SX110's layout: two little-endian counters, the reset clearing six bytes.
+static ewr::DbPrinterModel MakeJigModel()
+{
+    ewr::DbPrinterModel model;
+    model.name = "SX110";
+    model.jig = true;
+    model.mem_high = 0x2FF;
+
+    ewr::PadGroup group;
+    group.addresses = { 0x214, 0x215, 0x216, 0x217, 0x218, 0x219 };
+    group.reset_values = { 0, 0, 0, 0, 0, 0 };
+
+    ewr::CounterSpec first;
+    first.description = "Waste Counter 1";
+    first.bytes = { { 0x214 }, { 0x215, 0xFF, 256 } };
+    first.max_value = 7300;
+
+    ewr::CounterSpec second;
+    second.description = "Waste Counter 2";
+    second.bytes = { { 0x216 }, { 0x217, 0xFF, 256 } };
+    second.max_value = 38900;
+
+    group.counters = { first, second };
+    model.pad_groups = { group };
+    return model;
+}
+
+// A status over D4, then the JIG read: what the SX110 answered WIC.
+struct JigGateway : ewr::IDeviceGateway
+{
+    std::vector<ewr::ExecutorOptions> queryOptions;
+    std::vector<std::vector<std::vector<unsigned char>>> queries;
+    int resets = 0;
+
+    ewr::QueryRunResult RunQuery(const std::vector<std::vector<unsigned char>>&,
+                                 const std::vector<std::vector<unsigned char>>& sent,
+                                 const ewr::ExecutorOptions& options) override
+    {
+        queryOptions.push_back(options);
+        queries.push_back(sent);
+
+        ewr::QueryRunResult run;
+        run.deviceFound = true;
+        run.query.success = true;
+
+        if (!options.jigMode)
+        {
+            run.query.replies = { MakeSt2Reply() };
+            return run;
+        }
+
+        const std::map<int, uint8_t> memory = { { 0x214, 0xe0 }, { 0x215, 0x01 }, { 0x216, 0x00 }, { 0x217, 0x94 } };
+        for (const auto& packet : sent)
+        {
+            const auto it = memory.find(ewr::jig::ReadPacketAddress(packet));
+            run.query.replies.push_back({ 'J', 'G', 'P', 'G', 0x01, 0x00, it == memory.end() ? uint8_t(0) : it->second });
+        }
+        return run;
+    }
+
+    ewr::ResetRunResult RunReset(const std::vector<std::vector<unsigned char>>&,
+                                 const ewr::ExecutorOptions&) override
+    {
+        resets++;
+        return {};
+    }
+};
+
+void test_session_reads_a_jig_model()
+{
+    std::cout << "[TEST] test_session_reads_a_jig_model" << std::endl;
+
+    const ewr::DbPrinterModel model = MakeJigModel();
+    JigGateway gw;
+    ewr::Session session(model, gw, ewr::log::Default(), ewr::DefaultQueryOptions());
+
+    const ewr::StateSnapshot state = session.ReadState();
+    CHECK(state.available);
+    CHECK(state.status.valid);
+
+    // The status over D4 as always, then one JIG session for the counters.
+    CHECK(gw.queryOptions.size() == 2);
+    if (gw.queryOptions.size() == 2)
+    {
+        CHECK(!gw.queryOptions[0].jigMode);
+        CHECK(gw.queryOptions[1].jigMode);
+        // Every byte the reset touches, as for any model: 0x214-0x219.
+        CHECK(gw.queries[1].size() == 6);
+        for (const auto& packet : gw.queries[1])
+            CHECK(ewr::jig::ReadPacketAddress(packet) >= 0x214);
+    }
+
+    // The bytes WIC read, as counter values: 480 of 7300 and 37888 of 38900.
+    const std::vector<std::pair<uint16_t, int>> expected = {
+        { 0x214, 0xe0 }, { 0x215, 0x01 }, { 0x216, 0x00 }, { 0x217, 0x94 }, { 0x218, 0x00 }, { 0x219, 0x00 } };
+    CHECK(state.values == expected);
+
+    const nlohmann::json data = ewr::JsonStateData(model, state);
+    CHECK(data["pads"].size() == 2);
+    if (data["pads"].size() == 2)
+    {
+        CHECK(data["pads"][0]["used"] == 480);
+        CHECK(data["pads"][0]["max"] == 7300);
+        CHECK(data["pads"][1]["used"] == 37888);
+        CHECK(data["pads"][1]["max"] == 38900);
+    }
+
+    CHECK(gw.resets == 0);
+}
+
+// No JIG write command is known, so a reset must not get as far as reading -
+// let alone hand a keyless model to the keyed write path.
+void test_session_refuses_to_reset_a_jig_model()
+{
+    std::cout << "[TEST] test_session_refuses_to_reset_a_jig_model" << std::endl;
+
+    const ewr::DbPrinterModel model = MakeJigModel();
+    CHECK(model.HasResettableCounters());
+    CHECK(!model.CanReset());
+
+    JigGateway gw;
+    ewr::Session session(model, gw, ewr::log::Default(), ewr::DefaultQueryOptions());
+
+    ewr::ResetHandlers handlers;
+    handlers.onBlocker = [](const ewr::Blocker&) { return true; };
+    handlers.confirmWrite = [](const ewr::StateSnapshot&) { return true; };
+
+    const ewr::ResetOutcome outcome = session.Reset(handlers);
+    CHECK(outcome.phase == ewr::ResetPhase::NotStarted);
+    CHECK(!outcome.error.empty());
+    CHECK(gw.resets == 0);
+    CHECK(gw.queryOptions.empty());
+
+    const ewr::ResetOutcome ink = session.ResetInk(handlers);
+    CHECK(ink.phase == ewr::ResetPhase::NotStarted);
+    CHECK(gw.resets == 0);
+
+    // An ordinary model is unaffected.
+    CHECK(MakeSessionModel().CanReset());
+}
+
+void test_jig_models_load_and_stay_out_of_the_key_search()
+{
+    std::cout << "[TEST] test_jig_models_load_and_stay_out_of_the_key_search" << std::endl;
+
+    const std::string path = "test_jig_model.json";
+    {
+        std::ofstream out(path);
+        out << R"({"models": {
+            "SX110": {"access": "jig", "rlen": 2, "wlen": 2, "mem_high": 767,
+                      "addresses": [532, 533, 534, 535, 536, 537], "reset": [0, 0, 0, 0, 0, 0]},
+            "R220": {"rkey": 15120, "wkey": "McLaren", "rlen": 1, "wlen": 1, "addresses": [12, 13], "reset": [0, 0]}
+        }})";
+    }
+
+    ewr::UniversalGenerator gen;
+    CHECK(gen.LoadDatabase(path));
+    fs::remove(path);
+
+    const auto models = gen.GetAvailableModels();
+    bool sawJig = false, sawKeyed = false;
+    for (const auto& model : models)
+    {
+        if (model.name == "SX110")
+        {
+            sawJig = true;
+            CHECK(model.jig);
+            CHECK(!model.CanReset());
+        }
+        if (model.name == "R220")
+        {
+            sawKeyed = true;
+            CHECK(!model.jig);
+            CHECK(model.CanReset());
+        }
+    }
+    CHECK(sawJig && sawKeyed);
+
+    const auto candidates = ewr::CollectReadKeyCandidates(models);
+    CHECK(candidates.size() == 1);
+    for (const auto& candidate : candidates)
+        for (const auto& name : candidate.models)
+            CHECK(name != "SX110");
+
+    // The real database: the SX110 names itself "Epson Stylus SX110" in its
+    // device ID, and that has to land on the JIG entry, read-only.
+    ewr::UniversalGenerator real;
+    CHECK(real.LoadDatabase("database.json"));
+    std::vector<ewr::ModelNameEntry> entries;
+    for (const auto& model : real.GetAvailableModels())
+    {
+        entries.push_back({ model.name, model.aliases });
+        if (model.name == "SX110")
+        {
+            CHECK(model.jig);
+            CHECK(!model.CanReset());
+            CHECK(model.GetReadAddresses().size() == 6);
+        }
+    }
+    const std::vector<std::string> matches = ewr::MatchModelEntries("Epson Stylus SX110", entries);
+    CHECK(!matches.empty() && matches[0] == "SX110");
+}
+
 // The refusals are different evidence, so they must not collapse into one:
 // ':41:NA;' turns a known read down, a bare '||:;' never echoes the action
 // code at all (an SX110 answered every read that way).
@@ -3993,11 +4346,16 @@ void test_collect_read_key_candidates()
         CHECK(got[2].rkey == 9 && got[2].addressLength == 2);
     }
 
-    // The real database: every model lands in exactly one candidate.
+    // The real database: every keyed model lands in exactly one candidate,
+    // and no JIG model in any.
     ewr::UniversalGenerator gen;
     CHECK(gen.LoadDatabase("database.json"));
     const auto models = gen.GetAvailableModels();
     const auto real = ewr::CollectReadKeyCandidates(models);
+
+    const size_t keyed = static_cast<size_t>(std::count_if(models.begin(), models.end(),
+        [](const ewr::DbPrinterModel& m) { return !m.jig; }));
+    CHECK(keyed < models.size());
 
     size_t covered = 0;
     std::map<std::pair<uint16_t, uint8_t>, int> seen;
@@ -4007,7 +4365,7 @@ void test_collect_read_key_candidates()
         seen[{ candidate.rkey, candidate.addressLength }]++;
         CHECK(candidate.addressLength == 1 || candidate.addressLength == 2);
     }
-    CHECK(covered == models.size());
+    CHECK(covered == keyed);
     CHECK(seen.size() == real.size());
     CHECK(real.size() > 50);
     for (size_t i = 1; i < real.size(); ++i)
@@ -9476,6 +9834,45 @@ void test_query_path_refuses_what_is_not_a_read()
     CHECK(!ewr::IsReadOnlyQueryPacket({}));
 }
 
+// JIG models live under "keyless_models": a pre-1.6 loader, which reads
+// database.json from main and only its "models", must never see one there
+// and take it for a keyed model with key 0. This build sees all of them.
+void test_database_keeps_keyless_models_from_old_loaders()
+{
+    std::cout << "[TEST] test_database_keeps_keyless_models_from_old_loaders" << std::endl;
+
+    std::ifstream in("database.json");
+    const nlohmann::json root = nlohmann::json::parse(in);
+    CHECK(root.contains("keyless_models") && root["keyless_models"].is_object());
+
+    bool jigInModels = false;
+    for (const auto& item : root["models"].items())
+    {
+        const nlohmann::json& entry = item.value();
+        if (entry.value("access", std::string()) == "jig")
+            jigInModels = true;
+        if (entry.contains("spec") && root["specs"][entry["spec"].get<std::string>()].value("access", std::string()) == "jig")
+            jigInModels = true;
+    }
+    CHECK(!jigInModels);
+
+    size_t keyless = 0;
+    for (const auto& item : root["keyless_models"].items())
+    {
+        keyless++;
+        CHECK(item.value().value("access", std::string()) == "jig");
+        CHECK(!root["models"].contains(item.key()));
+    }
+    CHECK(keyless == 14);
+
+    ewr::UniversalGenerator generator;
+    CHECK(generator.LoadDatabase("database.json"));
+    size_t jig = 0;
+    for (const auto& model : generator.GetAvailableModels())
+        jig += model.jig ? 1 : 0;
+    CHECK(jig == keyless);
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -9501,6 +9898,7 @@ int main()
     test_generator_local_db();
     test_database_integrity();
     test_database_maintenance_facts();
+    test_database_keeps_keyless_models_from_old_loaders();
     test_packet_structure_integrity();
     test_byte_parity();
     test_executor_success_path();
@@ -9543,6 +9941,9 @@ int main()
     test_interface_pin_option_threading();
     test_trace_context_description();
     test_session_names_its_model_in_the_trace_context();
+    test_session_reads_a_jig_model();
+    test_session_refuses_to_reset_a_jig_model();
+    test_jig_models_load_and_stay_out_of_the_key_search();
     test_classify_eeprom_read_reply();
     test_collect_read_key_candidates();
     test_search_read_key();
@@ -9567,6 +9968,9 @@ int main()
     test_d4_transport_failure_closes_channel();
     test_d4_reassembles_a_fragmented_reply();
     test_d4_short_reply_costs_no_extra_round_trip();
+    test_jig_packets_match_the_wic_capture();
+    test_jig_read_session_replays_the_capture();
+    test_jig_read_session_refuses_cleanly();
     test_address_length_framing();
     test_one_byte_model_address_encoding();
     test_eeprom_read_reply_two_byte_address();

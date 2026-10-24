@@ -2161,10 +2161,11 @@ int main(int argc, char* argv[])
         // No addresses yet, but the read key is enough to dump the EEPROM and
         // go looking for them, so the entry is offered rather than hidden.
         const bool resettable = sm.HasResettableCounters() || sm.HasInkReset();
+        const char* label = sm.jig     ? " (JIG mode - read-only for now)"
+                          : resettable ? " (Smart Protocol - Recommended)"
+                                       : " (no reset addresses yet - read-only)";
 
-        options.push_back({ sm.name + (resettable ? " (Smart Protocol - Recommended)"
-                                                  : " (no reset addresses yet - read-only)"),
-                            false, {}, sm });
+        options.push_back({ sm.name + label, false, {}, sm });
     }
 
     for (const auto& lm : replayModels)
@@ -2900,6 +2901,15 @@ int main(int argc, char* argv[])
             return FinishRun(1);
         }
 
+        // A dump walks 0x00-0xFF, and JIG memory is only known from 0x100.
+        if (selected.smartModel.jig)
+        {
+            std::cerr << "[!] --dump does not support JIG-mode printers yet. Use --status to read\n"
+                         "    the waste counters." << std::endl;
+            JsonFail("not_supported", "--dump does not support JIG-mode printers yet.");
+            return FinishRun(1);
+        }
+
         std::cout << "\n[*] DUMP for " << selected.smartModel.name
                   << ": reading the EEPROM (read-only, no writes)..." << std::endl;
 
@@ -2982,6 +2992,13 @@ int main(int argc, char* argv[])
             std::cerr << "[!] --find-addresses needs a Smart Protocol model: it reads the EEPROM\n"
                          "    with the database read key, and Replay dumps carry none." << std::endl;
             JsonFail("not_supported", "--find-addresses needs a Smart Protocol model; a Replay dump carries no read key.");
+            return FinishRun(1);
+        }
+
+        if (selected.smartModel.jig)
+        {
+            std::cerr << "[!] --find-addresses does not support JIG-mode printers yet." << std::endl;
+            JsonFail("not_supported", "--find-addresses does not support JIG-mode printers yet.");
             return FinishRun(1);
         }
 
@@ -3320,6 +3337,15 @@ int main(int argc, char* argv[])
                       << std::endl;
         }
 
+        if (selected.smartModel.jig)
+        {
+            PrintResetCoverage(selected.smartModel);
+            std::cerr << "\n[!] " << selected.smartModel.name << " is read in JIG mode. EWR cannot reset it yet:\n"
+                         "    its write command is not known. Nothing was written." << std::endl;
+            JsonFail("not_supported", selected.smartModel.name + " cannot be reset yet: no JIG write command is known.");
+            return FinishRun(1);
+        }
+
         // The plan has to be the plan of the run --cartridge would perform,
         // or the dry run describes a reset nobody asked for.
         const std::vector<uint16_t> planAddresses = cli.cartridge
@@ -3458,6 +3484,16 @@ int main(int argc, char* argv[])
         std::cout << "    maintenance tank and CANNOT be reset over USB EEPROM." << std::endl;
         std::cout << "    To reset the Main Waste Ink Box, replace the maintenance box or use a physical chip resetter." << std::endl;
         std::cout << "================================================================================\n" << std::endl;
+    }
+
+    // The Session refuses too; this says so before any prompt.
+    if (selected.smartModel.jig)
+    {
+        std::cerr << "\n[!] " << selected.smartModel.name << " is read in JIG mode, and EWR cannot reset it yet:\n"
+                     "    its write command is not known. Nothing was written. Use --status to read\n"
+                     "    its waste counters." << std::endl;
+        JsonFail("not_supported", selected.smartModel.name + " cannot be reset yet: no JIG write command is known.");
+        return FinishRun(1);
     }
 
     // No addresses and no ink map: the entry carries a working read key and

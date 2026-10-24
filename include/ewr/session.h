@@ -442,6 +442,8 @@ namespace ewr {
         // out, for the caller to read byte by byte.
         StateSnapshot ReadRanges(const std::vector<std::pair<uint16_t, uint8_t>>& chunks,
                                  std::vector<bool>& parsed) const;
+        // The status still comes over D4; the counters only answer in JIG mode.
+        StateSnapshot ReadJigStateFor(const std::vector<uint16_t>* addressOverride) const;
         ExecutorOptions BuildWriteOptions() const;
         std::vector<std::vector<unsigned char>> BuildWriteSession(
             const std::vector<std::pair<uint16_t, uint8_t>>& writes) const;

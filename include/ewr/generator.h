@@ -230,6 +230,11 @@ namespace ewr {
         // never silently picks a winner; a host must warn before writing.
         bool conflict{false};
 
+        // "access": "jig" - read in the keyless JIG mode (jig.h), not with
+        // the keyed '||' commands. rkey/wkey mean nothing here, and no write
+        // command is known yet, so these models are read-only.
+        bool jig{false};
+
         // 'rlen'/'wlen' are the byte length of the ADDRESS field in factory
         // read/write commands - not the length of the value. Older models
         // (e.g. Stylus Photo R220) use 1-byte addressing; sending one of them
@@ -323,6 +328,11 @@ namespace ewr {
         }
 
         bool HasCloseOps() const { return !close_ops.empty(); }
+
+        // What a reset can actually be run for. A JIG model keeps its pad
+        // groups, so its counters can be read and its coverage shown, but
+        // EWR has no JIG write command to run a reset with.
+        bool CanReset() const { return !jig && (HasResettableCounters() || HasInkReset()); }
 
         std::vector<CounterSpec> GetAllCounters() const
         {

@@ -58,6 +58,10 @@ namespace ewr {
         // of the raw drain-window loop. Replay dumps must keep it off.
         bool useSessionLayer = false;
 
+        // Queries are JIG reads (jig.h), sent outside packet mode in the
+        // keyless JIG mode. Takes precedence over useSessionLayer.
+        bool jigMode = false;
+
         // --interface: pin the run to one candidate, identified by its
         // 1-based position in the enumeration order (the number --list
         // shows). Disables the automatic fallback. <= 0 means automatic.

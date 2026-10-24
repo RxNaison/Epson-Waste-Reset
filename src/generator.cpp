@@ -245,10 +245,22 @@ namespace ewr {
                               "db.entry_skipped", oss.str());
             };
 
+            // Models read in a mode that takes no key ("access": "jig"). Kept
+            // apart from "models" so a loader from before 1.6, which reads only
+            // that, never takes them for keyed models with a key of zero.
+            if (&modelsRoot != &j && j.contains("keyless_models") && j["keyless_models"].is_object())
+            {
+                for (auto& [key, val] : j["keyless_models"].items())
+                {
+                    if (!modelsRoot.contains(key))
+                        modelsRoot[key] = val;
+                }
+            }
+
             for (auto& [key, rawVal] : modelsRoot.items())
             {
                 // Reserved root keys of the flat form; never printer names.
-                if (key == "specs" || key == "schema_version")
+                if (key == "specs" || key == "schema_version" || key == "keyless_models")
                     continue;
 
                 if (!rawVal.is_object())
@@ -275,6 +287,7 @@ namespace ewr {
                     model.wlen = val.value("wlen", 2);
                     model.mem_high = val.value("mem_high", 2047);
                     model.conflict = val.value("conflict", false);
+                    model.jig = val.value("access", std::string()) == "jig";
 
                         if (val.contains("aliases") && val["aliases"].is_array())
                     {

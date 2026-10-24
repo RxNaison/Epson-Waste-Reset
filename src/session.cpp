@@ -1,6 +1,7 @@
 #include "ewr/session.h"
 #include "ewr/deviceid.h"
 #include "ewr/version.h"
+#include "ewr/jig.h"
 
 #include <algorithm>
 #include <map>
@@ -262,9 +263,11 @@ namespace ewr {
             return busy;
         }
 
+        // JIG mode has reads of its own shape, and nothing else.
         for (const auto& query : queries)
         {
-            if (!IsReadOnlyQueryPacket(query))
+            const bool read = options.jigMode ? jig::ReadPacketAddress(query) >= 0 : IsReadOnlyQueryPacket(query);
+            if (!read)
             {
                 QueryRunResult refused;
                 refused.query.error = "A query session was handed a packet that is not a read; nothing was sent.";
@@ -385,6 +388,10 @@ namespace ewr {
         std::map<std::pair<uint16_t, uint8_t>, ReadKeyCandidate> byKey;
         for (const DbPrinterModel& model : models)
         {
+            // A JIG model has no read key; its 0 would only be noise.
+            if (model.jig)
+                continue;
+
             ReadKeyCandidate& candidate = byKey[{ model.rkey, model.ReadAddressLength() }];
             candidate.rkey = model.rkey;
             candidate.addressLength = model.ReadAddressLength();
@@ -609,7 +616,8 @@ namespace ewr {
                 wanted.push_back(addr);
         }
 
-        if (m_rangeReads == RangeReads::Refused || wanted.size() < kRangeReadMinimum)
+        // A JIG model has no key for a range read to carry.
+        if (m_model.jig || m_rangeReads == RangeReads::Refused || wanted.size() < kRangeReadMinimum)
             return ReadStateFor(&addresses);
 
         // Runs of consecutive addresses, each cut to what one reply carries.
@@ -705,6 +713,9 @@ namespace ewr {
     // own counter bytes, which is what the commit step needs.
     StateSnapshot Session::ReadStateFor(const std::vector<uint16_t>* addressOverride) const
     {
+        if (m_model.jig)
+            return ReadJigStateFor(addressOverride);
+
         StateSnapshot out;
 
         std::vector<std::vector<unsigned char>> queries;
@@ -745,6 +756,40 @@ namespace ewr {
                     value = v;
             }
             out.values.push_back({ addresses[i], value });
+        }
+
+        return out;
+    }
+
+    StateSnapshot Session::ReadJigStateFor(const std::vector<uint16_t>* addressOverride) const
+    {
+        StateSnapshot out = ReadPrinterStatus(m_gateway, m_queryOptions);
+        if (!out.available)
+            return out;
+
+        std::vector<uint16_t> addresses;
+        std::vector<std::vector<unsigned char>> queries;
+        for (uint16_t addr : addressOverride ? *addressOverride : m_model.GetReadAddresses())
+        {
+            if (addr <= m_model.mem_high)
+            {
+                addresses.push_back(addr);
+                queries.push_back(jig::BuildReadPacket(addr));
+            }
+        }
+
+        if (queries.empty())
+            return out;
+
+        ExecutorOptions jigOptions = m_queryOptions;
+        jigOptions.jigMode = true;
+        const QueryRunResult run = m_gateway.RunQuery({}, queries, jigOptions);
+
+        for (size_t i = 0; i < addresses.size(); ++i)
+        {
+            uint8_t value = 0;
+            const bool read = i < run.query.replies.size() && jig::ParseReadReply(run.query.replies[i], value);
+            out.values.push_back({ addresses[i], read ? static_cast<int>(value) : -1 });
         }
 
         return out;
@@ -1208,6 +1253,17 @@ namespace ewr {
     ResetOutcome Session::RunLifecycle(ResetFlow flow, const ResetHandlers& handlers)
     {
         ResetOutcome out;
+
+        // No JIG write command is known. Refused before anything is read or
+        // sent, so no host can carry a keyless model into the keyed writes.
+        if (m_model.jig)
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Write, "session.jig_reset_unsupported",
+                           "[!] " + m_model.name + " is read in JIG mode, and EWR cannot reset it yet:"
+                           " its write command is not known. Nothing was sent.");
+            out.error = m_model.name + " cannot be reset yet: no JIG write command is known.";
+            return out;
+        }
 
         // ---- Preflight. A printer locked by a foreign error refuses writes
         // with ':42:NA;', so surface that up front rather than failing halfway.

@@ -1213,6 +1213,23 @@ def diff_summary(old, new_db):
     return lines
 
 
+def load_keyless(out_path):
+    """The committed "keyless_models": curated only, no upstream knows them.
+
+    Models read in a mode that takes no key (the SX110 family's JIG mode).
+    They live outside "models" because EWR v1.3-v1.5.1 read this file from
+    main and would load an entry there as a keyed model with key 0.
+    """
+    if not out_path.exists():
+        return {}
+    try:
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    keyless = data.get("keyless_models") if isinstance(data, dict) else None
+    return keyless if isinstance(keyless, dict) else {}
+
+
 def load_committed(out_path):
     """The committed database.json, loaded as the curated top layer."""
     if not out_path.exists():
@@ -1403,6 +1420,10 @@ def cmd_build(args):
     coverage["with_ink"] = sum(1 for e in db.values() if e.get("ink_groups"))
 
     payload = db if args.flat else compact(db)
+    # Never in the flat form: that one exists for clients that predate it.
+    keyless = load_keyless(out_path)
+    if keyless and not args.flat:
+        payload["keyless_models"] = keyless
     new_text = json.dumps(payload, indent=4, sort_keys=True, ensure_ascii=True) + "\n"
 
     # Runs against either form: diff_summary expands the envelope first, so the

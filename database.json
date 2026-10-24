@@ -1,4 +1,680 @@
 {
+    "keyless_models": {
+        "NX110": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus NX110",
+                "Epson Stylus NX110/NX115",
+                "NX110/NX115"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "NX115": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus NX115",
+                "Epson Stylus NX110/NX115",
+                "NX110/NX115"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "SX110": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus SX110",
+                "Epson Stylus SX110/SX115",
+                "SX110/SX115"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "SX115": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus SX115",
+                "Epson Stylus SX110/SX115",
+                "SX110/SX115"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "SX117": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus SX117",
+                "Epson Stylus SX117/SX119",
+                "SX117/SX119"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "SX119": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus SX119",
+                "Epson Stylus SX117/SX119",
+                "SX117/SX119"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "TX110": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus TX110"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "TX111": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus TX111"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "TX112": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus TX112"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "TX113": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus TX113"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "TX114": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus TX114"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "TX115": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus TX115"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "TX117": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus TX117",
+                "Epson Stylus TX117/TX119",
+                "TX117/TX119"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        },
+        "TX119": {
+            "access": "jig",
+            "aliases": [
+                "Epson Stylus TX119",
+                "Epson Stylus TX117/TX119",
+                "TX117/TX119"
+            ],
+            "mem_high": 767,
+            "pad_groups": [
+                {
+                    "addresses": [
+                        532,
+                        533,
+                        534,
+                        535,
+                        536,
+                        537
+                    ],
+                    "counters": [
+                        {
+                            "bytes": [
+                                532,
+                                533
+                            ],
+                            "desc": "Waste Counter 1",
+                            "max": 7300
+                        },
+                        {
+                            "bytes": [
+                                534,
+                                535
+                            ],
+                            "desc": "Waste Counter 2",
+                            "max": 38900
+                        }
+                    ],
+                    "reset": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            ],
+            "rlen": 2,
+            "wlen": 2
+        }
+    },
     "models": {
         "Artisan 1430": {
             "spec": "Artisan 1430-family"

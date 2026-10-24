@@ -2,6 +2,7 @@
 #include "ewr/d4session.h"
 #include "ewr/end4.h"
 #include "ewr/generator.h"
+#include "ewr/jig.h"
 
 #include <algorithm>
 #include <chrono>
@@ -462,8 +463,10 @@ namespace ewr {
                                            log::Reporter& reporter,
                                            const ExecutorOptions& options)
     {
-        // The session core builds its own handshake, so the caller's are
-        // deliberately dropped rather than sent twice.
+        // Both build their own handshake, so the caller's are deliberately
+        // dropped rather than sent twice.
+        if (options.jigMode)
+            return ExecuteJigReadSession(transport, queries, reporter, options);
         if (options.useSessionLayer)
             return ExecuteQuerySessionD4(transport, queries, reporter, options);
 

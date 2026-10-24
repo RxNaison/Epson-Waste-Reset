@@ -1,3 +1,19 @@
+// Sockets first: winsock2.h must come before anything that brings windows.h.
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -8048,7 +8064,8 @@ namespace snmp_test {
                     if (key.empty())
                         continue;
 
-                    for (int value : { 0x00, 0x5E })
+                    // Any byte: a restore writes back what a reset cleared.
+                    for (int value = 0; value < 256; ++value)
                     {
                         if (oid != ewr::SnmpControlOid(CommandOf(ewr::UniversalGenerator::GenerateWritePacket(
                                        model.rkey, cell.first, static_cast<uint8_t>(value), key))))
@@ -10071,6 +10088,147 @@ void test_c_abi_event_levels_use_the_header_numbers()
     ewr_session_close(session);
 }
 
+// Maintenance over the network: a cleaning travels as one SNMP GET, like a
+// read, and the read-only path will not carry it.
+void test_snmp_runs_a_command_once_and_queries_refuse_it()
+{
+    std::cout << "[TEST] test_snmp_runs_a_command_once_and_queries_refuse_it" << std::endl;
+
+    const std::vector<unsigned char> clean = ewr::UniversalGenerator::GenerateFactoryPacket(0x0797, 0x84, { 0x02 });
+    const ewr::snmp::Oid oid = ewr::SnmpControlOid(snmp_test::CommandOf(clean));
+
+    auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
+    snmp_test::ScriptedPrinter* script = printer.get();
+    script->Serve(oid, snmp_test::Bytes("@BDC PS\r\n||:84:OK;"));
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+
+    // The read-only path refuses it before anything is sent.
+    const ewr::QueryRunResult query = gateway.RunQuery({}, { clean }, ewr::DefaultQueryOptions());
+    CHECK(script->requested.empty());
+    CHECK(query.query.replies.size() == 1 && query.query.replies[0].empty());
+
+    const ewr::CommandRunResult run = gateway.RunCommand(clean, ewr::DefaultQueryOptions());
+    CHECK(run.supported && run.sent && run.deviceFound);
+    CHECK(script->requested.size() == 1);
+    const std::vector<unsigned char> payload = ewr::ExtractD4Payload(run.reply);
+    CHECK(std::string(payload.begin(), payload.end()).find("||:84:OK;") != std::string::npos);
+}
+
+namespace raw_port_test {
+
+#ifdef _WIN32
+    using Socket = SOCKET;
+    const Socket kNone = INVALID_SOCKET;
+    void CloseIt(Socket s) { closesocket(s); }
+#else
+    using Socket = int;
+    const Socket kNone = -1;
+    void CloseIt(Socket s) { close(s); }
+#endif
+
+} // namespace raw_port_test
+
+// Print data for a network printer goes to its raw port in one connection.
+void test_raw_tcp_delivers_print_data()
+{
+    std::cout << "[TEST] test_raw_tcp_delivers_print_data" << std::endl;
+    using namespace raw_port_test;
+
+#ifdef _WIN32
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+
+    Socket listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    CHECK(listener != kNone);
+
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    local.sin_port = 0;
+    CHECK(bind(listener, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0);
+    CHECK(listen(listener, 1) == 0);
+
+    socklen_t length = sizeof(local);
+    getsockname(listener, reinterpret_cast<sockaddr*>(&local), &length);
+    const uint16_t port = ntohs(local.sin_port);
+
+    std::vector<unsigned char> received;
+    std::thread server([&]() {
+        Socket client = accept(listener, nullptr, nullptr);
+        if (client == kNone)
+            return;
+        unsigned char buffer[512];
+        for (;;)
+        {
+            const int n = static_cast<int>(recv(client, reinterpret_cast<char*>(buffer), sizeof(buffer), 0));
+            if (n <= 0)
+                break;
+            received.insert(received.end(), buffer, buffer + n);
+        }
+        CloseIt(client);
+    });
+
+    const std::vector<unsigned char> job = ewr::remote::BuildJob({ ewr::remote::NozzleCheck() });
+    std::string error;
+    CHECK(ewr::snmp::SendRawTcp("127.0.0.1", port, job, 3000, error));
+    server.join();
+    CloseIt(listener);
+    CHECK(received == job);
+
+    // Nobody listening: a refusal with a reason, in good time.
+    CHECK(!ewr::snmp::SendRawTcp("127.0.0.1", port, job, 1000, error));
+    CHECK(!error.empty());
+
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+// A reset over the network keeps its backup like a USB one, and a restore
+// travels the same write path back.
+void test_snmp_backup_then_restore_round_trip()
+{
+    std::cout << "[TEST] test_snmp_backup_then_restore_round_trip" << std::endl;
+
+    auto printer = snmp_test::FullPads(); // 0x30 = 0xCA, 0x1FE = 0x18
+    snmp_test::EepromPrinter* script = printer.get();
+    const ewr::DbPrinterModel model = script->model;
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+    ewr::log::Reporter quiet;
+    ewr::Session session(model, gateway, quiet);
+
+    ewr::Backup kept;
+    ewr::ResetHandlers handlers;
+    handlers.saveBackup = [&](const ewr::Backup& backup, std::string& location)
+    {
+        kept = backup;
+        location = "backups/net.json";
+        return true;
+    };
+
+    const ewr::ResetOutcome reset = session.Reset(handlers);
+    CHECK(reset.success);
+    CHECK(kept.transport == "network");
+    CHECK((kept.bytes == std::vector<std::pair<uint16_t, int>>{ { 0x30, 0xCA }, { 0x1FE, 0x18 } }));
+    CHECK(script->eeprom[0x30] == 0x00 && script->eeprom[0x1FE] == 0x00);
+
+    // The backup, through a file and back, undoes the reset.
+    ewr::Backup reread;
+    std::string error;
+    CHECK(ewr::ParseBackupText(ewr::BackupToJson(kept), reread, error));
+    const ewr::RestorePlan plan = ewr::PlanRestore(model, reread);
+    CHECK(plan.writes.size() == 2 && plan.skipped.empty() && plan.missing.empty());
+
+    ewr::ResetHandlers again;
+    const ewr::ResetOutcome restored = session.Restore(plan, again);
+    CHECK(restored.success);
+    CHECK(restored.verificationRan && restored.verifyMismatches == 0);
+    CHECK(script->eeprom[0x30] == 0xCA && script->eeprom[0x1FE] == 0x18);
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -10274,6 +10432,7 @@ int main()
     test_snmp_gateway_tells_a_blocked_send_from_a_silent_printer();
     test_snmp_query_path_never_sends_a_write();
     test_snmp_reset_writes_and_verifies_through_the_session();
+    test_snmp_backup_then_restore_round_trip();
     test_snmp_reset_falls_back_to_the_alternate_key();
     test_snmp_reset_stops_at_a_refused_write();
     test_snmp_reset_refuses_a_replay_dump();
@@ -10282,6 +10441,8 @@ int main()
     test_snmp_discovery_keeps_only_epson_answers();
     test_run_lock_hands_over_to_the_network();
     test_snmp_locked_eeprom_stops_before_any_write();
+    test_snmp_runs_a_command_once_and_queries_refuse_it();
+    test_raw_tcp_delivers_print_data();
 
     std::cout << "\n----------------------------------------" << std::endl;
     if (g_failures == 0)

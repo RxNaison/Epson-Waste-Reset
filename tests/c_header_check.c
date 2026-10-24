@@ -29,6 +29,13 @@ int main(void)
         return 1;
     }
     ewr_session_set_backup_callback(NULL, NULL, NULL);
+    if (ewr_head_clean(NULL, NULL, NULL, EWR_CLEAN_ALL, 0, 0, NULL) != EWR_ERR_INVALID_ARGUMENT
+        || ewr_nozzle_check(NULL, NULL, 0, NULL) != EWR_ERR_INVALID_ARGUMENT
+        || ewr_read_info(NULL, NULL, NULL) != EWR_ERR_INVALID_ARGUMENT)
+    {
+        printf("[FAIL] a maintenance call accepted a NULL session\n");
+        return 1;
+    }
     ewr_set_data_dir(NULL);
     if (strcmp(ewr_status_name(EWR_ERR_BAD_BACKUP), "bad_backup") != 0)
     {

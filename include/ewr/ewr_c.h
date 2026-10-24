@@ -66,8 +66,18 @@ typedef enum ewr_status
     EWR_ERR_WRITE_UNVERIFIED = 12, /* acknowledged, but the read-back disagreed */
     EWR_ERR_IO               = 13,
     EWR_ERR_MODEL_MISMATCH   = 14, /* the printer says it is something else */
-    EWR_ERR_BAD_BACKUP       = 15  /* ABI 3: a backup or dump EWR cannot use */
+    EWR_ERR_BAD_BACKUP       = 15, /* ABI 3: a backup or dump EWR cannot use */
+    EWR_ERR_NOT_STARTED      = 16, /* ABI 3: sent, but the printer never set to work */
+    EWR_ERR_PRINTER_ERROR    = 17  /* ABI 3: the printer reported an error while at it */
 } ewr_status;
+
+/* ABI 3. What ewr_head_clean asks for. */
+typedef enum ewr_clean_group
+{
+    EWR_CLEAN_ALL   = 0,
+    EWR_CLEAN_BLACK = 1,
+    EWR_CLEAN_COLOR = 2
+} ewr_clean_group;
 
 typedef enum ewr_level
 {
@@ -226,6 +236,31 @@ EWR_API int ewr_reset(ewr_session* session, const char* model, int ink, char** o
  * {"model", "target": "restore", "source", "planned_writes", "skipped",
  *  "missing", "unchanged", "phase", "writes", "verification", ...} */
 EWR_API int ewr_restore(ewr_session* session, const char* model, const char* file_contents, char** out_json);
+
+/* ABI 3. Read-only. {"model", "printer", "firmware", "serial", "serial_source",
+ * "counters": [{"key", "value"}], "first_use", "fatal_errors": [{"kind",
+ * "slot", "code"}]}. `model` may be NULL: then only the status and firmware. */
+EWR_API int ewr_read_info(ewr_session* session, const char* model, char** out_json);
+
+/* ABI 3. The printer's own maintenance, with the gates and confirm callback a
+ * reset has, sent once and watched until the printer is done - minutes, not
+ * seconds. No EEPROM byte is written, but a cleaning uses ink and fills the
+ * waste pads. `model` may be NULL for a printer the database does not know:
+ * the cleaning then goes as print data, which has no levels.
+ *
+ * `level`: "gentle", "normal", "medium", "strong" - what the model lists; NULL
+ * is "normal". `power` non-zero is the ink charge instead of a cleaning, and
+ * ignores `level`. `print_data` non-zero sends it as print data even where
+ * the model has its own maintenance command.
+ * {"model", "action", "level", "group", "phase", "route", "sent", "reply",
+ *  "started", "seconds", "printer_before", "printer_after", "pads_before",
+ *  "pads_after", "overrides"} */
+EWR_API int ewr_head_clean(ewr_session* session, const char* model, const char* level, int group,
+                           int power, int print_data, char** out_json);
+
+/* ABI 3. Prints the nozzle check pattern: load plain paper. `variant` 1 asks
+ * for the alternate pattern. Same answer as ewr_head_clean. */
+EWR_API int ewr_nozzle_check(ewr_session* session, const char* model, int variant, char** out_json);
 
 #ifdef __cplusplus
 } /* extern "C" */

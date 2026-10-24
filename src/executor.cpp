@@ -71,6 +71,31 @@ namespace ewr {
             + "    ... " + std::to_string(size - maxBytes) + " further byte(s) not shown\n";
     }
 
+    bool IsReadOnlyQueryPacket(const std::vector<unsigned char>& p)
+    {
+        // [0..5] D4 header on one socket, then the two command letters.
+        if (p.size() < 8 || p[0] != p[1])
+            return false;
+
+        const char a = static_cast<char>(p[6]);
+        const char b = static_cast<char>(p[7]);
+
+        if (a == '|' && b == '|')
+        {
+            if (p.size() < 15)
+                return false;
+
+            const unsigned char c = p[12];
+            if (c != EpsonD4::CMD_EEPROM_READ && c != EpsonD4::CMD_EEPROM_READ_RANGE)
+                return false;
+
+            return p[13] == static_cast<unsigned char>(~c)
+                && p[14] == static_cast<unsigned char>(((c >> 1) & 0x7F) | ((c << 7) & 0x80));
+        }
+
+        return (a == 's' && b == 't') || (a == 'v' && b == 'i') || (a == 'c' && b == 'd');
+    }
+
     bool IsWritePacket(const std::vector<unsigned char>& p)
     {
         // [0..5] D4 header, [6..9] 7C 7C + LE inner length,

@@ -803,6 +803,76 @@ namespace ewr {
         return run;
     }
 
+    PrintDataRunResult SendPrintDataWithFallback(const std::vector<unsigned char>& data,
+                                                 const ExecutorOptions& options,
+                                                 bool appendTraceLog)
+    {
+        PrintDataRunResult run;
+
+        TraceLog traceLog(appendTraceLog);
+        std::ostream& trace = traceLog.stream;
+        std::unique_ptr<UsbBackend> backend = CreateUsbBackend(trace);
+
+        WriteTraceBanner(trace, std::string("EWR PRINT DATA (") + backend->PlatformName() + ")", &options.trace);
+
+        std::vector<UsbCandidate> candidates;
+        std::string error;
+        if (!PrepareCandidates(*backend, trace, options, candidates, run.deviceFound, error))
+        {
+            run.error = error;
+            return run;
+        }
+
+        const int pinned = options.interfaceCandidate;
+        bool opened = false;
+
+        for (std::size_t idx = 0; idx < candidates.size() && !opened; ++idx)
+        {
+            const UsbCandidate& cand = candidates[idx];
+
+            if (pinned >= 1 && static_cast<int>(idx) + 1 != pinned)
+                continue;
+
+            if (cand.className != "USBPRINT" && cand.className != "PRINTER")
+            {
+                trace << "[i] Candidate " << (idx + 1) << " (" << cand.className
+                      << ") is not a printer-class interface; print data does not go there.\n";
+                continue;
+            }
+
+            ITransport* transport = backend->Open(cand.ordinal);
+            if (!transport)
+                continue;
+
+            opened = true;
+            ScopedBackendClose closeGuard(*backend);
+
+            trace << "\n==================================================\n";
+            trace << "BEGIN PRINT DATA\n";
+            trace << "Interface:     " << backend->Describe(cand.ordinal) << "\n";
+            trace << "Bytes:         " << data.size() << "\n";
+            trace << "==================================================\n";
+            trace << HexDump(data.data(), data.size());
+
+            run.sent = transport->Send(data);
+
+            // Some firmware answers the packet-mode exit; take it so it
+            // cannot be the first reply the next session sees.
+            transport->Drain(300);
+
+            trace << "PRINT DATA " << (run.sent ? "SENT" : "NOT ACCEPTED") << "\n";
+            trace << "==================================================\n";
+            closeGuard.Close();
+        }
+
+        if (!opened)
+            run.error = "No printer-class USB interface could be opened for print data.";
+        else if (!run.sent)
+            run.error = "The printer did not accept the print data.";
+
+        return run;
+    }
+
     std::vector<InterfaceInfo> ListPrinterInterfaces(bool appendTraceLog)
     {
         TraceLog traceLog(appendTraceLog);

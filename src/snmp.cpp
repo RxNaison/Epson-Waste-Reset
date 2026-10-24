@@ -20,6 +20,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -444,6 +445,122 @@ namespace snmp {
         };
 
     } // namespace
+
+    bool SendRawTcp(const std::string& host, uint16_t port, const std::vector<unsigned char>& data,
+                    int timeoutMs, std::string& error)
+    {
+        if (!StartSockets(error))
+            return false;
+
+        addrinfo hints{};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+
+        addrinfo* found = nullptr;
+        const std::string service = std::to_string(port);
+        if (getaddrinfo(host.c_str(), service.c_str(), &hints, &found) != 0 || !found)
+        {
+            error = "\"" + host + "\" is not an address or a host name that resolves.";
+            StopSockets();
+            return false;
+        }
+
+        auto setBlocking = [](SocketHandle s, bool blocking)
+        {
+#ifdef _WIN32
+            u_long mode = blocking ? 0 : 1;
+            ioctlsocket(s, FIONBIO, &mode);
+#else
+            const int flags = fcntl(s, F_GETFL, 0);
+            fcntl(s, F_SETFL, blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK));
+#endif
+        };
+
+        // A connect that cannot complete would otherwise sit out the
+        // system's own timeout, tens of seconds, on a printer that is off.
+        SocketHandle connected = kNoSocket;
+        for (addrinfo* entry = found; entry && connected == kNoSocket; entry = entry->ai_next)
+        {
+            SocketHandle s = socket(entry->ai_family, entry->ai_socktype, entry->ai_protocol);
+            if (s == kNoSocket)
+                continue;
+
+#if defined(SO_NOSIGPIPE)
+            int noSigpipe = 1;
+            setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, sizeof(noSigpipe));
+#endif
+
+            setBlocking(s, false);
+            const bool immediate = connect(s, entry->ai_addr, static_cast<socklen_t>(entry->ai_addrlen)) == 0;
+
+            bool ok = immediate;
+            if (!immediate)
+            {
+                fd_set writable;
+                FD_ZERO(&writable);
+                FD_SET(s, &writable);
+                timeval wait;
+                wait.tv_sec = timeoutMs / 1000;
+                wait.tv_usec = (timeoutMs % 1000) * 1000;
+
+                if (select(static_cast<int>(s) + 1, nullptr, &writable, nullptr, &wait) > 0)
+                {
+                    int soError = 0;
+                    socklen_t length = sizeof(soError);
+                    ok = getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &length) == 0
+                         && soError == 0;
+                }
+            }
+
+            if (ok)
+            {
+                setBlocking(s, true);
+                connected = s;
+            }
+            else
+            {
+                CloseSocket(s);
+            }
+        }
+
+        freeaddrinfo(found);
+
+        if (connected == kNoSocket)
+        {
+            error = "The printer at " + host + " did not accept a connection on TCP " + service
+                  + " (its raw print port may be turned off).";
+            StopSockets();
+            return false;
+        }
+
+        size_t sent = 0;
+        while (sent < data.size())
+        {
+#if defined(MSG_NOSIGNAL)
+            const int flags = MSG_NOSIGNAL;
+#else
+            const int flags = 0;
+#endif
+            const int n = static_cast<int>(send(connected, reinterpret_cast<const char*>(data.data()) + sent,
+                                                static_cast<int>(data.size() - sent), flags));
+            if (n <= 0)
+                break;
+            sent += static_cast<size_t>(n);
+        }
+
+        CloseSocket(connected);
+        StopSockets();
+
+        if (sent < data.size())
+        {
+            error = "The connection to " + host + " closed after " + std::to_string(sent) + " of "
+                  + std::to_string(data.size()) + " bytes.";
+            return false;
+        }
+
+        return true;
+    }
 
     std::unique_ptr<IDatagramChannel> OpenUdpChannel(const std::string& host,
                                                      uint16_t port,

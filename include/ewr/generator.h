@@ -558,6 +558,11 @@ namespace ewr {
         static std::vector<unsigned char> GenerateFactoryPacket(uint16_t rkey, uint8_t action,
                                                                 const std::vector<unsigned char>& payload);
 
+        // An EPSON-CTRL command: two letters, a little-endian length, the
+        // payload ('vi' + 00 asks for the firmware version).
+        static std::vector<unsigned char> GenerateControlPacket(char first, char second,
+                                                                const std::vector<unsigned char>& payload);
+
         // Action 0x51: `count` bytes from `address`, answered in one reply.
         static std::vector<unsigned char> GenerateRangeReadPacket(uint16_t rkey, uint16_t address, uint8_t count,
                                                                   uint8_t addressLength = 2);

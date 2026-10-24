@@ -282,6 +282,73 @@ namespace ewr {
         return out;
     }
 
+    nlohmann::json JsonPrinterInfo(const DbPrinterModel* model, const PrinterInfo& info)
+    {
+        auto orNull = [](const std::string& text) {
+            return text.empty() ? nlohmann::json(nullptr) : nlohmann::json(text);
+        };
+
+        nlohmann::json counters = nlohmann::json::array();
+        for (const auto& counter : info.counters)
+            counters.push_back({ { "key", counter.key },
+                                 { "value", counter.value >= 0 ? nlohmann::json(counter.value) : nlohmann::json(nullptr) } });
+
+        nlohmann::json fatal = nlohmann::json::array();
+        for (const auto& slot : info.fatal)
+            fatal.push_back({ { "kind", slot.kind }, { "slot", slot.slot },
+                              { "code", slot.code >= 0 ? nlohmann::json(slot.code) : nlohmann::json(nullptr) } });
+
+        nlohmann::json out;
+        out["model"] = model ? nlohmann::json(model->name) : nlohmann::json(nullptr);
+        out["printer"] = info.available ? JsonPrinterStatus(info.status) : nlohmann::json(nullptr);
+        out["firmware"] = orNull(info.firmware);
+        out["serial"] = orNull(info.serial);
+        out["serial_source"] = orNull(info.serialSource);
+        out["counters"] = std::move(counters);
+        out["first_use"] = info.firstUse >= 0 ? nlohmann::json(info.firstUse) : nlohmann::json(nullptr);
+        out["fatal_errors"] = std::move(fatal);
+        return out;
+    }
+
+    nlohmann::json JsonMaintenanceData(const DbPrinterModel* model, const MaintenanceRequest& request,
+                                       const MaintenanceOutcome& outcome)
+    {
+        auto orNull = [](const std::string& text) {
+            return text.empty() ? nlohmann::json(nullptr) : nlohmann::json(text);
+        };
+
+        const bool clean = request.action != MaintenanceAction::NozzleCheck;
+        const char* group = request.group == CleanGroup::Black ? "black"
+                          : request.group == CleanGroup::Color ? "color" : "all";
+
+        nlohmann::json overrides = nlohmann::json::array();
+        for (const auto& passed : outcome.overrides)
+            overrides.push_back({ { "gate", passed.gate }, { "error", passed.detail },
+                                  { "error_code", passed.errorCode >= 0 ? nlohmann::json(passed.errorCode)
+                                                                         : nlohmann::json(nullptr) } });
+
+        nlohmann::json out;
+        out["model"] = model ? nlohmann::json(model->name) : nlohmann::json(nullptr);
+        out["action"] = MaintenanceActionName(request.action);
+        out["level"] = (request.action == MaintenanceAction::HeadClean) ? nlohmann::json(request.level)
+                                                                         : nlohmann::json(nullptr);
+        out["group"] = clean ? nlohmann::json(group) : nlohmann::json(nullptr);
+        out["phase"] = MaintenancePhaseName(outcome.phase);
+        out["route"] = orNull(outcome.route);
+        out["sent"] = outcome.sent;
+        out["reply"] = orNull(outcome.reply);
+        out["started"] = outcome.started;
+        out["seconds"] = outcome.seconds;
+        out["printer_before"] = outcome.before.available ? JsonPrinterStatus(outcome.before.status) : nlohmann::json(nullptr);
+        out["printer_after"] = outcome.last.valid ? JsonPrinterStatus(outcome.last) : nlohmann::json(nullptr);
+        out["pads_before"] = (model && outcome.before.available) ? JsonPadUsage(*model, outcome.before.values)
+                                                                 : nlohmann::json::array();
+        out["pads_after"] = (model && outcome.after.available) ? JsonPadUsage(*model, outcome.after.values)
+                                                               : nlohmann::json::array();
+        out["overrides"] = std::move(overrides);
+        return out;
+    }
+
     nlohmann::json JsonRestorePlan(const Backup& source, const RestorePlan& plan, const std::string& file)
     {
         auto orNull = [](const std::string& text) {

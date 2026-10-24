@@ -133,6 +133,15 @@ namespace ewr {
             const std::vector<std::vector<unsigned char>>& sequence,
             const ExecutorOptions& options) override;
 
+        // One GET carrying the command, as a read is carried: once.
+        CommandRunResult RunCommand(const std::vector<unsigned char>& command,
+                                    const ExecutorOptions& options) override;
+
+        // SNMP has no print channel, so this goes to the printer's raw port
+        // (TCP 9100) at the same address.
+        PrintDataResult SendPrintData(const std::vector<unsigned char>& data,
+                                      const ExecutorOptions& options) override;
+
     private:
         // False on silence. True with an empty `value` when the printer
         // answered with an SNMP error or something other than a string.

@@ -10,6 +10,9 @@
 #include <utility>
 #include <vector>
 
+#include "ewr/info.h"
+#include "ewr/maintenance.h"
+
 #include <nlohmann/json.hpp>
 
 namespace ewr {
@@ -110,6 +113,15 @@ namespace ewr {
 
     // What a reset ended up doing: phase, writes, verification, before/after.
     nlohmann::json JsonResetData(const DbPrinterModel& model, bool ink, const ResetOutcome& outcome);
+
+    // `info`: firmware, serial, the printer's own counters and its last fatal
+    // error codes. `model` may be null.
+    nlohmann::json JsonPrinterInfo(const DbPrinterModel* model, const PrinterInfo& info);
+
+    // `nozzle-check`, `head-clean`, `power-clean`: what was asked, which way it
+    // went, and what the printer's status said about it.
+    nlohmann::json JsonMaintenanceData(const DbPrinterModel* model, const MaintenanceRequest& request,
+                                       const MaintenanceOutcome& outcome);
 
     // What a restore was asked to do before it touched the printer: the file
     // it came from, the bytes it would write, the ones it left alone and why,

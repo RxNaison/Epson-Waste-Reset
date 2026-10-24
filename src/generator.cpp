@@ -566,6 +566,18 @@ namespace ewr {
         return WrapD4DataPacket(epson_cmd);
     }
 
+    std::vector<unsigned char> UniversalGenerator::GenerateControlPacket(char first, char second,
+                                                                         const std::vector<unsigned char>& payload)
+    {
+        std::vector<unsigned char> command;
+        command.push_back(static_cast<unsigned char>(first));
+        command.push_back(static_cast<unsigned char>(second));
+        command.push_back(static_cast<unsigned char>(payload.size() & 0xFF));
+        command.push_back(static_cast<unsigned char>((payload.size() >> 8) & 0xFF));
+        command.insert(command.end(), payload.begin(), payload.end());
+        return WrapD4DataPacket(command);
+    }
+
     std::vector<unsigned char> UniversalGenerator::GenerateRangeReadPacket(uint16_t rkey, uint16_t address,
                                                                            uint8_t count, uint8_t addressLength)
     {

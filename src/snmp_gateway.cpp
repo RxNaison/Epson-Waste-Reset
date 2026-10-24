@@ -438,6 +438,77 @@ namespace ewr {
         return out;
     }
 
+    CommandRunResult SnmpDeviceGateway::RunCommand(const std::vector<unsigned char>& command,
+                                                   const ExecutorOptions& options)
+    {
+        CommandRunResult out;
+        out.supported = true;
+
+        if (!ClaimPrinter())
+        {
+            out.error = kAnotherRunError;
+            return out;
+        }
+
+        StartTrace();
+        Trace("==================================================\n"
+              "BEGIN COMMAND (sent once)\n"
+              + DescribeTraceContext(options.trace)
+              + "==================================================\n\n");
+
+        std::vector<unsigned char> payload;
+        if (!ExtractDataPayload(command, payload))
+        {
+            out.error = "The command is not an EPSON-CTRL packet.";
+            Trace("[!] " + out.error + "\n");
+            return out;
+        }
+
+        std::vector<unsigned char> value;
+        const bool heard = Get(SnmpControlOid(payload), value);
+
+        out.sent = m_sendSucceeded;
+        out.deviceFound = m_answered;
+        if (heard && !value.empty())
+            out.reply = FrameAsD4Data(value);
+        if (!heard)
+            out.error = SilenceError();
+
+        Trace(std::string("COMMAND ") + (heard ? "ANSWERED" : "UNANSWERED") + "\n"
+              "==================================================\n\n");
+        return out;
+    }
+
+    PrintDataResult SnmpDeviceGateway::SendPrintData(const std::vector<unsigned char>& data,
+                                                     const ExecutorOptions& options)
+    {
+        PrintDataResult out;
+        out.supported = true;
+
+        if (!ClaimPrinter())
+        {
+            out.error = kAnotherRunError;
+            return out;
+        }
+
+        StartTrace();
+        Trace("==================================================\n"
+              "BEGIN PRINT DATA (TCP " + std::to_string(snmp::kRawPrintPort) + ")\n"
+              + DescribeTraceContext(options.trace)
+              + "Bytes:         " + std::to_string(data.size()) + "\n"
+              "==================================================\n"
+              + HexDump(data.data(), data.size()) + "\n");
+
+        std::string error;
+        out.sent = snmp::SendRawTcp(m_host, snmp::kRawPrintPort, data, 3000, error);
+        out.deviceFound = out.sent || m_answered;
+        out.error = error;
+
+        Trace(std::string("PRINT DATA ") + (out.sent ? "SENT" : "NOT SENT: " + error) + "\n"
+              "==================================================\n\n");
+        return out;
+    }
+
     QueryRunResult SnmpDeviceGateway::RunQuery(
         const std::vector<std::vector<unsigned char>>& /*handshake*/,
         const std::vector<std::vector<unsigned char>>& queries,
@@ -468,9 +539,9 @@ namespace ewr {
                 continue;
 
             // The query path stays read-only, whatever it is handed.
-            if (IsWritePacket(queries[i]))
+            if (!IsReadOnlyQueryPacket(queries[i]))
             {
-                Trace("[!] Query " + std::to_string(i + 1) + " is an EEPROM write - not sent.\n");
+                Trace("[!] Query " + std::to_string(i + 1) + " is not a read - not sent.\n");
                 continue;
             }
 

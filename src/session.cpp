@@ -262,10 +262,71 @@ namespace ewr {
             return busy;
         }
 
+        for (const auto& query : queries)
+        {
+            if (!IsReadOnlyQueryPacket(query))
+            {
+                QueryRunResult refused;
+                refused.query.error = "A query session was handed a packet that is not a read; nothing was sent.";
+                log::Log(log::Level::Error, log::Stage::Read, "usb.query_not_read_only",
+                         "[ERROR] " + refused.query.error);
+                return refused;
+            }
+        }
+
         QueryRunResult run = ExecuteQuerySessionWithFallback(handshake, queries, WithPrinterName(SoftResetOnce(options)),
                                                              NextCallAppends());
         ReportSilentPort(run.silentPort);
         return run;
+    }
+
+    CommandRunResult UsbDeviceGateway::RunCommand(const std::vector<unsigned char>& command,
+                                                  const ExecutorOptions& options)
+    {
+        CommandRunResult out;
+        out.supported = true;
+
+        if (!ClaimPrinter())
+        {
+            out.error = kAnotherRunError;
+            return out;
+        }
+
+        // One attempt, one session: the fallback moves to another interface
+        // only when a handshake fails, which is before the command is sent.
+        ExecutorOptions once = WithPrinterName(SoftResetOnce(options));
+        once.maxWriteAttempts = 1;
+
+        const QueryRunResult run = ExecuteQuerySessionWithFallback(UniversalGenerator::GenerateHandshake(),
+                                                                   { command }, once, NextCallAppends());
+        ReportSilentPort(run.silentPort);
+
+        out.deviceFound = run.deviceFound;
+        out.sent = run.deviceFound && !run.query.handshakeFailed && run.query.packetsSent > 0;
+        if (!run.query.replies.empty())
+            out.reply = run.query.replies[0];
+        out.error = run.query.error;
+        return out;
+    }
+
+    PrintDataResult UsbDeviceGateway::SendPrintData(const std::vector<unsigned char>& data,
+                                                    const ExecutorOptions& options)
+    {
+        PrintDataResult out;
+        out.supported = true;
+
+        if (!ClaimPrinter())
+        {
+            out.error = kAnotherRunError;
+            return out;
+        }
+
+        const PrintDataRunResult run = SendPrintDataWithFallback(data, WithPrinterName(SoftResetOnce(options)),
+                                                                 NextCallAppends());
+        out.deviceFound = run.deviceFound;
+        out.sent = run.sent;
+        out.error = run.error;
+        return out;
     }
 
     ResetRunResult UsbDeviceGateway::RunReset(

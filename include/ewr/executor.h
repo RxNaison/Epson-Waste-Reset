@@ -126,6 +126,12 @@ namespace ewr {
     };
 
     bool IsWritePacket(const std::vector<unsigned char>& packet);
+
+    // What a read-only query session may carry: the status ('st'), version
+    // ('vi') and counter ('cd') control commands and the two factory reads
+    // (0x41, 0x51). A write, a cleaning or a firmware command has a path of
+    // its own, so the read-only one refuses them whoever hands them in.
+    bool IsReadOnlyQueryPacket(const std::vector<unsigned char>& packet);
     bool IsEepromWriteOkAck(const std::vector<unsigned char>& ackData);
     bool IsEepromWriteNgAck(const std::vector<unsigned char>& ackData);
     // ':42:NA;' - the firmware understood the write but refuses to apply it

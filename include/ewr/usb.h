@@ -75,6 +75,21 @@ namespace ewr {
         const ExecutorOptions& options,
         bool appendTraceLog = false);
 
+    struct PrintDataRunResult
+    {
+        bool deviceFound = false;
+        bool sent = false;
+        std::string error;
+    };
+
+    // Raw print data to the first printer-class interface that opens (the
+    // --interface pin, when set, if it is one). Never a vendor-specific
+    // interface - on an ET-2xxx that is the maintenance engine, not the
+    // print engine - and never a second interface after the first took bytes.
+    PrintDataRunResult SendPrintDataWithFallback(const std::vector<unsigned char>& data,
+                                                 const ExecutorOptions& options,
+                                                 bool appendTraceLog = false);
+
     // `index` is the 1-based number --list shows and --interface accepts.
     // Stable for fixed hardware: the enumeration sort is deterministic.
     struct InterfaceInfo

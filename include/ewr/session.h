@@ -124,6 +124,28 @@ namespace ewr {
     //  Device gateway: the only thing between a Session and the hardware
     // ------------------------------------------------------------------
 
+    // A maintenance command - a head cleaning - sent once: no retry, no
+    // second interface, whatever came back. A command that drew no reply may
+    // still have run; only the printer's status afterwards can say.
+    struct CommandRunResult
+    {
+        bool supported = false;   // this gateway can send one at all
+        bool deviceFound = false;
+        bool sent = false;        // it left this machine
+        std::vector<unsigned char> reply; // as a query reply; empty when none came
+        std::string error;
+    };
+
+    // Print data (ESC/P2), the way a nozzle check is printed. Nothing comes
+    // back from a print channel.
+    struct PrintDataResult
+    {
+        bool supported = false;
+        bool deviceFound = false;
+        bool sent = false;        // every byte was accepted
+        std::string error;
+    };
+
     // The device I/O a session needs, behind an interface so the lifecycle
     // is unit-testable with a scripted fake and USB-driven in production.
     struct IDeviceGateway
@@ -146,6 +168,23 @@ namespace ewr {
         virtual ResetRunResult RunReset(
             const std::vector<std::vector<unsigned char>>& sequence,
             const ExecutorOptions& options) = 0;
+
+        // Not every way to a printer can send these; the defaults say so.
+        virtual CommandRunResult RunCommand(const std::vector<unsigned char>& command,
+                                            const ExecutorOptions& options)
+        {
+            (void)command;
+            (void)options;
+            return {};
+        }
+
+        virtual PrintDataResult SendPrintData(const std::vector<unsigned char>& data,
+                                              const ExecutorOptions& options)
+        {
+            (void)data;
+            (void)options;
+            return {};
+        }
     };
 
     // The warnings for a USB run that ended silent: jobs waiting in a print
@@ -174,6 +213,14 @@ namespace ewr {
         ResetRunResult RunReset(
             const std::vector<std::vector<unsigned char>>& sequence,
             const ExecutorOptions& options) override;
+
+        CommandRunResult RunCommand(const std::vector<unsigned char>& command,
+                                    const ExecutorOptions& options) override;
+
+        // Printer-class interfaces only, and only the first that opens: a
+        // print job half on one interface and again on another is two jobs.
+        PrintDataResult SendPrintData(const std::vector<unsigned char>& data,
+                                      const ExecutorOptions& options) override;
 
         // Claims the printer for this process and holds it for the life of the
         // gateway. False means another EWR run already has it; see

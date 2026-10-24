@@ -3,7 +3,9 @@
 #include "ewr/deviceid.h"
 #include "ewr/generator.h"
 #include "ewr/json_out.h"
+#include "ewr/info.h"
 #include "ewr/log.h"
+#include "ewr/maintenance.h"
 #include "ewr/paths.h"
 #include "ewr/session.h"
 #include "ewr/snmp_gateway.h"
@@ -382,6 +384,79 @@ namespace {
 
 } // namespace
 
+namespace {
+
+    int RunMaintenance(ewr_session* session, const char* model, const ewr::MaintenanceRequest& request,
+                       char** out_json)
+    {
+        ewr::DbPrinterModel target;
+        const bool named = model && *model;
+        if (named)
+        {
+            const int found = ResolveModel(session, model, target);
+            if (found != EWR_OK)
+                return found;
+        }
+
+        std::string mismatchPassed;
+        std::string deviceId;
+        if (named)
+        {
+            const int reported = CheckReportedModel(session, target, mismatchPassed, deviceId);
+            if (reported != EWR_OK)
+                return reported;
+        }
+
+        ewr::MaintenanceHandlers handlers;
+        handlers.onBlocker = [session](const ewr::Blocker& blocker) -> bool
+        {
+            if (!session->blockerCallback)
+                return false;
+            return session->blockerCallback(ewr::JsonBlocker(blocker).dump().c_str(), session->blockerUser) != 0;
+        };
+        handlers.confirm = [session, &target, named, &request](const ewr::StateSnapshot& state,
+                                                              const std::string& route) -> bool
+        {
+            if (!session->confirmCallback)
+                return false;
+
+            nlohmann::json ask = named ? ewr::JsonStateData(target, state) : nlohmann::json::object();
+            if (!named)
+                ask["printer"] = ewr::JsonPrinterStatus(state.status);
+            ask["target"] = ewr::MaintenanceActionName(request.action);
+            ask["route"] = route;
+            return session->confirmCallback(ask.dump().c_str(), session->confirmUser) != 0;
+        };
+
+        ewr::Maintenance maintenance(session->Gateway(), named ? &target : nullptr, ewr::log::Default(),
+                                     session->options);
+        ewr::MaintenanceOutcome outcome = maintenance.Run(request, handlers);
+
+        if (!mismatchPassed.empty())
+            outcome.overrides.insert(outcome.overrides.begin(), { "model_mismatch", mismatchPassed, -1 });
+
+        const int delivered = Deliver(session, ewr::JsonMaintenanceData(named ? &target : nullptr, request, outcome),
+                                      out_json);
+        if (delivered != EWR_OK)
+            return delivered;
+
+        if (outcome.success)
+            return EWR_OK;
+
+        session->Fail(outcome.error);
+        switch (outcome.phase)
+        {
+            case ewr::MaintenancePhase::Aborted:        return EWR_ERR_BLOCKED;
+            case ewr::MaintenancePhase::NotSupported:   return EWR_ERR_NOT_SUPPORTED;
+            case ewr::MaintenancePhase::DeviceNotFound: return EWR_ERR_DEVICE_NOT_FOUND;
+            case ewr::MaintenancePhase::NeverStarted:   return EWR_ERR_NOT_STARTED;
+            case ewr::MaintenancePhase::Error:          return EWR_ERR_PRINTER_ERROR;
+            default:                                    return EWR_ERR_FAILED;
+        }
+    }
+
+} // namespace
+
 extern "C" {
 
 const char* ewr_version(void)
@@ -419,6 +494,8 @@ const char* ewr_status_name(int status)
         case EWR_ERR_IO:               return "io_error";
         case EWR_ERR_MODEL_MISMATCH:   return "model_mismatch";
         case EWR_ERR_BAD_BACKUP:       return "bad_backup";
+        case EWR_ERR_NOT_STARTED:      return "not_started";
+        case EWR_ERR_PRINTER_ERROR:    return "printer_error";
         default:                       return "unknown";
     }
 }
@@ -870,6 +947,65 @@ int ewr_restore(ewr_session* session, const char* model, const char* file_conten
 
         session->Fail(outcome.error);
         return OutcomeStatus(outcome);
+    });
+}
+
+int ewr_read_info(ewr_session* session, const char* model, char** out_json)
+{
+    return Guard(session, [&]() -> int
+    {
+        ewr::DbPrinterModel target;
+        const bool named = model && *model;
+        if (named)
+        {
+            const int found = ResolveModel(session, model, target);
+            if (found != EWR_OK)
+                return found;
+        }
+
+        const ewr::PrinterInfo info = ewr::ReadPrinterInfo(session->Gateway(), named ? &target : nullptr,
+                                                           ewr::log::Default(), session->options);
+        if (!info.available)
+        {
+            session->Fail(session->Unanswered("The printer did not answer the status query."));
+            return EWR_ERR_READ_FAILED;
+        }
+
+        return Deliver(session, ewr::JsonPrinterInfo(named ? &target : nullptr, info), out_json);
+    });
+}
+
+
+int ewr_head_clean(ewr_session* session, const char* model, const char* level, int group,
+                   int power, int print_data, char** out_json)
+{
+    return Guard(session, [&]() -> int
+    {
+        if (group < EWR_CLEAN_ALL || group > EWR_CLEAN_COLOR)
+        {
+            session->Fail("Unknown cleaning group.");
+            return EWR_ERR_INVALID_ARGUMENT;
+        }
+
+        ewr::MaintenanceRequest request;
+        request.action = power ? ewr::MaintenanceAction::PowerClean : ewr::MaintenanceAction::HeadClean;
+        request.level = (level && *level) ? level : "normal";
+        request.group = group == EWR_CLEAN_BLACK ? ewr::CleanGroup::Black
+                      : group == EWR_CLEAN_COLOR ? ewr::CleanGroup::Color
+                                                 : ewr::CleanGroup::All;
+        request.remoteOnly = (print_data != 0);
+        return RunMaintenance(session, model, request, out_json);
+    });
+}
+
+int ewr_nozzle_check(ewr_session* session, const char* model, int variant, char** out_json)
+{
+    return Guard(session, [&]() -> int
+    {
+        ewr::MaintenanceRequest request;
+        request.action = ewr::MaintenanceAction::NozzleCheck;
+        request.nozzleVariant = variant;
+        return RunMaintenance(session, model, request, out_json);
     });
 }
 

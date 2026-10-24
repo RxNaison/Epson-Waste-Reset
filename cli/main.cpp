@@ -1873,8 +1873,8 @@ int main(int argc, char* argv[])
             return UsageError(cli, "--info only reads; it has no dry run.");
     }
 
-    if (cli.dumpFull && !cli.dump)
-        return UsageError(cli, "--full belongs to --dump: ewr --dump --full reads every byte up to mem_high.");
+    if (cli.dumpFull && !cli.dump && !cli.findAddresses)
+        return UsageError(cli, "--full belongs to --dump or --find-addresses: it reads every byte up to mem_high.");
 
     if (!cli.restoreFile.empty()
         && (cli.listOnly || cli.findKey || cli.statusOnly || cli.dump || cli.findAddresses || cli.cartridge))
@@ -2985,32 +2985,47 @@ int main(int argc, char* argv[])
             return FinishRun(1);
         }
 
-        // The passes are separated by a head cleaning that a person has to
-        // start on the printer, so this one cannot be driven headlessly.
-        // A caller that wants the readings can run --dump around its own
-        // cleanings and compare the files.
-        if (cli.json)
-        {
-            std::cerr << "[!] --find-addresses needs someone at the printer to run a head cleaning\n"
-                         "    between passes, so it has no --json form. Use --dump around your own\n"
-                         "    cleanings instead." << std::endl;
-            JsonFail("not_supported", "--find-addresses needs a head cleaning between passes and cannot run headlessly.");
-            return FinishRun(1);
-        }
-
-        const uint32_t end = std::min<uint32_t>(selected.smartModel.mem_high, 0xFF);
-        std::vector<uint16_t> addresses;
-        for (uint32_t a = 0; a <= end; ++a)
-            addresses.push_back(static_cast<uint16_t>(a));
+        const std::vector<uint16_t> addresses = ewr::DumpAddresses(selected.smartModel, cli.dumpFull);
+        const uint32_t end = addresses.empty() ? 0 : addresses.back();
 
         std::cout << "\n[*] ADDRESS DISCOVERY for " << selected.smartModel.name << std::endl;
-        std::cout << "    EWR will read the EEPROM three times. Between reads you run a head" << std::endl;
-        std::cout << "    cleaning from the printer itself - that is the one action guaranteed to" << std::endl;
-        std::cout << "    move the waste counter. Bytes that rise after BOTH cleanings are the" << std::endl;
-        std::cout << "    counters; a byte that moves only once is a timer or a page count." << std::endl;
-        std::cout << "    Nothing is written to the printer at any point." << std::endl;
+        std::cout << "    EWR will read the EEPROM three times with a head cleaning between reads -" << std::endl;
+        std::cout << "    the one action guaranteed to move the waste counter. Bytes that rise after" << std::endl;
+        std::cout << "    BOTH cleanings are the counters; a byte that moves only once is a timer or" << std::endl;
+        std::cout << "    a page count. No EEPROM byte is written at any point." << std::endl;
         std::cout << "\n    A cleaning uses real ink and pushes the waste counter up, so this costs" << std::endl;
-        std::cout << "    a little of both. Two cleanings is the minimum that proves a trend.\n" << std::endl;
+        std::cout << "    a little of both. Two cleanings is the minimum that proves a trend." << std::endl;
+
+        // EWR can run the cleanings itself; a person at the panel is
+        // the fallback, and the only way under --json without --yes.
+        bool autoClean = false;
+        if (cli.assumeYes)
+        {
+            autoClean = true;
+            std::cout << "\n[i] --yes: EWR runs the two cleanings itself." << std::endl;
+        }
+        else if (cli.json)
+        {
+            std::cerr << "[!] --find-addresses under --json runs the cleanings itself, which uses ink:\n"
+                         "    pass --yes to agree to that." << std::endl;
+            JsonFail("blocked", "--find-addresses under --json needs --yes to run the two cleanings.");
+            return FinishRun(1);
+        }
+        else
+        {
+            std::cout << "\nShould EWR run the two cleanings itself? [Y/n] (n: you start each one from the\n"
+                         "printer's panel): ";
+            std::string answer;
+            if (!std::getline(std::cin, answer))
+            {
+                std::cerr << "\n[!] No input available; stopping. Nothing was changed." << std::endl;
+                JsonFail("blocked", "The cleaning question needs someone at the keyboard.");
+                return FinishRun(1);
+            }
+            const std::string a = toLower(answer);
+            autoClean = a.empty() || a == "y" || a == "yes";
+        }
+        std::cout << std::endl;
 
         std::vector<ewr::EepromSnapshot> snapshots;
         const int passes = 3;
@@ -3053,6 +3068,47 @@ int main(int argc, char* argv[])
             if (pass == passes)
                 break;
 
+            if (autoClean)
+            {
+                std::cout << "\n[*] Head cleaning " << pass << " of " << (passes - 1) << "..." << std::endl;
+
+                ewr::MaintenanceRequest clean;
+                ewr::Maintenance maintenance(gateway, &selected.smartModel, ewr::log::Default(), sessionOptions);
+
+                ewr::MaintenanceHandlers handlers;
+                handlers.onBlocker = [&](const ewr::Blocker& blocker)
+                {
+                    std::cout << "\n[!] " << blocker.errorName << ". " << blocker.explanation << std::endl;
+                    if (cli.forceYes)
+                        return true;
+                    std::cout << "    Stopping: a cleaning the printer objects to proves nothing." << std::endl;
+                    return false;
+                };
+                const bool animate = !g_json && StdoutIsTerminal();
+                handlers.onProgress = [animate](const ewr::PrinterStatus& status, int seconds)
+                {
+                    if (animate)
+                        std::cout << "\r[*] " << seconds << " s: " << status.stateName << "          " << std::flush;
+                };
+
+                const ewr::MaintenanceOutcome cleaned = maintenance.Run(clean, handlers);
+                if (animate)
+                    std::cout << std::endl;
+
+                if (!cleaned.success)
+                {
+                    std::cerr << "[ERROR] Cleaning " << pass << " did not complete ("
+                              << ewr::MaintenancePhaseName(cleaned.phase) << "): " << cleaned.error << std::endl;
+                    std::cerr << "        Run --find-addresses again and answer 'n' to start the cleanings from"
+                                 " the printer's panel." << std::endl;
+                    JsonFail("not_started", "Cleaning " + std::to_string(pass) + " did not complete: " + cleaned.error);
+                    return FinishRun(1);
+                }
+
+                std::cout << std::endl;
+                continue;
+            }
+
             std::cout << "\n    Dump " << pass << " is taken. Run a head cleaning cycle on the printer"
                       << " now,\n    wait until it has completely finished, then press Enter for the"
                       << " next dump." << std::endl;
@@ -3074,6 +3130,16 @@ int main(int argc, char* argv[])
         }
 
         const std::vector<ewr::ByteTrend> trends = ewr::FindTrendingBytes(snapshots);
+
+        nlohmann::json readings = nlohmann::json::array();
+        for (const ewr::ByteTrend& t : trends)
+            readings.push_back({ { "addresses", t.addresses }, { "values", t.values },
+                                 { "deltas", t.deltas }, { "rising", t.rising } });
+        g_jsonData["model"] = selected.smartModel.name;
+        g_jsonData["passes"] = snapshots.size();
+        g_jsonData["cleanings"] = autoClean ? "ewr" : "panel";
+        g_jsonData["readings"] = readings;
+        g_jsonData["file"] = nullptr;
 
         if (shortPasses > 0)
         {
@@ -3142,7 +3208,7 @@ int main(int argc, char* argv[])
         for (char ch : selected.smartModel.name)
             safeName += std::isalnum(static_cast<unsigned char>(ch)) ? ch : '_';
 
-        const std::string outPath = safeName + "-found-addresses.json";
+        const std::string outPath = ewr::paths::InDataDir(safeName + "-found-addresses.json");
         std::ofstream out(outPath);
         if (!out)
         {
@@ -3152,6 +3218,7 @@ int main(int argc, char* argv[])
         }
         out << ewr::FormatDiscoveryJson(selected.smartModel.name, body.str(), trends);
         out.close();
+        g_jsonData["file"] = outPath;
 
         size_t rising = 0;
         for (const ewr::ByteTrend& t : trends)

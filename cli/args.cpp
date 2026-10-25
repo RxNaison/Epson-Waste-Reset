@@ -314,6 +314,10 @@ namespace ewr::cli {
                 return UsageError(cli, "--print-data goes with --nozzle-check, --head-clean or --power-clean.");
             if (cli.info && cli.dryRun)
                 return UsageError(cli, "--info only reads; it has no dry run.");
+            // It would run its head cleanings all the same.
+            if (cli.findAddresses && cli.dryRun)
+                return UsageError(cli, "--find-addresses has no dry run: it reads the EEPROM and runs two head"
+                                       " cleanings, which it asks about first.");
         }
 
         if (cli.restoreAll && (cli.json || cli.assumeYes))

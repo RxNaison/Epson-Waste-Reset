@@ -117,7 +117,8 @@ namespace ewr::cli {
                 else
                 {
                     std::cout << "\n    The printer speaks EWR's protocol with that key. To look at its memory,\n"
-                                 "    read it with one of those entries - both of these are read-only:\n"
+                                 "    read it with one of those entries. Neither writes the EEPROM; the second\n"
+                                 "    asks before it runs its two head cleanings:\n"
                                  "        ewr --model \"" << names.front() << "\" --dump\n"
                                  "        ewr --model \"" << names.front() << "\" --find-addresses\n"
                                  "\n    Do NOT run a reset with that entry: the key fits, but its addresses are\n"
@@ -189,6 +190,13 @@ namespace ewr::cli {
         std::cout << "\n    A cleaning uses real ink and pushes the waste counter up, so this costs" << std::endl;
         std::cout << "    a little of both. Two cleanings is the minimum that proves a trend." << std::endl;
 
+        // A borrowed entry's cleaning byte is that model's command: on another
+        // printer the same byte can be another one - 0x04 is a cleaning on some
+        // models and the ink charge on others. Only the printer's own entry
+        // gets the factory route; anything else gets the printer's own
+        // cleaning, sent as print data.
+        const bool ownEntry = !ctx.detectedMatch.empty() && ctx.detectedMatch == selected.smartModel.name;
+
         // EWR can run the cleanings itself; a person at the panel is
         // the fallback, and the only way under --json without --yes.
         bool autoClean = false;
@@ -218,6 +226,10 @@ namespace ewr::cli {
             const std::string a = toLower(answer);
             autoClean = a.empty() || a == "y" || a == "yes";
         }
+
+        if (autoClean && !ownEntry)
+            std::cout << "\n[i] The printer is not known to be " << selected.smartModel.name << ", so EWR asks it for\n"
+                         "    its own normal cleaning, sent as print data, not with that entry's command." << std::endl;
         std::cout << std::endl;
 
         std::vector<ewr::discovery::EepromSnapshot> snapshots;
@@ -266,6 +278,7 @@ namespace ewr::cli {
                 std::cout << "\n[*] Head cleaning " << pass << " of " << (passes - 1) << "..." << std::endl;
 
                 ewr::MaintenanceRequest clean;
+                clean.remoteOnly = !ownEntry;
                 ewr::Maintenance maintenance(gateway, &selected.smartModel, ewr::log::Default(), sessionOptions);
 
                 ewr::MaintenanceHandlers handlers;

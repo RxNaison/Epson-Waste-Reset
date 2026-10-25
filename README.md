@@ -313,7 +313,7 @@ On macOS the downloaded binary is quarantined by Gatekeeper. Clear it with `xatt
 
 Adding or fixing a printer means **editing `database.json` and opening a pull request** - no C++ required. `database.json` is the curated source of truth: the weekly rebuild merges upstream sources *around* your values and can never overwrite a hand edit. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the field reference and what makes a good pull request.
 
-If your model is missing entirely, two things have to be found: a read key the printer answers to, and then its addresses. Start with the safe methods - EWR ships the tooling for both, and neither writes anything.
+If your model is missing entirely, two things have to be found: a read key the printer answers to, and then its addresses. Start with the safe methods - EWR ships the tooling for both, and neither writes the EEPROM.
 
 ### Is there a key for it? (read-only)
 
@@ -331,17 +331,17 @@ It reads one byte with each of the ~130 distinct read keys in the database - a f
 
 Either way, attach `ewr_trace.log` to an issue: it records how every key was answered.
 
-### Finding the counters yourself (read-only)
+### Finding the counters yourself (no EEPROM writes)
 
 Around 113 database entries carry a working read key but no reset addresses - EWR can read those printers, it just does not know which bytes hold the waste counter. They appear in the menu as `(no reset addresses yet - read-only)`.
 
-`--find-addresses` goes looking. It reads the EEPROM three times with a head cleaning between reads, because a cleaning is the one action guaranteed to move the waste counter. EWR offers to run the cleanings itself; answer `n` to start each one from the printer's panel instead:
+`--find-addresses` goes looking. It reads the EEPROM three times with a head cleaning between reads, because a cleaning is the one action guaranteed to move the waste counter. EWR offers to run the cleanings itself; answer `n` to start each one from the printer's panel instead. On a printer that did not match the entry you named - one `--find-key` found a sibling's key for - EWR asks for the printer's own normal cleaning, sent as print data, never that entry's cleaning command: one model's cleaning byte can be another model's ink charge.
 
 ```
 ewr --model ET-M1180 --find-addresses --no-update
 ```
 
-Bytes that move the **same way after both** cleanings are reported, rising or falling, with their three readings side by side; a byte that moves only once is a timer or a page count and is dropped. A waste counter only ever rises, so the rising rows are the candidates and a falling one is something else - an ink level, a countdown. Two intervals is the minimum that tells those apart, which is why it takes three reads. Little-endian pairs are handled, so a low byte rolling over into its neighbour is reported as one 16-bit counter rather than discarded for falling. Nothing is written to the printer at any point, and the result is saved as `<Model>-found-addresses.json`.
+Bytes that move the **same way after both** cleanings are reported, rising or falling, with their three readings side by side; a byte that moves only once is a timer or a page count and is dropped. A waste counter only ever rises, so the rising rows are the candidates and a falling one is something else - an ink level, a countdown. Two intervals is the minimum that tells those apart, which is why it takes three reads. Little-endian pairs are handled, so a low byte rolling over into its neighbour is reported as one 16-bit counter rather than discarded for falling. No EEPROM byte is written at any point, and the result is saved as `<Model>-found-addresses.json`.
 
 Budget a few minutes: a read of the low page takes about a minute and a half on older models, and seconds where the printer answers range reads; it runs three times with two cleanings in between. A cleaning also uses real ink and pushes the waste counter up.
 

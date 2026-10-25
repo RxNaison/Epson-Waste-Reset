@@ -108,7 +108,7 @@ namespace ewr::cli {
         else if (cli.dump)
             std::cout << "[i] DUMP MODE: reading the EEPROM to a file, no writes will be sent.\n" << std::endl;
         else if (cli.findAddresses)
-            std::cout << "[i] ADDRESS DISCOVERY: repeated read-only EEPROM dumps, no writes will be sent.\n" << std::endl;
+            std::cout << "[i] ADDRESS DISCOVERY: three EEPROM reads around two head cleanings; no EEPROM byte is written.\n" << std::endl;
         else if (cli.info)
             std::cout << "[i] PRINTER INFO: read-only, nothing is written.\n" << std::endl;
         else if (cli.nozzleCheck || cli.headClean || cli.powerClean)

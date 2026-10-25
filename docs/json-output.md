@@ -420,6 +420,11 @@ the printer was first used; its encoding is not known yet. A `fatal_errors`
 From 1.6 EWR can run the two head cleanings itself (`cleanings: "ewr"`), which
 is what lets this command run under `--json` at all: it needs `--yes`, the
 consent to the ink the cleanings use. `"panel"` means a person started them.
+EWR sends the model's own cleaning command only when the printer matched the
+entry; on any other printer - one `--find-key` found a borrowed key for - it
+sends the printer's own normal cleaning as print data, since one model's
+cleaning byte can be another model's ink charge. `--find-addresses` has no
+`--dry-run`.
 
 **find-key**
 

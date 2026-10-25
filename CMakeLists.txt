@@ -132,7 +132,9 @@ if(EWR_RESTORE_ALL)
 endif()
 
 if(EWR_BUILD_CLI)
-    add_executable(ewr cli/main.cpp)
+    add_executable(ewr cli/main.cpp cli/args.cpp cli/run.cpp cli/render.cpp cli/select.cpp cli/list.cpp
+                       cli/status.cpp cli/dump.cpp cli/discovery.cpp cli/maintenance.cpp cli/restore.cpp
+                       cli/reset.cpp)
     target_link_libraries(ewr PRIVATE ewr_core)
     if(EWR_RESTORE_ALL)
         target_compile_definitions(ewr PRIVATE EWR_RESTORE_ALL)

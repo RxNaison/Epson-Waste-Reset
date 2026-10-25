@@ -363,7 +363,7 @@ namespace ewr {
                        "[*] Watching the printer's status until it is done...");
 
         int silent = 0;
-        for (int poll = 0;; ++poll)
+        for (;;)
         {
             if (pollIntervalMs > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(pollIntervalMs));

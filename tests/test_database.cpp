@@ -1424,3 +1424,46 @@ void test_database_keeps_keyless_models_from_old_loaders()
         jig += model.jig ? 1 : 0;
     CHECK(jig == keyless);
 }
+
+// A number on the write path that does not fit costs its model, never a
+// wrapped value: get<uint16_t>() would turn 70000 into 4464 and write a cell
+// nobody named. More reset values than addresses leaves the pairing unknown.
+void test_database_refuses_write_numbers_that_do_not_fit()
+{
+    std::cout << "[TEST] test_database_refuses_write_numbers_that_do_not_fit" << std::endl;
+
+    const std::string file = "test_write_numbers_db.json";
+    {
+        std::ofstream out(file);
+        out << R"({"schema_version": 4, "models": {)"
+            << R"( "Good": {"rkey": 8, "wkey": "Arkanoid", "pad_groups": [{"addresses": [48, 49], "reset": [0]}],)"
+            << R"(  "close": [{"addr": 256, "and": 254}]},)"
+            << R"( "WideAddress": {"rkey": 8, "wkey": "Arkanoid", "pad_groups": [{"addresses": [70000], "reset": [0]}]},)"
+            << R"( "NegativeAddress": {"rkey": 8, "wkey": "Arkanoid", "pad_groups": [{"addresses": [-1], "reset": [0]}]},)"
+            << R"( "WideValue": {"rkey": 8, "wkey": "Arkanoid", "pad_groups": [{"addresses": [48], "reset": [300]}]},)"
+            << R"( "ExtraValue": {"rkey": 8, "wkey": "Arkanoid", "pad_groups": [{"addresses": [48], "reset": [0, 94]}]},)"
+            << R"( "WideMask": {"rkey": 8, "wkey": "Arkanoid", "pad_groups": [{"addresses": [48], "reset": [0]}],)"
+            << R"(  "close": [{"addr": 256, "and": 510}]},)"
+            << R"( "NoCommitAddress": {"rkey": 8, "wkey": "Arkanoid", "pad_groups": [{"addresses": [48], "reset": [0]}],)"
+            << R"(  "close": [{"and": 254}]},)"
+            << R"( "WideInk": {"rkey": 8, "wkey": "Arkanoid", "pad_groups": [],)"
+            << R"(  "ink_groups": [{"color": "black", "addresses": [65536], "reset": [0]}]})"
+            << R"( }})";
+    }
+
+    ewr::Database db;
+    const bool loaded = db.Load(file);
+    fs::remove(file);
+
+    CHECK(loaded);
+    const std::vector<ewr::DbPrinterModel> models = db.Models();
+    CHECK(models.size() == 1);
+    if (models.size() != 1)
+        return;
+
+    // A short list still pads with 0x00, and the commit defaults still load.
+    const ewr::DbPrinterModel& good = models[0];
+    CHECK(good.name == "Good");
+    CHECK((good.GetAllResetValues() == std::vector<uint8_t>{ 0x00, 0x00 }));
+    CHECK(good.close_ops.size() == 1 && good.close_ops[0].or_mask == 0x00);
+}

@@ -2,6 +2,8 @@
 #include "ewr/updater.h"
 #include <cstdio>
 #include <sstream>
+#include <stdexcept>
+#include <string>
 
 #include "ewr/log.h"
 #include <fstream>
@@ -12,6 +14,42 @@ using json = nlohmann::json;
 namespace ewr {
 
     namespace {
+
+        // A number on the write path - an address, a reset value, a commit
+        // mask - or the entry is malformed: get<uint16_t>() would wrap 70000 to
+        // 4464 and name a cell nobody meant.
+        unsigned long WriteNumber(const json& value, unsigned long limit, const char* what)
+        {
+            const bool whole = value.is_number_unsigned()
+                || (value.is_number_integer() && value.get<long long>() >= 0);
+            if (!whole || value.get<unsigned long long>() > limit)
+                throw std::out_of_range(std::string(what) + " " + value.dump() + " is out of range");
+            return static_cast<unsigned long>(value.get<unsigned long long>());
+        }
+
+        // Addresses and reset values pair by position, and a missing value is
+        // 0x00. More values than addresses leaves no way to tell which one
+        // belongs to which, so the entry is malformed.
+        void PairResetValues(std::vector<uint16_t>& addresses, std::vector<uint8_t>& values,
+                             const json& owner)
+        {
+            if (owner.contains("addresses") && owner["addresses"].is_array())
+            {
+                for (const auto& addr : owner["addresses"])
+                    addresses.push_back(static_cast<uint16_t>(WriteNumber(addr, 0xFFFF, "address")));
+            }
+
+            if (owner.contains("reset") && owner["reset"].is_array())
+            {
+                for (const auto& rst : owner["reset"])
+                    values.push_back(static_cast<uint8_t>(WriteNumber(rst, 0xFF, "reset value")));
+            }
+
+            if (values.size() > addresses.size())
+                throw std::length_error("more reset values than addresses");
+
+            values.resize(addresses.size(), 0x00);
+        }
 
         std::vector<uint16_t> AddressList(const json& value)
         {
@@ -305,21 +343,7 @@ namespace ewr {
                             PadGroup pg;
                             pg.description = pg_json.value("desc", "");
                             pg.kind = pg_json.value("kind", "");
-
-                            if (pg_json.contains("addresses") && pg_json["addresses"].is_array())
-                            {
-                                for (auto& addr : pg_json["addresses"])
-                                    pg.addresses.push_back(addr.get<uint16_t>());
-                            }
-
-                            if (pg_json.contains("reset") && pg_json["reset"].is_array())
-                            {
-                                for (auto& rst : pg_json["reset"])
-                                    pg.reset_values.push_back(rst.get<uint8_t>());
-                            }
-
-                            while (pg.reset_values.size() < pg.addresses.size())
-                                pg.reset_values.push_back(0x00);
+                            PairResetValues(pg.addresses, pg.reset_values, pg_json);
 
                             // Independent from the write list: a shared nibble
                             // byte is read but never reset on its own.
@@ -381,18 +405,7 @@ namespace ewr {
                         PadGroup pg;
                         pg.description = "Waste counters";
                         pg.kind = "";
-
-                        for (auto& addr : val["addresses"])
-                            pg.addresses.push_back(addr.get<uint16_t>());
-
-                        if (val.contains("reset") && val["reset"].is_array())
-                        {
-                            for (auto& rst : val["reset"])
-                                pg.reset_values.push_back(rst.get<uint8_t>());
-                        }
-
-                        while (pg.reset_values.size() < pg.addresses.size())
-                            pg.reset_values.push_back(0x00);
+                        PairResetValues(pg.addresses, pg.reset_values, val);
 
                         if (!pg.addresses.empty())
                             model.pad_groups.push_back(std::move(pg));
@@ -407,10 +420,14 @@ namespace ewr {
                             if (!c_json.is_object())
                                 continue;
 
+                            // No address would rewrite byte 0 after every reset.
+                            if (!c_json.contains("addr"))
+                                throw std::invalid_argument("commit step without an address");
+
                             CloseOp op;
-                            op.address = c_json.value("addr", 0);
-                            op.and_mask = static_cast<uint8_t>(c_json.value("and", 255));
-                            op.or_mask = static_cast<uint8_t>(c_json.value("or", 0));
+                            op.address = static_cast<uint16_t>(WriteNumber(c_json["addr"], 0xFFFF, "commit address"));
+                            op.and_mask = static_cast<uint8_t>(WriteNumber(c_json.value("and", json(255)), 0xFF, "commit mask"));
+                            op.or_mask = static_cast<uint8_t>(WriteNumber(c_json.value("or", json(0)), 0xFF, "commit mask"));
 
                             // An entry that changes nothing costs a needless write.
                             if (op.and_mask != 0xFF || op.or_mask != 0x00)
@@ -429,21 +446,7 @@ namespace ewr {
 
                             InkGroup ig;
                             ig.color = ig_json.value("color", "");
-
-                            if (ig_json.contains("addresses") && ig_json["addresses"].is_array())
-                            {
-                                for (auto& addr : ig_json["addresses"])
-                                    ig.addresses.push_back(addr.get<uint16_t>());
-                            }
-
-                            if (ig_json.contains("reset") && ig_json["reset"].is_array())
-                            {
-                                for (auto& rst : ig_json["reset"])
-                                    ig.reset_values.push_back(rst.get<uint8_t>());
-                            }
-
-                            while (ig.reset_values.size() < ig.addresses.size())
-                                ig.reset_values.push_back(0x00);
+                            PairResetValues(ig.addresses, ig.reset_values, ig_json);
 
                             if (!ig.addresses.empty())
                                 model.ink_groups.push_back(std::move(ig));
@@ -471,7 +474,7 @@ namespace ewr {
 
                     fresh[key] = std::move(model);
                 }
-                catch (const json::exception& e)
+                catch (const std::exception& e)
                 {
                     skipEntry(key, e.what());
                 }

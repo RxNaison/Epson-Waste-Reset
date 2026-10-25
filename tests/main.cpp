@@ -214,6 +214,7 @@ void test_reset_refuses_a_model_with_nothing_to_write();
 void test_c_abi_refuses_what_a_jig_model_cannot_do();
 void test_snmp_command_is_never_sent_twice();
 void test_json_overrides_have_one_shape();
+void test_database_refuses_write_numbers_that_do_not_fit();
 
 int main()
 {
@@ -434,6 +435,7 @@ int main()
     test_c_abi_refuses_what_a_jig_model_cannot_do();
     test_snmp_command_is_never_sent_twice();
     test_json_overrides_have_one_shape();
+    test_database_refuses_write_numbers_that_do_not_fit();
 
     std::cout << "\n----------------------------------------" << std::endl;
     if (g_failures == 0)

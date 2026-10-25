@@ -3,6 +3,33 @@
 
 namespace ewr {
 
+    namespace {
+
+        // One shape for every gate a run wrote or acted past, null where a key
+        // does not apply - the reset's and the maintenance's alike.
+        nlohmann::json Overrides(const std::vector<GateOverride>& passed)
+        {
+            nlohmann::json out = nlohmann::json::array();
+            for (const auto& gate : passed)
+            {
+                const bool mismatch = gate.gate == "model_mismatch";
+                const bool blocker = gate.gate == "blocker";
+                out.push_back({
+                    { "gate", gate.gate },
+                    { "detected_model", mismatch ? nlohmann::json(gate.detail) : nlohmann::json(nullptr) },
+                    { "error", blocker ? nlohmann::json(gate.detail) : nlohmann::json(nullptr) },
+                    { "error_code", blocker && gate.errorCode >= 0 ? nlohmann::json(gate.errorCode)
+                                                                   : nlohmann::json(nullptr) },
+                    // Why a gate without a key of its own objected ("not_saved").
+                    { "detail", (mismatch || blocker || gate.detail.empty()) ? nlohmann::json(nullptr)
+                                                                             : nlohmann::json(gate.detail) },
+                });
+            }
+            return out;
+        }
+
+    } // namespace
+
     const char* json::Name(log::Level level)
     {
         switch (level)
@@ -262,25 +289,7 @@ namespace ewr {
         };
         out["before"] = json::CounterValues(outcome.before.values);
         out["after"] = json::CounterValues(outcome.after.values);
-
-        // One shape for every gate, null where a key does not apply.
-        nlohmann::json overrides = nlohmann::json::array();
-        for (const auto& passed : outcome.overrides)
-        {
-            const bool mismatch = passed.gate == "model_mismatch";
-            const bool blocker = passed.gate == "blocker";
-            overrides.push_back({
-                { "gate", passed.gate },
-                { "detected_model", mismatch ? nlohmann::json(passed.detail) : nlohmann::json(nullptr) },
-                { "error", blocker ? nlohmann::json(passed.detail) : nlohmann::json(nullptr) },
-                { "error_code", blocker && passed.errorCode >= 0 ? nlohmann::json(passed.errorCode)
-                                                                 : nlohmann::json(nullptr) },
-                // Why a gate without a key of its own objected ("not_saved").
-                { "detail", (mismatch || blocker || passed.detail.empty()) ? nlohmann::json(nullptr)
-                                                                            : nlohmann::json(passed.detail) },
-            });
-        }
-        out["overrides"] = overrides;
+        out["overrides"] = Overrides(outcome.overrides);
         out["backup"] = json::BackupData(outcome);
         return out;
     }
@@ -324,12 +333,6 @@ namespace ewr {
         const char* group = request.group == CleanGroup::Black ? "black"
                           : request.group == CleanGroup::Color ? "color" : "all";
 
-        nlohmann::json overrides = nlohmann::json::array();
-        for (const auto& passed : outcome.overrides)
-            overrides.push_back({ { "gate", passed.gate }, { "error", passed.detail },
-                                  { "error_code", passed.errorCode >= 0 ? nlohmann::json(passed.errorCode)
-                                                                         : nlohmann::json(nullptr) } });
-
         nlohmann::json out;
         out["model"] = model ? nlohmann::json(model->name) : nlohmann::json(nullptr);
         out["action"] = ToString(request.action);
@@ -348,7 +351,7 @@ namespace ewr {
                                                                  : nlohmann::json::array();
         out["pads_after"] = (model && outcome.after.available) ? json::PadUsage(*model, outcome.after.values)
                                                                : nlohmann::json::array();
-        out["overrides"] = std::move(overrides);
+        out["overrides"] = Overrides(outcome.overrides);
         return out;
     }
 

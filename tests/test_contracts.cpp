@@ -832,3 +832,33 @@ void test_c_abi_refuses_what_a_jig_model_cannot_do()
 
     ewr_session_close(session);
 }
+
+// One shape for every gate a run went past, maintenance's like the reset's: a
+// model mismatch names the detected model under its own key, never "error".
+void test_json_overrides_have_one_shape()
+{
+    std::cout << "[TEST] test_json_overrides_have_one_shape" << std::endl;
+
+    const std::vector<ewr::GateOverride> passed = {
+        { "model_mismatch", "L3150", -1 },
+        { "blocker", "INK OUT", 5 },
+    };
+
+    ewr::MaintenanceOutcome cleaned;
+    cleaned.overrides = passed;
+    ewr::ResetOutcome reset;
+    reset.overrides = passed;
+
+    const ewr::DbPrinterModel model = MakeSessionModel();
+    const nlohmann::json fromMaintenance = ewr::json::MaintenanceData(&model, ewr::MaintenanceRequest(), cleaned)["overrides"];
+    const nlohmann::json fromReset = ewr::json::ResetData(model, false, reset)["overrides"];
+
+    CHECK(fromMaintenance == fromReset);
+    CHECK(fromMaintenance.size() == 2);
+    CHECK(fromMaintenance[0]["detected_model"] == "L3150");
+    CHECK(fromMaintenance[0]["error"].is_null());
+    CHECK(fromMaintenance[1]["error"] == "INK OUT");
+    CHECK(fromMaintenance[1]["error_code"] == 5);
+    for (const auto& entry : fromMaintenance)
+        CHECK(entry.size() == 5);
+}

@@ -407,6 +407,8 @@ the printer was first used; its encoding is not known yet. A `fatal_errors`
   is `ok: true`: the printer was seen at work and then idle again.
 - `pads_before` and `pads_after` are the waste counters before and after, as in
   `status`'s `pads`, so a caller can see what a cleaning used.
+- `overrides` has the reset's shape: five keys per entry, `detected_model` for a
+  `model_mismatch`, `error` and `error_code` for a `blocker`.
 
 **find-addresses**
 

@@ -110,10 +110,15 @@ namespace {
         out["data"] = nullptr;
         if (json)
         {
-            out["data"] = nlohmann::json::parse(json, nullptr, false);
+            nlohmann::json data = nlohmann::json::parse(json, nullptr, false);
+            out["data"] = data.is_discarded() ? nlohmann::json(nullptr) : std::move(data);
             ewr_string_free(json);
         }
-        return out.dump();
+
+        // ASCII, with anything that is not UTF-8 replaced: an error can quote
+        // what came in through GetStringUTFChars, which is modified UTF-8, and
+        // a throw here would cross JNI. NewStringUTF takes ASCII as it is.
+        return out.dump(-1, ' ', true, nlohmann::json::error_handler_t::replace);
     }
 
     // One C ABI call on `handle`, with the callbacks wired to `callbacks` for

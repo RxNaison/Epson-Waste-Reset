@@ -25,10 +25,19 @@ class Storage(private val context: Context) {
         if (database.exists() && seeded == BuildConfig.VERSION_CODE)
             return
 
-        context.assets.open("database.json").use { input ->
-            database.outputStream().use { output -> input.copyTo(output) }
+        // Staged and renamed, as a download is: a full disk keeps the database
+        // in use, and the next start tries again.
+        val staged = File(context.filesDir, "database.json.seed")
+        try {
+            context.assets.open("database.json").use { input ->
+                staged.outputStream().use { output -> input.copyTo(output) }
+            }
+            if (staged.renameTo(database))
+                prefs.edit().putInt("seeded_version", BuildConfig.VERSION_CODE).apply()
+        } catch (_: Exception) {
+        } finally {
+            staged.delete()
         }
-        prefs.edit().putInt("seeded_version", BuildConfig.VERSION_CODE).apply()
     }
 
     /**
@@ -56,8 +65,9 @@ class Storage(private val context: Context) {
             if (database.exists() && staged.readBytes().contentEquals(database.readBytes()))
                 return Update.UP_TO_DATE
 
-            staged.copyTo(database, overwrite = true)
-            return Update.UPDATED
+            // A rename, not a copy: a copy cut short would leave a truncated
+            // database, and the next start, this version already seeded, keeps it.
+            return if (staged.renameTo(database)) Update.UPDATED else Update.FAILED
         } catch (_: Exception) {
             return Update.FAILED
         } finally {
@@ -81,8 +91,15 @@ class Storage(private val context: Context) {
         while (file.exists())
             file = File(backupsDir, "${stem}_${n++}.json")
 
-        file.writeText(json)
-        file
+        // Whole or not at all: a backup cut short must not sit in the list a
+        // restore is picked from.
+        val staged = File(backupsDir, "${file.name}.tmp")
+        try {
+            staged.writeText(json)
+            if (staged.renameTo(file)) file else null
+        } finally {
+            staged.delete()
+        }
     } catch (_: Exception) {
         null
     }

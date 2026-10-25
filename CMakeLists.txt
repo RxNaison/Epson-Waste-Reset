@@ -179,7 +179,10 @@ if(EWR_BUILD_TESTS)
     target_link_libraries(ewr_c_header_check PRIVATE ewr_core)
     add_test(NAME CApiHeader COMMAND ewr_c_header_check)
 
-    add_executable(ewr_tests tests/main_test.cpp)
+    add_executable(ewr_tests tests/main.cpp tests/test_backup.cpp tests/test_contracts.cpp tests/test_d4.cpp
+                             tests/test_database.cpp tests/test_discovery.cpp tests/test_executor.cpp
+                             tests/test_maintenance.cpp tests/test_output.cpp tests/test_packets.cpp
+                             tests/test_session.cpp tests/test_snmp.cpp tests/test_updater.cpp tests/test_usb.cpp)
     target_link_libraries(ewr_tests PRIVATE ewr_core)
     target_include_directories(ewr_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     # Tests read database.json and the models/ folder, so they must run

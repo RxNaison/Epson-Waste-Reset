@@ -1,7 +1,7 @@
 #include "ewr/ewr_c.h"
 #include "ewr/backup.h"
 #include "ewr/restore.h"
-#include "ewr/usb_driver.h"
+#include "transport/usb_driver.h"
 
 #include "ewr/deviceid.h"
 #include "ewr/database.h"

@@ -1,10 +1,10 @@
-#include "ewr/executor.h"
-#include "ewr/ctrl.h"
+#include "protocol/executor.h"
+#include "protocol/ctrl.h"
 #include "ewr/format.h"
-#include "ewr/d4session.h"
-#include "ewr/end4.h"
+#include "protocol/d4session.h"
+#include "protocol/end4.h"
 #include "ewr/database.h"
-#include "ewr/jig.h"
+#include "protocol/jig.h"
 
 #include <algorithm>
 #include <chrono>

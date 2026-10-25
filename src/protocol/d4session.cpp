@@ -1,5 +1,5 @@
-#include "ewr/d4session.h"
-#include "ewr/ctrl.h"
+#include "protocol/d4session.h"
+#include "protocol/ctrl.h"
 #include "ewr/format.h"
 
 #include <algorithm>

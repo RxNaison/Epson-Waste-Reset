@@ -1,9 +1,9 @@
 #include "ewr/maintenance.h"
 #include "ewr/gates.h"
 #include "ewr/status.h"
-#include "ewr/ctrl.h"
-#include "ewr/d4session.h"
-#include "ewr/remote_mode.h"
+#include "protocol/ctrl.h"
+#include "protocol/d4session.h"
+#include "protocol/remote_mode.h"
 
 #include <chrono>
 #include <cstdio>

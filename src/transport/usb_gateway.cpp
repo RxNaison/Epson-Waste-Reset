@@ -1,10 +1,10 @@
 #include "ewr/usb.h"
-#include "ewr/ctrl.h"
-#include "ewr/d4session.h"
+#include "protocol/ctrl.h"
+#include "protocol/d4session.h"
 #include "ewr/deviceid.h"
-#include "ewr/jig.h"
+#include "protocol/jig.h"
 #include "ewr/log.h"
-#include "ewr/usb_driver.h"
+#include "transport/usb_driver.h"
 
 #include <memory>
 #include <string>

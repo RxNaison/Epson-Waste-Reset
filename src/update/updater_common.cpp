@@ -1,5 +1,5 @@
 #include "ewr/updater.h"
-#include "ewr/update_platform.h"
+#include "update/platform.h"
 
 #include <nlohmann/json.hpp>
 

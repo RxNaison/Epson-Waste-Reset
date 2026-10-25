@@ -1,6 +1,6 @@
 #include "ewr/status.h"
-#include "ewr/ctrl.h"
-#include "ewr/d4session.h"
+#include "protocol/ctrl.h"
+#include "protocol/d4session.h"
 
 #include <algorithm>
 #include <cctype>

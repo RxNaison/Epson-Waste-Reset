@@ -4,7 +4,7 @@
 #ifndef _WIN32
 
 #include "ewr/updater.h"
-#include "ewr/update_platform.h"
+#include "update/platform.h"
 
 #include <curl/curl.h>
 

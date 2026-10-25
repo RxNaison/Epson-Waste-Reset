@@ -1,5 +1,5 @@
 #include "ewr/replay.h"
-#include "ewr/ctrl.h"
+#include "protocol/ctrl.h"
 #include <filesystem>
 #include <fstream>
 #include <regex>

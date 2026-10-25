@@ -50,14 +50,22 @@ configure_file(
     @ONLY
 )
 
-set(LIB_SOURCES src/paths.cpp src/backup.cpp src/restore.cpp src/remote_mode.cpp src/maintenance.cpp src/info.cpp src/run_lock.cpp src/json.cpp src/ewr_c.cpp src/replay.cpp src/database.cpp src/ctrl.cpp src/executor.cpp src/d4session.cpp src/session.cpp src/keysearch.cpp src/status.cpp src/deviceid.cpp src/updater_common.cpp src/usb_driver.cpp src/usb_gateway.cpp src/end4.cpp src/jig.cpp src/usb_composite.cpp src/discovery.cpp src/snmp.cpp src/snmp_gateway.cpp)
+set(LIB_SOURCES
+    src/backup.cpp src/database.cpp src/deviceid.cpp src/discovery.cpp src/ewr_c.cpp src/info.cpp
+    src/json.cpp src/keysearch.cpp src/maintenance.cpp src/paths.cpp src/replay.cpp src/restore.cpp
+    src/run_lock.cpp src/session.cpp
+    src/protocol/ctrl.cpp src/protocol/d4session.cpp src/protocol/end4.cpp src/protocol/executor.cpp
+    src/protocol/jig.cpp src/protocol/remote_mode.cpp src/protocol/replies.cpp
+    src/transport/snmp.cpp src/transport/snmp_gateway.cpp src/transport/usb_composite.cpp
+    src/transport/usb_driver.cpp src/transport/usb_gateway.cpp
+    src/update/updater_common.cpp)
 
 if(WIN32)
-    list(APPEND LIB_SOURCES src/usb_windows.cpp src/usb_libusb.cpp src/updater_windows.cpp)
+    list(APPEND LIB_SOURCES src/transport/usb_windows.cpp src/transport/usb_libusb.cpp src/update/updater_windows.cpp)
 elseif(EWR_WITH_UPDATER)
-    list(APPEND LIB_SOURCES src/usb_libusb.cpp src/updater_linux.cpp)
+    list(APPEND LIB_SOURCES src/transport/usb_libusb.cpp src/update/updater_linux.cpp)
 else()
-    list(APPEND LIB_SOURCES src/usb_libusb.cpp src/updater_none.cpp)
+    list(APPEND LIB_SOURCES src/transport/usb_libusb.cpp src/update/updater_none.cpp)
 endif()
 
 add_library(ewr_core STATIC ${LIB_SOURCES})
@@ -67,6 +75,8 @@ target_include_directories(ewr_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/vendor>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
 )
+# protocol/, transport/ and update/ are the library's own; hosts get include/ewr.
+target_include_directories(ewr_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 find_package(Threads REQUIRED)
 target_link_libraries(ewr_core PUBLIC Threads::Threads)
@@ -149,6 +159,7 @@ if(EWR_BUILD_C_SHARED)
 
     add_library(ewrc SHARED src/ewr_c.cpp)
     target_link_libraries(ewrc PRIVATE ewr_core)
+    target_include_directories(ewrc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_definitions(ewrc PRIVATE EWR_C_BUILD_SHARED)
     set_target_properties(ewrc PROPERTIES
         CXX_VISIBILITY_PRESET hidden
@@ -168,6 +179,7 @@ if(EWR_BUILD_TESTS)
 
     add_executable(ewr_tests tests/main_test.cpp)
     target_link_libraries(ewr_tests PRIVATE ewr_core)
+    target_include_directories(ewr_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     # Tests read database.json and the models/ folder, so they must run
     # from the repository root regardless of the build directory layout.
     add_test(NAME UnitTests COMMAND ewr_tests WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

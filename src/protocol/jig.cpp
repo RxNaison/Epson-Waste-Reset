@@ -1,5 +1,5 @@
-#include "ewr/jig.h"
-#include "ewr/d4session.h"
+#include "protocol/jig.h"
+#include "protocol/d4session.h"
 #include "ewr/format.h"
 #include "ewr/database.h"
 

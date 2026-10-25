@@ -1,5 +1,5 @@
-#include "ewr/usb_backend.h"
-#include "usb_backends_internal.h"
+#include "transport/usb_backend.h"
+#include "transport/usb_backends_internal.h"
 
 #include <cstddef>
 #include <memory>

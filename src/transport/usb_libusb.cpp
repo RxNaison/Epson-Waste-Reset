@@ -1,9 +1,9 @@
 #include "ewr/usb.h"
-#include "ewr/usb_driver.h"
+#include "transport/usb_driver.h"
 #include "ewr/format.h"
-#include "ewr/usb_backend.h"
-#include "usb_backends_internal.h"
-#include "ewr/usb_timing.h"
+#include "transport/usb_backend.h"
+#include "transport/usb_backends_internal.h"
+#include "transport/usb_timing.h"
 #include "ewr/deviceid.h"
 #include "ewr/log.h"
 // Distro packages install the header under libusb-1.0/; Homebrew relies on

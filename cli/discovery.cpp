@@ -307,7 +307,8 @@ namespace ewr::cli {
                               << ewr::ToString(cleaned.phase) << "): " << cleaned.error << std::endl;
                     std::cerr << "        Run --find-addresses again and answer 'n' to start the cleanings from"
                                  " the printer's panel." << std::endl;
-                    JsonFail("not_started", "Cleaning " + std::to_string(pass) + " did not complete: " + cleaned.error);
+                    JsonFail(MaintenanceErrorCode(cleaned.phase),
+                             "Cleaning " + std::to_string(pass) + " did not complete: " + cleaned.error);
                     return FinishRun(1);
                 }
 

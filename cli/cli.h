@@ -4,6 +4,7 @@
 #include "ewr/deviceid.h"
 #include "ewr/gateway.h"
 #include "ewr/json.h"
+#include "ewr/maintenance.h"
 #include "ewr/network.h"
 #include "ewr/replay.h"
 #include "ewr/status.h"
@@ -151,6 +152,9 @@ namespace ewr::cli {
     int RunMaintenance(const ewr::DbPrinterModel* model, ewr::IDeviceGateway& gateway,
                        const ewr::ExecutorOptions& options, const CliOptions& cli,
                        const std::string& mismatchPassed);
+    // The contract's reason for a maintenance command that stopped short,
+    // whichever mode sent it.
+    const char* MaintenanceErrorCode(ewr::MaintenancePhase phase);
     int RunRestore(const ewr::DbPrinterModel& model, const ewr::Backup& source, const std::string& file,
                    ewr::IDeviceGateway& gateway, const ewr::ExecutorOptions& options, const CliOptions& cli,
                    const std::string& deviceId, const std::string& mismatchPassed);

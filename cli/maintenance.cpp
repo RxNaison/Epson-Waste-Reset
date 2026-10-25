@@ -273,23 +273,30 @@ namespace ewr::cli {
 
         g_jsonData = ewr::json::MaintenanceData(model, request, outcome);
 
-        switch (outcome.phase)
+        if (outcome.phase == ewr::MaintenancePhase::Done)
         {
-            case ewr::MaintenancePhase::Done:
-                if (!cli.nozzleCheck)
-                    std::cout << "\n[i] Print a nozzle check (ewr --nozzle-check) to see whether it helped." << std::endl;
-                return FinishRun(0);
-            case ewr::MaintenancePhase::Aborted:        JsonFail("blocked", outcome.error); break;
-            case ewr::MaintenancePhase::NotSupported:   JsonFail("not_supported", outcome.error); break;
-            case ewr::MaintenancePhase::DeviceNotFound: JsonFail("device_not_found", outcome.error); break;
-            case ewr::MaintenancePhase::SendFailed:     JsonFail("send_failed", outcome.error); break;
-            case ewr::MaintenancePhase::NeverStarted:   JsonFail("not_started", outcome.error); break;
-            case ewr::MaintenancePhase::Error:          JsonFail("printer_error", outcome.error); break;
-            case ewr::MaintenancePhase::TimedOut:       JsonFail("timed_out", outcome.error); break;
-            default:                                    JsonFail("failed", outcome.error); break;
+            if (!cli.nozzleCheck)
+                std::cout << "\n[i] Print a nozzle check (ewr --nozzle-check) to see whether it helped." << std::endl;
+            return FinishRun(0);
         }
 
+        JsonFail(MaintenanceErrorCode(outcome.phase), outcome.error);
         return FinishRun(1);
+    }
+
+    const char* MaintenanceErrorCode(ewr::MaintenancePhase phase)
+    {
+        switch (phase)
+        {
+            case ewr::MaintenancePhase::Aborted:        return "blocked";
+            case ewr::MaintenancePhase::NotSupported:   return "not_supported";
+            case ewr::MaintenancePhase::DeviceNotFound: return "device_not_found";
+            case ewr::MaintenancePhase::SendFailed:     return "send_failed";
+            case ewr::MaintenancePhase::NeverStarted:   return "not_started";
+            case ewr::MaintenancePhase::Error:          return "printer_error";
+            case ewr::MaintenancePhase::TimedOut:       return "timed_out";
+            default:                                    return "failed";
+        }
     }
 
 } // namespace ewr::cli

@@ -426,7 +426,9 @@ EWR sends the model's own cleaning command only when the printer matched the
 entry; on any other printer - one `--find-key` found a borrowed key for - it
 sends the printer's own normal cleaning as print data, since one model's
 cleaning byte can be another model's ink charge. `--find-addresses` has no
-`--dry-run`.
+`--dry-run`. A cleaning that does not complete ends the run with the code a
+maintenance command would give it: `send_failed`, `not_started`,
+`printer_error`, `timed_out`.
 
 **find-key**
 

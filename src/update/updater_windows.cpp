@@ -51,8 +51,14 @@ namespace ewr {
                 InternetSetOptionA(session.handle, INTERNET_OPTION_RECEIVE_TIMEOUT,
                                    &receiveTimeout, sizeof(receiveTimeout));
 
-                request.handle = InternetOpenUrlA(session.handle, url.c_str(), nullptr, 0,
-                                                  INTERNET_FLAG_RELOAD | INTERNET_FLAG_SECURE, 0);
+                // Asked for compressed, decoded here: database.json is 4 MB as
+                // text and a thirtieth of that gzipped, minutes apart on a slow
+                // line.
+                BOOL decode = TRUE;
+                InternetSetOptionA(session.handle, INTERNET_OPTION_HTTP_DECODING, &decode, sizeof(decode));
+
+                request.handle = InternetOpenUrlA(session.handle, url.c_str(), "Accept-Encoding: gzip, deflate\r\n",
+                                                  static_cast<DWORD>(-1L), INTERNET_FLAG_RELOAD | INTERNET_FLAG_SECURE, 0);
                 if (!request) return false;
 
                 // Treat 4xx/5xx as failure instead of saving the error page.

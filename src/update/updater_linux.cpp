@@ -44,6 +44,10 @@ namespace ewr {
                 curl_easy_setopt(handle, CURLOPT_FAILONERROR, 1L);
                 curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 3L);
                 curl_easy_setopt(handle, CURLOPT_TIMEOUT, timeoutSeconds);
+                // Every encoding this libcurl decodes: database.json is 4 MB as
+                // text and a thirtieth of that gzipped, which is what keeps the
+                // download inside the timeout on a slow line.
+                curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "");
                 curl_easy_setopt(handle, CURLOPT_USERAGENT, kUserAgent);
                 // Required when curl is used from a worker thread.
                 curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);

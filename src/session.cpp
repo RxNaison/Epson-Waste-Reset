@@ -1,4 +1,6 @@
 #include "ewr/session.h"
+#include "ewr/ctrl.h"
+#include "ewr/d4session.h"
 #include "ewr/deviceid.h"
 #include "ewr/version.h"
 #include "ewr/jig.h"
@@ -266,7 +268,7 @@ namespace ewr {
         // JIG mode has reads of its own shape, and nothing else.
         for (const auto& query : queries)
         {
-            const bool read = options.jigMode ? jig::ReadPacketAddress(query) >= 0 : IsReadOnlyQueryPacket(query);
+            const bool read = options.jigMode ? jig::ReadPacketAddress(query) >= 0 : ctrl::IsReadOnlyQuery(query);
             if (!read)
             {
                 QueryRunResult refused;
@@ -300,7 +302,7 @@ namespace ewr {
         ExecutorOptions once = WithPrinterName(SoftResetOnce(options));
         once.maxWriteAttempts = 1;
 
-        const QueryRunResult run = ExecuteQuerySessionWithFallback(UniversalGenerator::GenerateHandshake(),
+        const QueryRunResult run = ExecuteQuerySessionWithFallback(d4::Handshake(),
                                                                    { command }, once, NextCallAppends());
         ReportSilentPort(run.silentPort);
 
@@ -358,16 +360,16 @@ namespace ewr {
         StateSnapshot out;
 
         std::vector<std::vector<unsigned char>> queries;
-        queries.push_back(UniversalGenerator::GenerateStatusQueryPacket());
+        queries.push_back(ctrl::StatusQueryPacket());
 
         const QueryRunResult run =
-            gateway.RunQuery(UniversalGenerator::GenerateHandshake(), queries, options);
+            gateway.RunQuery(d4::Handshake(), queries, options);
 
         if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
             return out;
 
         out.available = true;
-        out.status = ParseStatusReply(run.query.replies[0]);
+        out.status = ctrl::ParseStatusReply(run.query.replies[0]);
         return out;
     }
 
@@ -454,10 +456,10 @@ namespace ewr {
                 for (size_t slot = next; slot < end; ++slot)
                 {
                     const ReadKeyCandidate& candidate = candidates[pending[slot]];
-                    queries.push_back(UniversalGenerator::GenerateReadPacket(candidate.rkey, 0, candidate.addressLength));
+                    queries.push_back(ctrl::ReadPacket(candidate.rkey, 0, candidate.addressLength));
                 }
 
-                const QueryRunResult run = gateway.RunQuery(UniversalGenerator::GenerateHandshake(), queries, sweep);
+                const QueryRunResult run = gateway.RunQuery(d4::Handshake(), queries, sweep);
 
                 if (!run.deviceFound)
                 {
@@ -493,7 +495,7 @@ namespace ewr {
                     }
 
                     probes[index].candidate = candidates[index];
-                    probes[index].answer = ClassifyEepromReadReply(reply, probes[index].value, 0);
+                    probes[index].answer = ctrl::ClassifyReadReply(reply, probes[index].value, 0);
                     answered[index] = true;
                     resolved++;
                 }
@@ -576,19 +578,19 @@ namespace ewr {
         parsed.assign(chunks.size(), false);
 
         std::vector<std::vector<unsigned char>> queries;
-        queries.push_back(UniversalGenerator::GenerateStatusQueryPacket());
+        queries.push_back(ctrl::StatusQueryPacket());
         for (const auto& chunk : chunks)
-            queries.push_back(UniversalGenerator::GenerateRangeReadPacket(
+            queries.push_back(ctrl::RangeReadPacket(
                 m_model.rkey, chunk.first, chunk.second, m_model.ReadAddressLength()));
 
         const QueryRunResult run =
-            m_gateway.RunQuery(UniversalGenerator::GenerateHandshake(), queries, m_queryOptions);
+            m_gateway.RunQuery(d4::Handshake(), queries, m_queryOptions);
 
         if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
             return out;
 
         out.available = true;
-        out.status = ParseStatusReply(run.query.replies[0]);
+        out.status = ctrl::ParseStatusReply(run.query.replies[0]);
 
         for (size_t i = 0; i < chunks.size(); ++i)
         {
@@ -596,7 +598,7 @@ namespace ewr {
                 break;
 
             std::vector<uint8_t> bytes;
-            if (!ParseEepromRangeReply(run.query.replies[i + 1], chunks[i].first, chunks[i].second, bytes))
+            if (!ctrl::ParseRangeReadReply(run.query.replies[i + 1], chunks[i].first, chunks[i].second, bytes))
                 continue;
 
             parsed[i] = true;
@@ -719,7 +721,7 @@ namespace ewr {
         StateSnapshot out;
 
         std::vector<std::vector<unsigned char>> queries;
-        queries.push_back(UniversalGenerator::GenerateStatusQueryPacket());
+        queries.push_back(ctrl::StatusQueryPacket());
 
         // A schema 4 counter can need a byte that is never written (a nibble
         // shared by two pads), hence the union rather than the write list.
@@ -732,19 +734,19 @@ namespace ewr {
             if (addr <= m_model.mem_high)
             {
                 addresses.push_back(addr);
-                queries.push_back(UniversalGenerator::GenerateReadPacket(
+                queries.push_back(ctrl::ReadPacket(
                     m_model.rkey, addr, m_model.ReadAddressLength()));
             }
         }
 
         const QueryRunResult run =
-            m_gateway.RunQuery(UniversalGenerator::GenerateHandshake(), queries, m_queryOptions);
+            m_gateway.RunQuery(d4::Handshake(), queries, m_queryOptions);
 
         if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
             return out;
 
         out.available = true;
-        out.status = ParseStatusReply(run.query.replies[0]);
+        out.status = ctrl::ParseStatusReply(run.query.replies[0]);
 
         for (size_t i = 0; i < addresses.size(); ++i)
         {
@@ -752,7 +754,7 @@ namespace ewr {
             if (i + 1 < run.query.replies.size())
             {
                 uint8_t v = 0;
-                if (ParseEepromReadReply(run.query.replies[i + 1], v, static_cast<int>(addresses[i])))
+                if (ctrl::ParseReadReply(run.query.replies[i + 1], v, static_cast<int>(addresses[i])))
                     value = v;
             }
             out.values.push_back({ addresses[i], value });
@@ -814,13 +816,13 @@ namespace ewr {
     std::vector<std::vector<unsigned char>> Session::BuildWriteSession(
         const std::vector<std::pair<uint16_t, uint8_t>>& writes) const
     {
-        auto sequence = UniversalGenerator::GenerateHandshake();
+        auto sequence = d4::Handshake();
 
         for (const auto& w : writes)
         {
-            sequence.push_back(UniversalGenerator::CreditGrantPacket());
-            sequence.push_back(UniversalGenerator::CreditRequestPacket());
-            sequence.push_back(UniversalGenerator::GenerateWritePacket(
+            sequence.push_back(d4::CreditGrantPacket());
+            sequence.push_back(d4::CreditRequestPacket());
+            sequence.push_back(ctrl::WritePacket(
                 m_model.rkey, w.first, w.second, m_model.wkey, m_model.WriteAddressLength()));
         }
 
@@ -916,10 +918,8 @@ namespace ewr {
         m_reporter.Log(log::Level::Info, log::Stage::Database, "session.generating",
                        "[*] Generating safe Smart Protocol R/W sequence for " + m_model.name + "...");
 
-        UniversalGenerator generator;
-
         ResetFlow flow;
-        flow.sequence = generator.GenerateSequence(m_model);
+        flow.sequence = ctrl::ResetSequence(m_model);
         flow.target = "waste";
 
         // What GenerateSequence writes: the same two guards, the same order.

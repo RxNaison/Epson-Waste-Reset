@@ -1,7 +1,7 @@
 #pragma once
 #include "ewr/backup.h"
-#include "ewr/executor.h"
-#include "ewr/generator.h"
+#include "ewr/gateway.h"
+#include "ewr/database.h"
 #include "ewr/log.h"
 #include "ewr/restore.h"
 #include "ewr/run_lock.h"

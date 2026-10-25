@@ -1,5 +1,5 @@
 #pragma once
-#include "ewr/generator.h"
+#include "ewr/database.h"
 #include "ewr/session.h"
 #include "ewr/status.h"
 
@@ -37,10 +37,6 @@ namespace ewr {
         long long firstUse = -1;  // raw; the encoding is not known yet
         std::vector<InfoFatal> fatal;
     };
-
-    // The 'vi' answer's version text: "vi:00:<text>;" -> "<text>". Empty on
-    // a refusal or another shape.
-    std::string ParseVersionReply(const std::vector<unsigned char>& raw);
 
     // `model` may be null: then only the status and the firmware are read.
     PrinterInfo ReadPrinterInfo(IDeviceGateway& gateway, const DbPrinterModel* model,

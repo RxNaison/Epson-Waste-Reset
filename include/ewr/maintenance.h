@@ -1,5 +1,5 @@
 #pragma once
-#include "ewr/generator.h"
+#include "ewr/database.h"
 #include "ewr/log.h"
 #include "ewr/session.h"
 #include "ewr/status.h"

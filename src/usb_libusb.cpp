@@ -1,4 +1,5 @@
 #include "ewr/usb.h"
+#include "ewr/format.h"
 #include "ewr/usb_backend.h"
 #include "usb_backends_internal.h"
 #include "ewr/usb_timing.h"
@@ -188,7 +189,7 @@ namespace ewr {
                 // discard a drain without ever looking at it.
                 if (!data.empty())
                     trace_ << "[io] IN payload (" << data.size() << " bytes):\n"
-                           << HexDumpCapped(data.data(), data.size(), kTraceDumpCapBytes);
+                           << format::HexDumpCapped(data.data(), data.size(), format::kTraceDumpCapBytes);
 
                 return data;
             }

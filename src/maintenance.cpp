@@ -1,4 +1,6 @@
 #include "ewr/maintenance.h"
+#include "ewr/ctrl.h"
+#include "ewr/d4session.h"
 #include "ewr/remote_mode.h"
 
 #include <chrono>
@@ -20,7 +22,7 @@ namespace ewr {
 
         std::string ReplyText(const std::vector<unsigned char>& raw)
         {
-            const std::vector<unsigned char> payload = ExtractD4Payload(raw);
+            const std::vector<unsigned char> payload = d4::ExtractPayload(raw);
             std::string text(payload.begin(), payload.end());
             const size_t start = text.find("||");
             if (start != std::string::npos)
@@ -247,8 +249,8 @@ namespace ewr {
         // ---- Send, once.
         if (out.route == "factory")
         {
-            const std::vector<unsigned char> command = UniversalGenerator::GenerateFactoryPacket(
-                m_model->rkey, EpsonD4::CMD_CLEAN, FactoryPayload(request));
+            const std::vector<unsigned char> command = ctrl::FactoryPacket(
+                m_model->rkey, ctrl::CMD_CLEAN, FactoryPayload(request));
 
             m_reporter.Log(log::Level::Info, log::Stage::Write, "maintenance.sending",
                            std::string("[*] Sending the ") + MaintenanceActionName(request.action) +

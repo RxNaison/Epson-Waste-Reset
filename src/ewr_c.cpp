@@ -1,7 +1,7 @@
 #include "ewr/ewr_c.h"
 
 #include "ewr/deviceid.h"
-#include "ewr/generator.h"
+#include "ewr/database.h"
 #include "ewr/json_out.h"
 #include "ewr/info.h"
 #include "ewr/log.h"
@@ -68,7 +68,7 @@ namespace {
 
 struct ewr_session
 {
-    ewr::UniversalGenerator database;
+    ewr::Database database;
     // One way to the printer for the session's whole life: the network when
     // it was opened with ewr_session_open_network, USB otherwise.
     ewr::UsbDeviceGateway usb;
@@ -146,7 +146,7 @@ struct ewr_session
         if (!wanted || !*wanted)
             return false;
 
-        const std::vector<ewr::DbPrinterModel> models = database.GetAvailableModels();
+        const std::vector<ewr::DbPrinterModel> models = database.Models();
         const std::string needle = LowerCase(wanted);
 
         for (const auto& model : models)
@@ -274,7 +274,7 @@ namespace {
             return EWR_OK;
 
         std::vector<ewr::ModelNameEntry> entries;
-        for (const auto& known : session->database.GetAvailableModels())
+        for (const auto& known : session->database.Models())
             entries.push_back({ known.name, known.aliases });
 
         const std::vector<std::string> matches = ewr::MatchModelEntries(reported.model, entries);
@@ -377,7 +377,7 @@ namespace {
         }
 
         const std::string path = (databasePath && *databasePath) ? databasePath : "database.json";
-        if (!session->database.LoadDatabase(path))
+        if (!session->database.Load(path))
         {
             session->Fail("Could not load the printer database at \"" + path + "\".");
             // Kept open: the caller can still read the error, and the handle is
@@ -676,8 +676,8 @@ int ewr_database_check(const char* path, char** out_json)
         if (!ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema))
             return EWR_ERR_DATABASE;
 
-        ewr::UniversalGenerator generator;
-        if (!generator.LoadDatabase(path) || generator.IsEmpty())
+        ewr::Database db;
+        if (!db.Load(path) || db.IsEmpty())
             return EWR_ERR_DATABASE;
 
         std::ifstream in(path);
@@ -685,7 +685,7 @@ int ewr_database_check(const char* path, char** out_json)
         const int schema = (root.is_object() && root.contains("schema_version") && root["schema_version"].is_number_integer())
             ? root["schema_version"].get<int>() : 0;
 
-        const nlohmann::json payload = { { "models", generator.GetAvailableModels().size() },
+        const nlohmann::json payload = { { "models", db.Models().size() },
                                          { "schema_version", schema } };
         *out_json = DuplicateString(payload.dump());
         return *out_json ? EWR_OK : EWR_ERR_FAILED;
@@ -744,7 +744,7 @@ int ewr_list_interfaces(ewr_session* session, char** out_json)
         nlohmann::json interfaces = nlohmann::json::array();
 
         std::vector<ewr::ModelNameEntry> entries;
-        for (const auto& model : session->database.GetAvailableModels())
+        for (const auto& model : session->database.Models())
             entries.push_back({ model.name, model.aliases });
 
         for (const ewr::InterfaceInfo& info : session->usb.ListInterfaces())
@@ -779,7 +779,7 @@ int ewr_detect_model(ewr_session* session, char** out_json)
         const ewr::DeviceIdInfo info = ewr::ParseIeee1284DeviceId(query.deviceId);
 
         std::vector<ewr::ModelNameEntry> entries;
-        for (const auto& model : session->database.GetAvailableModels())
+        for (const auto& model : session->database.Models())
             entries.push_back({ model.name, model.aliases });
 
         const std::vector<std::string> matches = info.model.empty()
@@ -818,7 +818,7 @@ int ewr_discover_network(ewr_session* session, char** out_json)
         }
 
         std::vector<ewr::ModelNameEntry> entries;
-        for (const auto& model : session->database.GetAvailableModels())
+        for (const auto& model : session->database.Models())
             entries.push_back({ model.name, model.aliases });
 
         nlohmann::json printers = nlohmann::json::array();
@@ -844,7 +844,7 @@ int ewr_list_models(ewr_session* session, char** out_json)
         }
 
         nlohmann::json models = nlohmann::json::array();
-        for (const auto& model : session->database.GetAvailableModels())
+        for (const auto& model : session->database.Models())
         {
             nlohmann::json entry;
             entry["name"] = model.name;

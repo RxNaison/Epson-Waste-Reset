@@ -18,7 +18,7 @@ namespace end4 {
     //   9      total frame length (header + command), one byte
     //   10..13 00 00 02 00      fixed sub-header
     //   14..   command
-    std::vector<unsigned char> BuildEnd4Packet(const std::vector<unsigned char>& command)
+    std::vector<unsigned char> BuildPacket(const std::vector<unsigned char>& command)
     {
         constexpr std::size_t kHeaderSize = 14;
 
@@ -62,7 +62,7 @@ namespace end4 {
         return packet;
     }
 
-    bool ParseEnd4Response(const std::vector<unsigned char>& rawBytes, std::vector<unsigned char>& outPayload)
+    bool ParseResponse(const std::vector<unsigned char>& rawBytes, std::vector<unsigned char>& outPayload)
     {
         constexpr std::size_t kReplyHeaderSize = 10;
 

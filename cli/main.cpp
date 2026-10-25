@@ -4,6 +4,7 @@
 #include <cctype>
 #include <filesystem>
 #include "ewr/payload.h"
+#include "ewr/ctrl.h"
 #include "ewr/paths.h"
 #include "ewr/restore.h"
 #include "ewr/info.h"
@@ -13,7 +14,7 @@
 #include "ewr/snmp_gateway.h"
 #include "ewr/usb.h"
 #include "ewr/deviceid.h"
-#include "ewr/generator.h"
+#include "ewr/database.h"
 #include "ewr/status.h"
 #include "ewr/updater.h"
 #include "ewr/discover.h"
@@ -2127,11 +2128,11 @@ int main(int argc, char* argv[])
     // No update checks, no D4 traffic, no menu - diagnostics only.
     if (cli.listOnly)
     {
-        ewr::UniversalGenerator listGenerator;
+        ewr::Database listDb;
         std::vector<ewr::ModelNameEntry> listEntries;
-        if (listGenerator.LoadDatabase(databasePath))
+        if (listDb.Load(databasePath))
         {
-            for (const auto& m : listGenerator.GetAvailableModels())
+            for (const auto& m : listDb.Models())
                 listEntries.push_back({ m.name, m.aliases });
         }
 
@@ -2271,12 +2272,12 @@ int main(int argc, char* argv[])
             std::cout << "[i] EWR " << kEwrCurrentVersion << " is the latest version." << std::endl;
     }
 
-    ewr::UniversalGenerator generator;
-    if (!generator.LoadDatabase(databasePath))
+    ewr::Database db;
+    if (!db.Load(databasePath))
         std::cerr << "[!] Could not load database.json (missing or corrupted). Smart Protocol models are unavailable this run." << std::endl;
 
     auto replayModels = ewr::ScanModelsFolder("models");
-    auto smartModels = generator.GetAvailableModels();
+    auto smartModels = db.Models();
 
     if (replayModels.empty() && smartModels.empty())
     {
@@ -3428,7 +3429,7 @@ int main(int argc, char* argv[])
             size_t dumpWrites = 0;
             for (const auto& packet : dumpSequence)
             {
-                if (ewr::IsWritePacket(packet))
+                if (ewr::ctrl::IsWrite(packet))
                     dumpWrites++;
             }
 

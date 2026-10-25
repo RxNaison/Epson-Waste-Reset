@@ -50,7 +50,7 @@ configure_file(
     @ONLY
 )
 
-set(LIB_SOURCES src/paths.cpp src/backup.cpp src/restore.cpp src/remote_mode.cpp src/maintenance.cpp src/info.cpp src/run_lock.cpp src/json_out.cpp src/ewr_c.cpp src/parser.cpp src/generator.cpp src/executor.cpp src/d4session.cpp src/session.cpp src/status.cpp src/deviceid.cpp src/updater_common.cpp src/usb_driver.cpp src/end4.cpp src/jig.cpp src/usb_composite.cpp src/discover.cpp src/snmp.cpp src/snmp_gateway.cpp)
+set(LIB_SOURCES src/paths.cpp src/backup.cpp src/restore.cpp src/remote_mode.cpp src/maintenance.cpp src/info.cpp src/run_lock.cpp src/json_out.cpp src/ewr_c.cpp src/parser.cpp src/database.cpp src/ctrl.cpp src/executor.cpp src/d4session.cpp src/session.cpp src/status.cpp src/deviceid.cpp src/updater_common.cpp src/usb_driver.cpp src/end4.cpp src/jig.cpp src/usb_composite.cpp src/discover.cpp src/snmp.cpp src/snmp_gateway.cpp)
 
 if(WIN32)
     list(APPEND LIB_SOURCES src/usb_windows.cpp src/usb_libusb.cpp src/updater_windows.cpp)

@@ -8,23 +8,6 @@
 
 namespace ewr {
 
-    namespace EpsonD4
-    {
-        constexpr uint8_t CMD_EEPROM_WRITE   = 0x42;
-        constexpr uint8_t CMD_EEPROM_READ    = 0x41;
-        // A run of bytes in one exchange: address, then a byte count.
-        constexpr uint8_t CMD_EEPROM_READ_RANGE = 0x51;
-        // Head cleaning / ink charge; the one-byte payload is the model's level.
-        constexpr uint8_t CMD_CLEAN          = 0x84;
-        constexpr uint8_t CMD_RESTART        = 0x21;
-        constexpr uint8_t PREFIX_PIPE        = 0x7C;
-        constexpr uint8_t SOCKET_EPSON_CTRL  = 0x02;
-        constexpr uint8_t CREDIT             = 0x00; // must stay 0, nonzero locks up the hardware buffer
-        constexpr uint8_t REPLY_OPEN_CHANNEL = 0x81;
-        constexpr uint8_t REPLY_CREDIT_GRANT = 0x83;
-        constexpr uint8_t REPLY_CREDIT_REQ   = 0x84;
-    }
-
     inline std::string PadKindFromDescription(const std::string& d)
     {
         auto has = [&](const char* s) { return d.find(s) != std::string::npos; };
@@ -534,55 +517,21 @@ namespace ewr {
         return reading;
     }
 
-    class UniversalGenerator
+    class Database
     {
     public:
-        UniversalGenerator() = default;
-        ~UniversalGenerator() = default;
+        Database() = default;
 
-        UniversalGenerator(const UniversalGenerator&) = delete;
-        UniversalGenerator& operator=(const UniversalGenerator&) = delete;
+        Database(const Database&) = delete;
+        Database& operator=(const Database&) = delete;
 
-        bool LoadDatabase(const std::string& filepath);
+        bool Load(const std::string& filepath);
         bool IsEmpty() const;
-        std::vector<DbPrinterModel> GetAvailableModels() const;
-        std::vector<std::vector<unsigned char>> GenerateSequence(const DbPrinterModel& model) const;
-
-        static std::vector<std::vector<unsigned char>> GenerateHandshake();
-        static std::vector<unsigned char> CreditGrantPacket();
-        static std::vector<unsigned char> CreditRequestPacket();
-        // Answered with '@BDC ST2'. Needs no keys from the database.
-        static std::vector<unsigned char> GenerateStatusQueryPacket();
-        // Action 0x41, answered with '@BDC PS'. Reads need rkey but no write
-        // key. `addressLength` follows the model's 'rlen'.
-        static std::vector<unsigned char> GenerateReadPacket(uint16_t rkey, uint16_t address,
-                                                             uint8_t addressLength = 2);
-        // Action 0x42; `addressLength` follows the model's 'wlen'. Public so
-        // a caller can rebuild one write with 'wkey1' after a ':42:NG;'.
-        static std::vector<unsigned char> GenerateWritePacket(uint16_t rkey, uint16_t address, uint8_t value,
-                                                              const std::string& wkey, uint8_t addressLength = 2);
-
-        // Any '||' factory command: read key, the action code with its two
-        // check bytes, then `payload`. The read and write builders above stay
-        // as they are - they are what every verified reset sent.
-        static std::vector<unsigned char> GenerateFactoryPacket(uint16_t rkey, uint8_t action,
-                                                                const std::vector<unsigned char>& payload);
-
-        // An EPSON-CTRL command: two letters, a little-endian length, the
-        // payload ('vi' + 00 asks for the firmware version).
-        static std::vector<unsigned char> GenerateControlPacket(char first, char second,
-                                                                const std::vector<unsigned char>& payload);
-
-        // Action 0x51: `count` bytes from `address`, answered in one reply.
-        static std::vector<unsigned char> GenerateRangeReadPacket(uint16_t rkey, uint16_t address, uint8_t count,
-                                                                  uint8_t addressLength = 2);
+        std::vector<DbPrinterModel> Models() const;
 
     private:
-        // Wraps an EPSON-CTRL payload into a D4 data packet (socket 2 -> 2).
-        static std::vector<unsigned char> WrapD4DataPacket(const std::vector<unsigned char>& payload);
-
         mutable std::mutex m_dbMutex;
-        std::unordered_map<std::string, DbPrinterModel> database;
+        std::unordered_map<std::string, DbPrinterModel> m_models;
     };
 
 } // namespace ewr

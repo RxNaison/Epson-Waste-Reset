@@ -1,4 +1,4 @@
-#include "ewr/generator.h"
+#include "ewr/database.h"
 #include "ewr/updater.h"
 #include <cstdio>
 #include <sstream>
@@ -193,7 +193,7 @@ namespace ewr {
         return out;
     }
 
-    bool UniversalGenerator::LoadDatabase(const std::string& filepath)
+    bool Database::Load(const std::string& filepath)
     {
         std::lock_guard<std::mutex> lock(m_dbMutex);
 
@@ -497,7 +497,7 @@ namespace ewr {
                               "db.entries_skipped", oss.str());
             }
 
-            database = std::move(fresh);
+            m_models = std::move(fresh);
             return true;
         }
         catch (const json::exception& e)
@@ -508,248 +508,22 @@ namespace ewr {
         }
     }
 
-    bool UniversalGenerator::IsEmpty() const
+    bool Database::IsEmpty() const
     {
         std::lock_guard<std::mutex> lock(m_dbMutex);
-        return database.empty();
+        return m_models.empty();
     }
 
-    std::vector<DbPrinterModel> UniversalGenerator::GetAvailableModels() const
+    std::vector<DbPrinterModel> Database::Models() const
     {
         std::lock_guard<std::mutex> lock(m_dbMutex);
         std::vector<DbPrinterModel> models;
-        models.reserve(database.size());
+        models.reserve(m_models.size());
 
-        for (const auto& pair : database)
+        for (const auto& pair : m_models)
             models.push_back(pair.second);
 
         return models;
-    }
-
-    std::vector<unsigned char> UniversalGenerator::GenerateWritePacket(uint16_t rkey, uint16_t address, uint8_t value,
-                                                                       const std::string& wkey, uint8_t addressLength)
-    {
-        uint8_t c = EpsonD4::CMD_EEPROM_WRITE;
-        uint8_t not_c = ~c & 0xFF;
-        uint8_t shift_c = ((c >> 1) & 0x7F) | ((c << 7) & 0x80);
-
-        std::vector<unsigned char> inner;
-        inner.push_back(rkey & 0xFF);
-        inner.push_back((rkey >> 8) & 0xFF);
-        inner.push_back(c);
-        inner.push_back(not_c);
-        inner.push_back(shift_c);
-        // Address field: 1 or 2 bytes, little endian, per the model's 'wlen'.
-        inner.push_back(address & 0xFF);
-        if (addressLength != 1)
-            inner.push_back((address >> 8) & 0xFF);
-        inner.push_back(value);
-        inner.insert(inner.end(), wkey.begin(), wkey.end());
-
-        std::vector<unsigned char> epson_cmd;
-        epson_cmd.push_back(EpsonD4::PREFIX_PIPE);
-        epson_cmd.push_back(EpsonD4::PREFIX_PIPE);
-        uint16_t len = inner.size();
-        epson_cmd.push_back(len & 0xFF);
-        epson_cmd.push_back((len >> 8) & 0xFF);
-        epson_cmd.insert(epson_cmd.end(), inner.begin(), inner.end());
-
-        return WrapD4DataPacket(epson_cmd);
-    }
-
-    std::vector<unsigned char> UniversalGenerator::GenerateFactoryPacket(uint16_t rkey, uint8_t action,
-                                                                         const std::vector<unsigned char>& payload)
-    {
-        std::vector<unsigned char> inner;
-        inner.push_back(rkey & 0xFF);
-        inner.push_back((rkey >> 8) & 0xFF);
-        inner.push_back(action);
-        inner.push_back(static_cast<unsigned char>(~action & 0xFF));
-        inner.push_back(static_cast<unsigned char>(((action >> 1) & 0x7F) | ((action << 7) & 0x80)));
-        inner.insert(inner.end(), payload.begin(), payload.end());
-
-        std::vector<unsigned char> epson_cmd;
-        epson_cmd.push_back(EpsonD4::PREFIX_PIPE);
-        epson_cmd.push_back(EpsonD4::PREFIX_PIPE);
-        const uint16_t len = static_cast<uint16_t>(inner.size());
-        epson_cmd.push_back(len & 0xFF);
-        epson_cmd.push_back((len >> 8) & 0xFF);
-        epson_cmd.insert(epson_cmd.end(), inner.begin(), inner.end());
-
-        return WrapD4DataPacket(epson_cmd);
-    }
-
-    std::vector<unsigned char> UniversalGenerator::GenerateControlPacket(char first, char second,
-                                                                         const std::vector<unsigned char>& payload)
-    {
-        std::vector<unsigned char> command;
-        command.push_back(static_cast<unsigned char>(first));
-        command.push_back(static_cast<unsigned char>(second));
-        command.push_back(static_cast<unsigned char>(payload.size() & 0xFF));
-        command.push_back(static_cast<unsigned char>((payload.size() >> 8) & 0xFF));
-        command.insert(command.end(), payload.begin(), payload.end());
-        return WrapD4DataPacket(command);
-    }
-
-    std::vector<unsigned char> UniversalGenerator::GenerateRangeReadPacket(uint16_t rkey, uint16_t address,
-                                                                           uint8_t count, uint8_t addressLength)
-    {
-        std::vector<unsigned char> payload;
-        payload.push_back(address & 0xFF);
-        if (addressLength != 1)
-            payload.push_back((address >> 8) & 0xFF);
-        payload.push_back(count);
-
-        return GenerateFactoryPacket(rkey, EpsonD4::CMD_EEPROM_READ_RANGE, payload);
-    }
-
-    std::vector<unsigned char> UniversalGenerator::WrapD4DataPacket(const std::vector<unsigned char>& payload)
-    {
-        // D4 header uses Big-Endian length; inner Epson frames use Little-Endian length
-        std::vector<unsigned char> d4;
-        d4.push_back(EpsonD4::SOCKET_EPSON_CTRL);
-        d4.push_back(EpsonD4::SOCKET_EPSON_CTRL);
-        uint16_t d4_len = static_cast<uint16_t>(payload.size() + 6);
-        d4.push_back((d4_len >> 8) & 0xFF);
-        d4.push_back(d4_len & 0xFF);
-        d4.push_back(EpsonD4::CREDIT);
-        d4.push_back(0x00);
-        d4.insert(d4.end(), payload.begin(), payload.end());
-
-        return d4;
-    }
-
-    std::vector<unsigned char> UniversalGenerator::CreditGrantPacket()
-    {
-        return { 0x00, 0x00, 0x00, 0x0B, 0x01, 0x00, 0x03,
-                 EpsonD4::SOCKET_EPSON_CTRL, EpsonD4::SOCKET_EPSON_CTRL, 0x00, 0x01 };
-    }
-
-    std::vector<unsigned char> UniversalGenerator::CreditRequestPacket()
-    {
-        return { 0x00, 0x00, 0x00, 0x0D, 0x01, 0x00, 0x04,
-                 EpsonD4::SOCKET_EPSON_CTRL, EpsonD4::SOCKET_EPSON_CTRL, 0xFF, 0xFF, 0x00, 0x01 };
-    }
-
-    std::vector<unsigned char> UniversalGenerator::GenerateStatusQueryPacket()
-    {
-        // 2-byte command, LE length, payload. 'st' + 0x01 asks for the full
-        // '@BDC ST2' status report.
-        const std::vector<unsigned char> st_cmd = { 's', 't', 0x01, 0x00, 0x01 };
-        return WrapD4DataPacket(st_cmd);
-    }
-
-    std::vector<unsigned char> UniversalGenerator::GenerateReadPacket(uint16_t rkey, uint16_t address,
-                                                                      uint8_t addressLength)
-    {
-        uint8_t c = EpsonD4::CMD_EEPROM_READ;
-        uint8_t not_c = ~c & 0xFF;
-        uint8_t shift_c = ((c >> 1) & 0x7F) | ((c << 7) & 0x80);
-
-        std::vector<unsigned char> inner;
-        inner.push_back(rkey & 0xFF);
-        inner.push_back((rkey >> 8) & 0xFF);
-        inner.push_back(c);
-        inner.push_back(not_c);
-        inner.push_back(shift_c);
-        // Address field: 1 or 2 bytes, little endian, per the model's 'rlen'.
-        inner.push_back(address & 0xFF);
-        if (addressLength != 1)
-            inner.push_back((address >> 8) & 0xFF);
-
-        std::vector<unsigned char> epson_cmd;
-        epson_cmd.push_back(EpsonD4::PREFIX_PIPE);
-        epson_cmd.push_back(EpsonD4::PREFIX_PIPE);
-        uint16_t len = static_cast<uint16_t>(inner.size());
-        epson_cmd.push_back(len & 0xFF);
-        epson_cmd.push_back((len >> 8) & 0xFF);
-        epson_cmd.insert(epson_cmd.end(), inner.begin(), inner.end());
-
-        return WrapD4DataPacket(epson_cmd);
-    }
-
-    std::vector<std::vector<unsigned char>> UniversalGenerator::GenerateHandshake()
-    {
-        std::vector<std::vector<unsigned char>> handshake;
-
-        // The leading NULs flush the hardware parser state.
-        const unsigned char ejl_init[] = {
-            0x00, 0x00, 0x00, 0x1B, 0x01, '@', 'E', 'J', 'L', ' ', '1', '2', '8', '4', '.', '4', '\n',
-            '@', 'E', 'J', 'L', '\n',
-            '@', 'E', 'J', 'L', '\n'
-        };
-        handshake.push_back(std::vector<unsigned char>(std::begin(ejl_init), std::end(ejl_init)));
-
-        const unsigned char d4_init[] = {
-            0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00, 0x10
-        };
-        handshake.push_back(std::vector<unsigned char>(std::begin(d4_init), std::end(d4_init)));
-
-        const unsigned char d4_open[] = {
-            0x00, 0x00, 0x00, 0x11, 0x01, 0x00, 0x01,
-            EpsonD4::SOCKET_EPSON_CTRL, EpsonD4::SOCKET_EPSON_CTRL, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00
-        };
-        handshake.push_back(std::vector<unsigned char>(std::begin(d4_open), std::end(d4_open)));
-
-        return handshake;
-    }
-
-    std::vector<std::vector<unsigned char>> UniversalGenerator::GenerateSequence(const DbPrinterModel& model) const
-    {
-        // Handshake, then a credit-pair + write triplet per address.
-        std::vector<std::vector<unsigned char>> sequence = GenerateHandshake();
-
-        size_t skippedAddresses = 0;
-        size_t unencodableAddresses = 0;
-
-        for (const auto& group : model.pad_groups)
-        {
-            for (size_t i = 0; i < group.addresses.size(); ++i)
-            {
-                // Beyond mem_high is undefined mainboard memory.
-                if (group.addresses[i] > model.mem_high)
-                {
-                    skippedAddresses++;
-                    continue;
-                }
-
-                // A 1-byte-addressing model would silently target the wrong
-                // cell for anything above 0xFF.
-                if (!model.CanEncodeWriteAddress(group.addresses[i]))
-                {
-                    unencodableAddresses++;
-                    continue;
-                }
-
-                sequence.push_back(CreditGrantPacket());
-                sequence.push_back(CreditRequestPacket());
-                sequence.push_back(GenerateWritePacket(model.rkey, group.addresses[i], group.reset_values[i],
-                                                       model.wkey, model.WriteAddressLength()));
-            }
-        }
-
-        if (skippedAddresses > 0)
-        {
-            std::ostringstream oss;
-            oss << "[!] " << model.name << ": skipped " << skippedAddresses
-                << " EEPROM address(es) above this model's memory limit (mem_high="
-                << model.mem_high << "). The database entry may be corrupted.";
-            ewr::log::Log(ewr::log::Level::Warning, ewr::log::Stage::Database,
-                          "db.address_above_limit", oss.str());
-        }
-
-        if (unencodableAddresses > 0)
-        {
-            std::ostringstream oss;
-            oss << "[!] " << model.name << ": skipped " << unencodableAddresses
-                << " EEPROM address(es) above 0xFF that this model's 1-byte address"
-                << " field cannot express (wlen=" << model.wlen
-                << "). The database entry may be corrupted.";
-            ewr::log::Log(ewr::log::Level::Warning, ewr::log::Stage::Database,
-                          "db.address_unencodable", oss.str());
-        }
-
-        return sequence;
     }
 
 } // namespace ewr

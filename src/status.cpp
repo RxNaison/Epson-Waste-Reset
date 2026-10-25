@@ -1,4 +1,6 @@
 #include "ewr/status.h"
+#include "ewr/ctrl.h"
+#include "ewr/d4session.h"
 
 #include <algorithm>
 #include <cctype>
@@ -94,7 +96,7 @@ namespace ewr {
 
     } // namespace
 
-    std::vector<unsigned char> ExtractD4Payload(const std::vector<unsigned char>& raw)
+    std::vector<unsigned char> d4::ExtractPayload(const std::vector<unsigned char>& raw)
     {
         std::vector<unsigned char> payload;
 
@@ -112,7 +114,7 @@ namespace ewr {
                 // Data packet on the negotiated socket - GetSocketID may answer
                 // with something other than the well-known 2, and the session
                 // frames its replies with whatever it got. Same rule the D4
-                // layer itself applies in ExtractDataPayload.
+                // layer itself applies in d4::ExtractDataPayload.
                 payload.insert(payload.end(), raw.begin() + i + 6, raw.begin() + i + len);
                 i += len;
             }
@@ -131,11 +133,11 @@ namespace ewr {
         return payload;
     }
 
-    PrinterStatus ParseStatusReply(const std::vector<unsigned char>& raw)
+    PrinterStatus ctrl::ParseStatusReply(const std::vector<unsigned char>& raw)
     {
         PrinterStatus status;
 
-        const std::vector<unsigned char> payload = ExtractD4Payload(raw);
+        const std::vector<unsigned char> payload = d4::ExtractPayload(raw);
         const std::string haystack(payload.begin(), payload.end());
         static const std::string kPrefix = "@BDC ST2\r\n";
 
@@ -242,9 +244,9 @@ namespace ewr {
         return status;
     }
 
-    bool ParseEepromReadReply(const std::vector<unsigned char>& raw, uint8_t& value, int expectedAddress)
+    bool ctrl::ParseReadReply(const std::vector<unsigned char>& raw, uint8_t& value, int expectedAddress)
     {
-        const std::vector<unsigned char> payload = ExtractD4Payload(raw);
+        const std::vector<unsigned char> payload = d4::ExtractPayload(raw);
         const std::string haystack(payload.begin(), payload.end());
 
         const size_t prefix = haystack.find("@BDC PS\r\n");
@@ -324,14 +326,14 @@ namespace ewr {
         return false;
     }
 
-    bool ParseEepromRangeReply(const std::vector<unsigned char>& raw, uint16_t address, uint8_t count,
+    bool ctrl::ParseRangeReadReply(const std::vector<unsigned char>& raw, uint16_t address, uint8_t count,
                                std::vector<uint8_t>& values)
     {
         values.clear();
         if (count == 0)
             return false;
 
-        const std::vector<unsigned char> payload = ExtractD4Payload(raw);
+        const std::vector<unsigned char> payload = d4::ExtractPayload(raw);
         const std::string haystack(payload.begin(), payload.end());
 
         const size_t prefix = haystack.find("@BDC PS\r\n");
@@ -402,15 +404,15 @@ namespace ewr {
         return true;
     }
 
-    ReadAnswer ClassifyEepromReadReply(const std::vector<unsigned char>& raw, uint8_t& value, int expectedAddress)
+    ReadAnswer ctrl::ClassifyReadReply(const std::vector<unsigned char>& raw, uint8_t& value, int expectedAddress)
     {
         if (raw.empty())
             return ReadAnswer::Silent;
 
-        if (ParseEepromReadReply(raw, value, expectedAddress))
+        if (ctrl::ParseReadReply(raw, value, expectedAddress))
             return ReadAnswer::Value;
 
-        const std::vector<unsigned char> payload = ExtractD4Payload(raw);
+        const std::vector<unsigned char> payload = d4::ExtractPayload(raw);
         std::string text(payload.begin(), payload.end());
 
         // Replies end in a form feed; some firmware adds a line break.

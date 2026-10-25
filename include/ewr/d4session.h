@@ -1,37 +1,73 @@
 #pragma once
-#include "ewr/executor.h"
-#include "ewr/generator.h"
+#include "ewr/gateway.h"
+#include "ewr/log.h"
+#include "ewr/transport.h"
 
+#include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <ostream>
 #include <string>
 #include <vector>
 
-namespace ewr {
+// IEEE 1284.4 (D4) session layer. Replies are length-framed from the
+// 6-byte D4 header (timeouts are a safety net, not the framing), the
+// control socket comes from GetSocketID("EPSON-CTRL") with the well-known
+// socket 2 as fallback, the MTU is negotiated at OpenChannel, and data
+// packets block on bidirectional credit accounting.
+namespace ewr::d4 {
 
-    // IEEE 1284.4 (D4) session layer. Replies are length-framed from the
-    // 6-byte D4 header (timeouts are a safety net, not the framing), the
-    // control socket comes from GetSocketID("EPSON-CTRL") with the well-known
-    // socket 2 as fallback, the MTU is negotiated at OpenChannel, and data
-    // packets block on bidirectional credit accounting.
+    constexpr uint8_t CMD_INIT           = 0x00;
+    constexpr uint8_t CMD_OPEN_CHANNEL   = 0x01;
+    constexpr uint8_t CMD_CLOSE_CHANNEL  = 0x02;
+    constexpr uint8_t CMD_CREDIT         = 0x03;
+    constexpr uint8_t CMD_CREDIT_REQUEST = 0x04;
+    constexpr uint8_t CMD_EXIT           = 0x08;
+    constexpr uint8_t CMD_GET_SOCKET_ID  = 0x09;
+    constexpr uint8_t CMD_ERROR          = 0x7F;
+    constexpr uint8_t REPLY_BIT          = 0x80;
+    constexpr uint8_t INIT_REVISION      = 0x10;
+    constexpr uint8_t SOCKET_EPSON_CTRL  = 0x02;
+    constexpr uint8_t CREDIT             = 0x00; // must stay 0, nonzero locks up the hardware buffer
 
-    namespace D4 {
-        constexpr uint8_t CMD_INIT           = 0x00;
-        constexpr uint8_t CMD_OPEN_CHANNEL   = 0x01;
-        constexpr uint8_t CMD_CLOSE_CHANNEL  = 0x02;
-        constexpr uint8_t CMD_CREDIT         = 0x03;
-        constexpr uint8_t CMD_CREDIT_REQUEST = 0x04;
-        constexpr uint8_t CMD_EXIT           = 0x08;
-        constexpr uint8_t CMD_GET_SOCKET_ID  = 0x09;
-        constexpr uint8_t CMD_ERROR          = 0x7F;
-        constexpr uint8_t REPLY_BIT          = 0x80;
-        constexpr uint8_t INIT_REVISION      = 0x10;
+    std::string DescribeResult(uint8_t code);
 
-        std::string DescribeResult(uint8_t code);
-    }
+    // ---- The packets a generated sequence carries
 
-    struct D4Packet
+    // An EPSON-CTRL payload in a data packet for socket 2. The D4 header's
+    // length is big-endian; the Epson frames inside are little-endian.
+    std::vector<unsigned char> DataPacket(const std::vector<unsigned char>& payload);
+    std::vector<std::vector<unsigned char>> Handshake();
+    std::vector<unsigned char> CreditGrantPacket();
+    std::vector<unsigned char> CreditRequestPacket();
+
+    // ---- Reading raw replies
+
+    // Concatenated data-channel payload bytes, with socket 0 credit/control
+    // traffic skipped. Any packet whose psid and ssid match and are non-zero is
+    // a data packet: GetSocketID can hand back a socket other than the
+    // well-known 2, and this parser sees the negotiated one. Bytes that do not
+    // line up with a plausible D4 header are dropped one at a time, so a partial
+    // capture still yields what arrived.
+    std::vector<unsigned char> ExtractPayload(const std::vector<unsigned char>& raw);
+
+    // False for transaction/handshake packets, which carry no ctrl payload.
+    bool ExtractDataPayload(const std::vector<unsigned char>& packet, std::vector<unsigned char>& payload);
+
+    bool IsChannelOpenAck(const std::vector<unsigned char>& ackData);
+
+    // ET-2xxx interface 1 carries two alternate settings on one endpoint pair:
+    // alt 0 is 1284.4, alt 1 is IPP-over-USB. Only SET_INTERFACE picks between
+    // them and usbprint.sys cannot issue it, so a Windows run can write D4 into
+    // an HTTP server and get a 500 back (issue #16).
+    bool LooksLikeHttpReply(const unsigned char* data, size_t size);
+
+    inline constexpr const char* kHttpPersonalityError =
+        "This interface answered with HTTP (IPP-over-USB), not IEEE 1284.4 - it is the"
+        " printer's IPP personality, so the maintenance channel is on another interface.";
+
+    // ---- The session
+
+    struct Packet
     {
         uint8_t psid = 0;
         uint8_t ssid = 0;
@@ -49,14 +85,14 @@ namespace ewr {
 
     // Leftover bytes stay buffered between calls, so replies split across USB
     // reads reassemble and back-to-back packets are delivered one at a time.
-    class D4Framer
+    class Framer
     {
     public:
-        explicit D4Framer(ITransport& transport) : m_transport(transport) {}
+        explicit Framer(ITransport& transport) : m_transport(transport) {}
 
-        bool ReadPacket(D4Packet& pkt, int timeoutMs, log::Reporter& reporter);
+        bool ReadPacket(Packet& pkt, int timeoutMs, log::Reporter& reporter);
 
-        bool ReadPacket(D4Packet& pkt, int timeoutMs, std::ostream& logStream)
+        bool ReadPacket(Packet& pkt, int timeoutMs, std::ostream& logStream)
         {
             log::Reporter reporter;
             std::ostream* stream = &logStream;
@@ -82,7 +118,7 @@ namespace ewr {
         bool m_sawHttpReply = false;
     };
 
-    struct D4SessionOptions
+    struct SessionOptions
     {
         // The EJL -> D4 mode switch can take well over a second on some models.
         int replyTimeoutMs = 2000;
@@ -101,12 +137,12 @@ namespace ewr {
         std::string serviceName = "EPSON-CTRL";
     };
 
-    class D4Session
+    class Session
     {
     public:
-        D4Session(ITransport& transport, log::Reporter& reporter, const D4SessionOptions& options = {});
+        Session(ITransport& transport, log::Reporter& reporter, const SessionOptions& options = {});
 
-        D4Session(ITransport& transport, std::ostream& logStream, const D4SessionOptions& options = {});
+        Session(ITransport& transport, std::ostream& logStream, const SessionOptions& options = {});
 
         // EJL enter -> Init -> GetSocketID -> OpenChannel (+ MTU parse).
         bool Start();
@@ -141,31 +177,31 @@ namespace ewr {
     private:
         bool SendPacket(uint8_t psid, uint8_t ssid, const std::vector<unsigned char>& payload, uint8_t credit);
         // Absorbs credit/error traffic until the wanted reply code arrives.
-        bool WaitFor(uint8_t replyCmd, D4Packet& pkt, int timeoutMs);
-        bool WaitForData(D4Packet& pkt, int timeoutMs);
+        bool WaitFor(uint8_t replyCmd, Packet& pkt, int timeoutMs);
+        bool WaitForData(Packet& pkt, int timeoutMs);
         // Credit bookkeeping for every incoming packet.
-        void Absorb(const D4Packet& pkt);
+        void Absorb(const Packet& pkt);
         bool EnsureSendCredit(int timeoutMs);
         bool EnsurePrinterCredit();
         void DiscardHeldReplies();
         bool Fail(const std::string& error);
 
         ITransport& m_transport;
-        D4Framer m_framer;
+        Framer m_framer;
         // Data packets that turned up while waiting for a transaction reply -
         // a reply fragment can arrive alongside the credit ack that bought it.
         // Dropping them would hand the caller a truncated reply.
-        std::vector<D4Packet> m_pendingData;
+        std::vector<Packet> m_pendingData;
         // Owns the reporter only when constructed over an ostream; otherwise
         // events go to the caller's reporter.
         log::Reporter m_ownedReporter;
         log::Reporter& m_reporter;
-        D4SessionOptions m_options;
+        SessionOptions m_options;
 
         bool m_started = false;
         bool m_closed = false;
         bool m_channelOpen = false;
-        uint8_t m_socket = EpsonD4::SOCKET_EPSON_CTRL;
+        uint8_t m_socket = SOCKET_EPSON_CTRL;
         uint16_t m_mtuToPrinter = 0x0040;
         uint16_t m_mtuToHost = 0x0100;
         int m_sendCredit = 0;    // credit we hold for sending data
@@ -175,44 +211,14 @@ namespace ewr {
 
     // Session-layer twins of the executor entry points. Generated
     // handshake/credit packets are skipped: the session owns that choreography.
-    ExecutionResult ExecuteSequenceD4(ITransport& transport,
-                                      const std::vector<std::vector<unsigned char>>& sequence,
-                                      log::Reporter& reporter,
-                                      const ExecutorOptions& options);
+    ExecutionResult RunSequence(ITransport& transport,
+                                const std::vector<std::vector<unsigned char>>& sequence,
+                                log::Reporter& reporter,
+                                const ExecutorOptions& options);
 
-    QuerySessionResult ExecuteQuerySessionD4(ITransport& transport,
-                                             const std::vector<std::vector<unsigned char>>& queries,
-                                             log::Reporter& reporter,
-                                             const ExecutorOptions& options);
+    QuerySessionResult RunQuerySession(ITransport& transport,
+                                       const std::vector<std::vector<unsigned char>>& queries,
+                                       log::Reporter& reporter,
+                                       const ExecutorOptions& options);
 
-    // False for transaction/handshake packets, which carry no ctrl payload.
-    bool ExtractDataPayload(const std::vector<unsigned char>& packet, std::vector<unsigned char>& payload);
-
-    // One EPSON-CTRL command out, its reply back: the step a write sequence
-    // repeats, over a D4 session or an SNMP GET. An empty `reply` is an
-    // answer that never came, and a later exchange may still be heard; false
-    // means none can be, with the reason in `error`.
-    using CtrlExchange = std::function<bool(const std::vector<unsigned char>& command,
-                                            std::vector<unsigned char>& reply,
-                                            std::string& error)>;
-
-    struct CtrlCommand
-    {
-        std::vector<unsigned char> payload;
-        bool isWrite = false;
-    };
-
-    // The data payloads of a generated sequence, in order.
-    std::vector<CtrlCommand> ExtractCtrlCommands(const std::vector<std::vector<unsigned char>>& sequence);
-
-    // The one write loop, whatever carries it. With options.verifyWrites
-    // every write must come back ':42:OK;': an unconfirmed one is sent again
-    // (a write is idempotent), ':42:NG;' earns one retry with the alternate
-    // keyword, and ':42:NA;' ends the run. Fills `result` past the handshake.
-    void RunCtrlCommands(const CtrlExchange& exchange,
-                         const std::vector<CtrlCommand>& commands,
-                         log::Reporter& reporter,
-                         const ExecutorOptions& options,
-                         ExecutionResult& result);
-
-} // namespace ewr
+} // namespace ewr::d4

@@ -1,8 +1,11 @@
 #include "ewr/usb.h"
+#include "ewr/ctrl.h"
+#include "ewr/d4session.h"
+#include "ewr/format.h"
 #include "ewr/usb_backend.h"
 #include "ewr/usb_timing.h"
 #include "ewr/executor.h"
-#include "ewr/generator.h"
+#include "ewr/database.h"
 #include "ewr/log.h"
 #include "ewr/paths.h"
 #include "ewr/status.h"
@@ -151,7 +154,7 @@ namespace ewr {
             trace << title << "\n";
             trace << "EWR Version: " << EWR_VERSION << "\n";
             if (context)
-                trace << DescribeTraceContext(*context);
+                trace << exec::DescribeTraceContext(*context);
             trace << "==================================================\n\n";
         }
 
@@ -306,7 +309,7 @@ namespace ewr {
             const PathLabels labels = LabelsFor(path);
 
             const std::vector<std::vector<unsigned char>> factoryCommands =
-                ExtractFactoryWriteCommands(sequence);
+                ctrl::ExtractWriteCommands(sequence);
             if (factoryCommands.empty())
             {
                 trace << labels.tag << " No factory EEPROM writes in this sequence; the fallback is not applicable.\n\n";
@@ -337,12 +340,12 @@ namespace ewr {
             ScopedBackendClose closeGuard(backend);
 
             log::Reporter& reporter = log::Default();
-            End4Result e4;
+            exec::End4Result e4;
             {
                 ScopedTraceSink traceSink(reporter, trace);
                 e4 = (path == NonD4Path::End4)
-                    ? ExecuteEnd4Sequence(*transport, deviceId, factoryCommands, reporter, options)
-                    : ExecuteEscRemoteSequence(*transport, factoryCommands, reporter, options);
+                    ? exec::RunEnd4Sequence(*transport, deviceId, factoryCommands, reporter, options)
+                    : exec::RunEscRemoteSequence(*transport, factoryCommands, reporter, options);
             }
             closeGuard.Close();
 
@@ -415,13 +418,13 @@ namespace ewr {
                 if (ITransport* transport = backend.Open(cand.ordinal))
                 {
                     ScopedBackendClose closeGuard(backend);
-                    const QuerySessionResult result = ExecuteQuerySession(*transport,
-                        UniversalGenerator::GenerateHandshake(),
-                        { UniversalGenerator::GenerateStatusQueryPacket() },
+                    const QuerySessionResult result = exec::RunQuerySession(*transport,
+                        d4::Handshake(),
+                        { ctrl::StatusQueryPacket() },
                         pollReporter, pollOptions);
 
                     if (!result.replies.empty())
-                        status = ParseStatusReply(result.replies[0]);
+                        status = ctrl::ParseStatusReply(result.replies[0]);
                 }
 
                 const long long elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -599,7 +602,7 @@ namespace ewr {
                 log::Reporter& reporter = log::Default();
                 {
                     ScopedTraceSink traceSink(reporter, trace);
-                    result = ExecuteSequence(*transport, sequence, reporter, options);
+                    result = exec::RunSequence(*transport, sequence, reporter, options);
                 }
 
                 trace << "==================================================\n";
@@ -758,7 +761,7 @@ namespace ewr {
                 log::Reporter& reporter = log::Default();
                 {
                     ScopedTraceSink traceSink(reporter, trace);
-                    result = ExecuteQuerySession(*transport, handshake, queries, reporter, options);
+                    result = exec::RunQuerySession(*transport, handshake, queries, reporter, options);
                 }
 
                 trace << "==================================================\n";
@@ -852,7 +855,7 @@ namespace ewr {
             trace << "Interface:     " << backend->Describe(cand.ordinal) << "\n";
             trace << "Bytes:         " << data.size() << "\n";
             trace << "==================================================\n";
-            trace << HexDump(data.data(), data.size());
+            trace << format::HexDump(data.data(), data.size());
 
             run.sent = transport->Send(data);
 

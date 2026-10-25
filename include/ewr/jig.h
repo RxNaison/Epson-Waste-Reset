@@ -1,7 +1,8 @@
 #pragma once
 
-#include "ewr/executor.h"
+#include "ewr/gateway.h"
 #include "ewr/log.h"
+#include "ewr/transport.h"
 
 #include <cstdint>
 #include <vector>
@@ -20,7 +21,7 @@ namespace jig {
     extern const std::vector<unsigned char> kLeavePacketMode;
 
     // ESC ( R 08 00 00 "JIGMODE".
-    std::vector<unsigned char> BuildEnterJigMode();
+    std::vector<unsigned char> BuildEnter();
 
     // "JGPG" 05 00, then page (address high byte), offset (2, LE) and a byte
     // count (2, LE) of 1. The reply is "JGPG" 01 00 and the byte.
@@ -35,15 +36,14 @@ namespace jig {
     // False when `raw` holds no complete "JGPG" reply.
     bool ParseReadReply(const std::vector<unsigned char>& raw, uint8_t& value);
 
-} // namespace jig
-
     // One JIG read session: enter packet mode, leave it, enter JIG mode, one
     // read per query (each a BuildReadPacket), leave JIG mode. Replies are
-    // positional and raw, like ExecuteQuerySession's. handshakeFailed when
+    // positional and raw, like exec::RunQuerySession's. handshakeFailed when
     // the printer answered nothing at all before the first read.
-    QuerySessionResult ExecuteJigReadSession(ITransport& transport,
-                                             const std::vector<std::vector<unsigned char>>& queries,
-                                             log::Reporter& reporter,
-                                             const ExecutorOptions& options = {});
+    QuerySessionResult RunReadSession(ITransport& transport,
+                                      const std::vector<std::vector<unsigned char>>& queries,
+                                      log::Reporter& reporter,
+                                      const ExecutorOptions& options = {});
 
+} // namespace jig
 } // namespace ewr

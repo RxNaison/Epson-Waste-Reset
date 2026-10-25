@@ -1,5 +1,7 @@
 #include "ewr/jig.h"
-#include "ewr/generator.h"
+#include "ewr/d4session.h"
+#include "ewr/format.h"
+#include "ewr/database.h"
 
 #include <algorithm>
 #include <string>
@@ -13,7 +15,7 @@ namespace jig {
         ' ', ' ', ' ', ' ', ' ', '\n'
     };
 
-    std::vector<unsigned char> BuildEnterJigMode()
+    std::vector<unsigned char> BuildEnter()
     {
         return { 0x1b, '(', 'R', 0x08, 0x00, 0x00, 'J', 'I', 'G', 'M', 'O', 'D', 'E' };
     }
@@ -75,7 +77,7 @@ namespace jig {
                                             int timeoutMs, bool& sent)
         {
             EmitTrace(reporter, "jig.tx", std::string("[OUT] JIG ") + what + " (" + std::to_string(packet.size())
-                + " bytes):\n" + HexDump(packet.data(), packet.size()));
+                + " bytes):\n" + format::HexDump(packet.data(), packet.size()));
 
             sent = transport.Send(packet);
             if (!sent || timeoutMs < 0)
@@ -94,14 +96,14 @@ namespace jig {
 
             if (!reply.empty())
                 EmitTrace(reporter, "jig.rx", "[IN]  JIG reply (" + std::to_string(reply.size()) + " bytes):\n"
-                    + HexDump(reply.data(), reply.size()));
+                    + format::HexDump(reply.data(), reply.size()));
 
             return reply;
         }
 
     } // namespace
 
-    QuerySessionResult ExecuteJigReadSession(ITransport& transport,
+    QuerySessionResult jig::RunReadSession(ITransport& transport,
                                              const std::vector<std::vector<unsigned char>>& queries,
                                              log::Reporter& reporter,
                                              const ExecutorOptions& options)
@@ -113,7 +115,7 @@ namespace jig {
 
         // Into packet mode first, as WIC does: the leave packet below is a
         // D4 transaction, so it only means "leave" to a printer in D4 mode.
-        const std::vector<unsigned char> ejl = UniversalGenerator::GenerateHandshake()[0];
+        const std::vector<unsigned char> ejl = d4::Handshake()[0];
         const std::vector<unsigned char> ejlReply =
             Exchange(transport, reporter, ejl, "EJL enter", options.handshakeDrainTimeoutMs, sent);
         if (!sent)
@@ -145,7 +147,7 @@ namespace jig {
         result.handshakeConfirmed = true;
 
         // WIC sends the first read straight behind this; nothing answers it.
-        Exchange(transport, reporter, jig::BuildEnterJigMode(), "enter JIGMODE", -1, sent);
+        Exchange(transport, reporter, jig::BuildEnter(), "enter JIGMODE", -1, sent);
         if (!sent)
         {
             result.error = "Transport failure while entering JIG mode";

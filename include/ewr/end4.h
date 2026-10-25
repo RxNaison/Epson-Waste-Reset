@@ -13,7 +13,7 @@ namespace end4 {
 
     // Wraps one control command ("st...", "||...") in END4 packet framing.
     // The length field is a single byte, so `command` must not exceed 241.
-    std::vector<unsigned char> BuildEnd4Packet(const std::vector<unsigned char>& command);
+    std::vector<unsigned char> BuildPacket(const std::vector<unsigned char>& command);
 
     // Wraps a factory command in ESC/P-Remote framing (ESC ( R ... REMOTE1).
     // No transport drives this yet: it is the framing the raw non-D4 path
@@ -23,7 +23,7 @@ namespace end4 {
     // Strips the 10-byte END4 header. False when the buffer is not a complete
     // END4 packet; outPayload still carries whatever body arrived, and is left
     // empty when the frame declares a length shorter than its own header.
-    bool ParseEnd4Response(const std::vector<unsigned char>& rawBytes, std::vector<unsigned char>& outPayload);
+    bool ParseResponse(const std::vector<unsigned char>& rawBytes, std::vector<unsigned char>& outPayload);
 
     // Number of packet-mode flush bytes (0x11) an END4 session sends after the
     // ExitPacketMode2 preamble. The count is the 'DDS' field of the IEEE 1284

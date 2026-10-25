@@ -1,7 +1,9 @@
 #include "ewr/executor.h"
+#include "ewr/ctrl.h"
+#include "ewr/format.h"
 #include "ewr/d4session.h"
 #include "ewr/end4.h"
-#include "ewr/generator.h"
+#include "ewr/database.h"
 #include "ewr/jig.h"
 
 #include <algorithm>
@@ -25,7 +27,7 @@ namespace ewr {
 
     } // namespace
 
-    std::string HexDump(const unsigned char* data, size_t size)
+    std::string format::HexDump(const unsigned char* data, size_t size)
     {
         if (size == 0)
             return "    (Empty)\n";
@@ -56,23 +58,23 @@ namespace ewr {
         return oss.str();
     }
 
-    bool LooksLikeHttpReply(const unsigned char* data, size_t size)
+    bool d4::LooksLikeHttpReply(const unsigned char* data, size_t size)
     {
         static const char prefix[] = "HTTP/";
         const size_t length = sizeof(prefix) - 1;
         return data != nullptr && size >= length && std::equal(prefix, prefix + length, data);
     }
 
-    std::string HexDumpCapped(const unsigned char* data, size_t size, size_t maxBytes)
+    std::string format::HexDumpCapped(const unsigned char* data, size_t size, size_t maxBytes)
     {
         if (size <= maxBytes)
-            return HexDump(data, size);
+            return format::HexDump(data, size);
 
-        return HexDump(data, maxBytes)
+        return format::HexDump(data, maxBytes)
             + "    ... " + std::to_string(size - maxBytes) + " further byte(s) not shown\n";
     }
 
-    bool IsReadOnlyQueryPacket(const std::vector<unsigned char>& p)
+    bool ctrl::IsReadOnlyQuery(const std::vector<unsigned char>& p)
     {
         // [0..5] D4 header on one socket, then the two command letters.
         if (p.size() < 8 || p[0] != p[1])
@@ -87,7 +89,7 @@ namespace ewr {
                 return false;
 
             const unsigned char c = p[12];
-            if (c != EpsonD4::CMD_EEPROM_READ && c != EpsonD4::CMD_EEPROM_READ_RANGE)
+            if (c != ctrl::CMD_EEPROM_READ && c != ctrl::CMD_EEPROM_READ_RANGE)
                 return false;
 
             return p[13] == static_cast<unsigned char>(~c)
@@ -97,21 +99,21 @@ namespace ewr {
         return (a == 's' && b == 't') || (a == 'v' && b == 'i') || (a == 'c' && b == 'd');
     }
 
-    bool IsWritePacket(const std::vector<unsigned char>& p)
+    bool ctrl::IsWrite(const std::vector<unsigned char>& p)
     {
         // [0..5] D4 header, [6..9] 7C 7C + LE inner length,
         // [10..11] rkey, [12] cmd, [13] ~cmd, [14] ror1(cmd).
         if (p.size() < 15)
             return false;
 
-        const unsigned char c = EpsonD4::CMD_EEPROM_WRITE;
+        const unsigned char c = ctrl::CMD_EEPROM_WRITE;
         const unsigned char not_c = static_cast<unsigned char>(~c);
         const unsigned char ror_c = static_cast<unsigned char>(((c >> 1) & 0x7F) | ((c << 7) & 0x80));
 
-        bool result = p[0] == EpsonD4::SOCKET_EPSON_CTRL
-                   && p[1] == EpsonD4::SOCKET_EPSON_CTRL
-                   && p[6] == EpsonD4::PREFIX_PIPE
-                   && p[7] == EpsonD4::PREFIX_PIPE
+        bool result = p[0] == d4::SOCKET_EPSON_CTRL
+                   && p[1] == d4::SOCKET_EPSON_CTRL
+                   && p[6] == ctrl::PREFIX_PIPE
+                   && p[7] == ctrl::PREFIX_PIPE
                    && p[12] == c
                    && p[13] == not_c
                    && p[14] == ror_c;
@@ -119,30 +121,30 @@ namespace ewr {
         return result;
     }
 
-    bool IsEepromWriteOkAck(const std::vector<unsigned char>& ackData)
+    bool ctrl::IsWriteOk(const std::vector<unsigned char>& ackData)
     {
         static const unsigned char token[] = { ':', '4', '2', ':', 'O', 'K', ';' };
         return ContainsToken(ackData, token, sizeof(token));
     }
 
-    bool IsEepromWriteNgAck(const std::vector<unsigned char>& ackData)
+    bool ctrl::IsWriteNg(const std::vector<unsigned char>& ackData)
     {
         static const unsigned char token[] = { ':', '4', '2', ':', 'N', 'G', ';' };
         return ContainsToken(ackData, token, sizeof(token));
     }
 
-    bool IsEepromWriteNaAck(const std::vector<unsigned char>& ackData)
+    bool ctrl::IsWriteNa(const std::vector<unsigned char>& ackData)
     {
         static const unsigned char token[] = { ':', '4', '2', ':', 'N', 'A', ';' };
         return ContainsToken(ackData, token, sizeof(token));
     }
 
-    bool IsChannelOpenAck(const std::vector<unsigned char>& ackData)
+    bool d4::IsChannelOpenAck(const std::vector<unsigned char>& ackData)
     {
-        return ackData.size() >= 7 && ackData[6] == EpsonD4::REPLY_OPEN_CHANNEL;
+        return ackData.size() >= 7 && ackData[6] == (d4::CMD_OPEN_CHANNEL | d4::REPLY_BIT);
     }
 
-    bool SubstituteTrailingWriteKey(const std::vector<unsigned char>& packet,
+    bool ctrl::SubstituteTrailingWriteKey(const std::vector<unsigned char>& packet,
                                     const std::string& from,
                                     const std::string& to,
                                     std::vector<unsigned char>& out)
@@ -188,13 +190,13 @@ namespace ewr {
 
     } // namespace
 
-    ExecutionResult ExecuteSequence(ITransport& transport,
+    ExecutionResult exec::RunSequence(ITransport& transport,
                                     const std::vector<std::vector<unsigned char>>& sequence,
                                     log::Reporter& reporter,
                                     const ExecutorOptions& options)
     {
         if (options.useSessionLayer)
-            return ExecuteSequenceD4(transport, sequence, reporter, options);
+            return d4::RunSequence(transport, sequence, reporter, options);
 
         ExecutionResult result;
 
@@ -203,7 +205,7 @@ namespace ewr {
         size_t firstWriteIndex = sequence.size();
         for (size_t i = 0; i < sequence.size(); ++i)
         {
-            if (IsWritePacket(sequence[i]))
+            if (ctrl::IsWrite(sequence[i]))
             {
                 firstWriteIndex = i;
                 break;
@@ -217,7 +219,7 @@ namespace ewr {
         {
             EmitTrace(reporter, "exec.tx", "[OUT] Packet " + std::to_string(index + 1)
                 + " (" + std::to_string(pkt.size()) + " bytes):\n"
-                + HexDump(pkt.data(), pkt.size()));
+                + format::HexDump(pkt.data(), pkt.size()));
 
             if (!transport.Send(pkt))
             {
@@ -235,12 +237,12 @@ namespace ewr {
             ack = transport.Drain(drainTimeoutMs);
 
             EmitTrace(reporter, "exec.rx", "[IN]  ACK (" + std::to_string(ack.size()) + " bytes):\n"
-                + HexDumpCapped(ack.data(), ack.size(), kTraceDumpCapBytes));
+                + format::HexDumpCapped(ack.data(), ack.size(), format::kTraceDumpCapBytes));
 
             if (!ack.empty())
                 result.ackCount++;
 
-            if (IsChannelOpenAck(ack))
+            if (d4::IsChannelOpenAck(ack))
                 result.handshakeConfirmed = true;
 
             return true;
@@ -265,7 +267,7 @@ namespace ewr {
             // Copied, not referenced: a ':42:NG;' may rebuild this packet with
             // the model's alternate keyword before the next attempt.
             std::vector<unsigned char> pkt = sequence[i];
-            const bool isWrite = IsWritePacket(pkt);
+            const bool isWrite = ctrl::IsWrite(pkt);
             bool triedAlternateKey = false;
 
             if (isWrite)
@@ -296,7 +298,7 @@ namespace ewr {
                     // Only generated sequences guarantee the two packets before
                     // a write are its credit pair; replay dumps have no shape.
                     if (options.resendCreditOnRetry
-                        && i >= 2 && !IsWritePacket(sequence[i - 2]) && !IsWritePacket(sequence[i - 1]))
+                        && i >= 2 && !ctrl::IsWrite(sequence[i - 2]) && !ctrl::IsWrite(sequence[i - 1]))
                     {
                         std::vector<unsigned char> creditAck;
                         if (!sendAndDrain(sequence[i - 2], i - 2, options.drainTimeoutMs, creditAck))
@@ -314,11 +316,11 @@ namespace ewr {
                 // The keyword did not match. Models carrying a second,
                 // Caesar-shifted keyword ('wkey1') get one retry with it;
                 // otherwise fatal on every path, replay included.
-                if (isWrite && IsEepromWriteNgAck(ack))
+                if (isWrite && ctrl::IsWriteNg(ack))
                 {
                     std::vector<unsigned char> alternate;
                     if (!triedAlternateKey
-                        && SubstituteTrailingWriteKey(pkt, options.writeKey, options.alternateWriteKey, alternate))
+                        && ctrl::SubstituteTrailingWriteKey(pkt, options.writeKey, options.alternateWriteKey, alternate))
                     {
                         triedAlternateKey = true;
                         pkt = std::move(alternate);
@@ -346,7 +348,7 @@ namespace ewr {
                 // Keys accepted, but the firmware will not service the write in
                 // its current state - typically locked by ink-out, paper-jam or
                 // cover-open. Retrying cannot help.
-                if (isWrite && IsEepromWriteNaAck(ack))
+                if (isWrite && ctrl::IsWriteNa(ack))
                 {
                     result.writesRejected++;
                     result.error = "Printer REFUSED EEPROM write (packet " + std::to_string(i + 1)
@@ -380,7 +382,7 @@ namespace ewr {
                     break;
                 }
 
-                if (IsEepromWriteOkAck(ack))
+                if (ctrl::IsWriteOk(ack))
                 {
                     result.writesVerified++;
                     confirmed = true;
@@ -457,7 +459,7 @@ namespace ewr {
         return result;
     }
 
-    QuerySessionResult ExecuteQuerySession(ITransport& transport,
+    QuerySessionResult exec::RunQuerySession(ITransport& transport,
                                            const std::vector<std::vector<unsigned char>>& handshake,
                                            const std::vector<std::vector<unsigned char>>& queries,
                                            log::Reporter& reporter,
@@ -466,9 +468,9 @@ namespace ewr {
         // Both build their own handshake, so the caller's are deliberately
         // dropped rather than sent twice.
         if (options.jigMode)
-            return ExecuteJigReadSession(transport, queries, reporter, options);
+            return jig::RunReadSession(transport, queries, reporter, options);
         if (options.useSessionLayer)
-            return ExecuteQuerySessionD4(transport, queries, reporter, options);
+            return d4::RunQuerySession(transport, queries, reporter, options);
 
         QuerySessionResult result;
 
@@ -480,7 +482,7 @@ namespace ewr {
         {
             EmitTrace(reporter, "exec.tx", "[OUT] Packet " + std::to_string(packetIndex + 1)
                 + " (" + std::to_string(pkt.size()) + " bytes):\n"
-                + HexDump(pkt.data(), pkt.size()));
+                + format::HexDump(pkt.data(), pkt.size()));
 
             if (!transport.Send(pkt))
             {
@@ -499,9 +501,9 @@ namespace ewr {
             ack = transport.Drain(drainTimeoutMs);
 
             EmitTrace(reporter, "exec.rx", "[IN]  ACK (" + std::to_string(ack.size()) + " bytes):\n"
-                + HexDumpCapped(ack.data(), ack.size(), kTraceDumpCapBytes));
+                + format::HexDumpCapped(ack.data(), ack.size(), format::kTraceDumpCapBytes));
 
-            if (IsChannelOpenAck(ack))
+            if (d4::IsChannelOpenAck(ack))
                 result.handshakeConfirmed = true;
 
             return true;
@@ -528,8 +530,8 @@ namespace ewr {
             return result;
         }
 
-        const std::vector<unsigned char> creditGrant = UniversalGenerator::CreditGrantPacket();
-        const std::vector<unsigned char> creditRequest = UniversalGenerator::CreditRequestPacket();
+        const std::vector<unsigned char> creditGrant = d4::CreditGrantPacket();
+        const std::vector<unsigned char> creditRequest = d4::CreditRequestPacket();
 
         bool allAnswered = true;
 
@@ -605,7 +607,7 @@ namespace ewr {
 
     } // namespace
 
-    ExecutionResult ExecuteSequence(ITransport& transport,
+    ExecutionResult exec::RunSequence(ITransport& transport,
                                     const std::vector<std::vector<unsigned char>>& sequence,
                                     std::ostream& out,
                                     std::ostream& log,
@@ -614,10 +616,10 @@ namespace ewr {
         log::Reporter reporter;
         AddOutSink(reporter, out);
         AddTraceSink(reporter, log);
-        return ExecuteSequence(transport, sequence, reporter, options);
+        return exec::RunSequence(transport, sequence, reporter, options);
     }
 
-    QuerySessionResult ExecuteQuerySession(ITransport& transport,
+    QuerySessionResult exec::RunQuerySession(ITransport& transport,
                                            const std::vector<std::vector<unsigned char>>& handshake,
                                            const std::vector<std::vector<unsigned char>>& queries,
                                            std::ostream& out,
@@ -627,12 +629,12 @@ namespace ewr {
         log::Reporter reporter;
         AddOutSink(reporter, out);
         AddTraceSink(reporter, log);
-        return ExecuteQuerySession(transport, handshake, queries, reporter, options);
+        return exec::RunQuerySession(transport, handshake, queries, reporter, options);
     }
 
     // ---- END4 direct-control fallback --------------------------------------
 
-    std::vector<std::vector<unsigned char>> ExtractFactoryWriteCommands(
+    std::vector<std::vector<unsigned char>> ctrl::ExtractWriteCommands(
         const std::vector<std::vector<unsigned char>>& sequence)
     {
         // WrapD4DataPacket prepends 02 02, big-endian length, 00 00 - so the
@@ -642,7 +644,7 @@ namespace ewr {
         std::vector<std::vector<unsigned char>> commands;
         for (const auto& packet : sequence)
         {
-            if (IsWritePacket(packet) && packet.size() > kD4DataHeaderSize)
+            if (ctrl::IsWrite(packet) && packet.size() > kD4DataHeaderSize)
                 commands.emplace_back(packet.begin() + kD4DataHeaderSize, packet.end());
         }
 
@@ -686,7 +688,7 @@ namespace ewr {
                     buffer.insert(buffer.end(), chunk.begin(), chunk.end());
 
                 if ((!requireEnd4Marker || HasEnd4Marker(buffer))
-                    && (IsEepromWriteOkAck(buffer) || IsEepromWriteNgAck(buffer) || IsEepromWriteNaAck(buffer)))
+                    && (ctrl::IsWriteOk(buffer) || ctrl::IsWriteNg(buffer) || ctrl::IsWriteNa(buffer)))
                     break;
 
                 const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -703,12 +705,12 @@ namespace ewr {
 
     } // namespace
 
-    End4Result ExecuteEscRemoteSequence(ITransport& transport,
+    exec::End4Result exec::RunEscRemoteSequence(ITransport& transport,
                                         const std::vector<std::vector<unsigned char>>& factoryWriteCommands,
                                         log::Reporter& reporter,
                                         const ExecutorOptions& options)
     {
-        End4Result result;
+        exec::End4Result result;
 
         EmitTrace(reporter, "escr.begin",
             "[ESC/P] Entering ESC/P Remote direct-control mode: no handshake, no session, no"
@@ -741,7 +743,7 @@ namespace ewr {
 
                 EmitTrace(reporter, "escr.tx", "[ESC/P OUT] write " + std::to_string(i + 1) + "/"
                     + std::to_string(factoryWriteCommands.size()) + " (" + std::to_string(packet.size())
-                    + " bytes):\n" + HexDumpCapped(packet.data(), packet.size(), kTraceDumpCapBytes));
+                    + " bytes):\n" + format::HexDumpCapped(packet.data(), packet.size(), format::kTraceDumpCapBytes));
 
                 if (!transport.Send(packet))
                 {
@@ -757,20 +759,20 @@ namespace ewr {
                     DrainForWriteAck(transport, options.writeAckTimeoutMs, totalDeadlineMs, false);
 
                 EmitTrace(reporter, "escr.rx", "[ESC/P IN] reply (" + std::to_string(reply.size())
-                    + " bytes):\n" + HexDumpCapped(reply.data(), reply.size(), kTraceDumpCapBytes));
+                    + " bytes):\n" + format::HexDumpCapped(reply.data(), reply.size(), format::kTraceDumpCapBytes));
 
                 if (!reply.empty())
                     result.anyBytes = true;
 
-                if (LooksLikeHttpReply(reply.data(), reply.size()))
+                if (d4::LooksLikeHttpReply(reply.data(), reply.size()))
                     result.httpReply = true;
 
                 // No envelope to look for here, so a decisive ':42:' token is
                 // the only thing that counts as this path having been answered.
-                if (IsEepromWriteOkAck(reply) || IsEepromWriteNgAck(reply) || IsEepromWriteNaAck(reply))
+                if (ctrl::IsWriteOk(reply) || ctrl::IsWriteNg(reply) || ctrl::IsWriteNa(reply))
                     result.anyReply = true;
 
-                if (IsEepromWriteOkAck(reply))
+                if (ctrl::IsWriteOk(reply))
                 {
                     result.writesVerified++;
                     confirmed = true;
@@ -780,11 +782,11 @@ namespace ewr {
                     break;
                 }
 
-                if (IsEepromWriteNgAck(reply))
+                if (ctrl::IsWriteNg(reply))
                 {
                     std::vector<unsigned char> alternate;
                     if (!triedAlternateKey
-                        && SubstituteTrailingWriteKey(command, options.writeKey, options.alternateWriteKey, alternate))
+                        && ctrl::SubstituteTrailingWriteKey(command, options.writeKey, options.alternateWriteKey, alternate))
                     {
                         triedAlternateKey = true;
                         command = std::move(alternate);
@@ -800,7 +802,7 @@ namespace ewr {
                     return result;
                 }
 
-                if (IsEepromWriteNaAck(reply))
+                if (ctrl::IsWriteNa(reply))
                 {
                     result.writesRejected++;
                     result.error = "ESC/P Remote: printer refused EEPROM write " + std::to_string(i + 1)
@@ -822,7 +824,7 @@ namespace ewr {
             {
                 if (result.httpReply)
                 {
-                    result.error = kHttpPersonalityError;
+                    result.error = d4::kHttpPersonalityError;
                 }
                 else if (!result.anyReply)
                 {
@@ -855,13 +857,13 @@ namespace ewr {
         return result;
     }
 
-    End4Result ExecuteEnd4Sequence(ITransport& transport,
+    exec::End4Result exec::RunEnd4Sequence(ITransport& transport,
                                    const std::string& deviceId,
                                    const std::vector<std::vector<unsigned char>>& factoryWriteCommands,
                                    log::Reporter& reporter,
                                    const ExecutorOptions& options)
     {
-        End4Result result;
+        exec::End4Result result;
 
         EmitTrace(reporter, "end4.begin",
             "[END4] D4 stayed silent; entering END4 direct-control mode (raw data line, no IEEE 1284.4 framing).");
@@ -925,15 +927,15 @@ namespace ewr {
         const std::vector<unsigned char> postFlush = transport.Drain(options.drainTimeoutMs);
         EmitTrace(reporter, "end4.post_flush", "[END4 IN] post-flush drain ("
             + std::to_string(postFlush.size()) + " bytes):\n"
-            + HexDumpCapped(postFlush.data(), postFlush.size(), kTraceDumpCapBytes));
+            + format::HexDumpCapped(postFlush.data(), postFlush.size(), format::kTraceDumpCapBytes));
 
         if (!postFlush.empty())
             result.anyBytes = true;
 
-        if (LooksLikeHttpReply(postFlush.data(), postFlush.size()))
+        if (d4::LooksLikeHttpReply(postFlush.data(), postFlush.size()))
         {
             result.httpReply = true;
-            EmitTrace(reporter, "end4.http_reply", "[END4] " + std::string(kHttpPersonalityError));
+            EmitTrace(reporter, "end4.http_reply", "[END4] " + std::string(d4::kHttpPersonalityError));
         }
 
         // 3) Each factory write, framed in END4 and confirmed with ':42:OK;'.
@@ -950,11 +952,11 @@ namespace ewr {
 
             for (int attempt = 1; attempt <= 2; ++attempt) // original + one alternate-key retry
             {
-                const std::vector<unsigned char> packet = end4::BuildEnd4Packet(command);
+                const std::vector<unsigned char> packet = end4::BuildPacket(command);
 
                 EmitTrace(reporter, "end4.tx", "[END4 OUT] write " + std::to_string(i + 1) + "/"
                     + std::to_string(factoryWriteCommands.size()) + " (" + std::to_string(packet.size())
-                    + " bytes):\n" + HexDump(packet.data(), packet.size()));
+                    + " bytes):\n" + format::HexDump(packet.data(), packet.size()));
 
                 if (!transport.Send(packet))
                 {
@@ -970,12 +972,12 @@ namespace ewr {
                     DrainForWriteAck(transport, options.writeAckTimeoutMs, totalDeadlineMs, true);
 
                 EmitTrace(reporter, "end4.rx", "[END4 IN] reply (" + std::to_string(reply.size())
-                    + " bytes):\n" + HexDumpCapped(reply.data(), reply.size(), kTraceDumpCapBytes));
+                    + " bytes):\n" + format::HexDumpCapped(reply.data(), reply.size(), format::kTraceDumpCapBytes));
 
                 if (!reply.empty())
                     result.anyBytes = true;
 
-                if (LooksLikeHttpReply(reply.data(), reply.size()))
+                if (d4::LooksLikeHttpReply(reply.data(), reply.size()))
                     result.httpReply = true;
 
                 // Verification below still runs on the whole buffer, which is
@@ -988,14 +990,14 @@ namespace ewr {
                         result.anyReply = true;
                         const std::vector<unsigned char> framed(markerIt, reply.end());
                         std::vector<unsigned char> payload;
-                        if (end4::ParseEnd4Response(framed, payload))
+                        if (end4::ParseResponse(framed, payload))
                             EmitTrace(reporter, "end4.payload", "[END4] control payload ("
                                 + std::to_string(payload.size()) + " bytes):\n"
-                                + HexDump(payload.data(), payload.size()));
+                                + format::HexDump(payload.data(), payload.size()));
                     }
                 }
 
-                if (IsEepromWriteOkAck(reply))
+                if (ctrl::IsWriteOk(reply))
                 {
                     result.writesVerified++;
                     confirmed = true;
@@ -1005,11 +1007,11 @@ namespace ewr {
                     break;
                 }
 
-                if (IsEepromWriteNgAck(reply))
+                if (ctrl::IsWriteNg(reply))
                 {
                     std::vector<unsigned char> alternate;
                     if (!triedAlternateKey
-                        && SubstituteTrailingWriteKey(command, options.writeKey, options.alternateWriteKey, alternate))
+                        && ctrl::SubstituteTrailingWriteKey(command, options.writeKey, options.alternateWriteKey, alternate))
                     {
                         triedAlternateKey = true;
                         command = std::move(alternate);
@@ -1025,7 +1027,7 @@ namespace ewr {
                     return result;
                 }
 
-                if (IsEepromWriteNaAck(reply))
+                if (ctrl::IsWriteNa(reply))
                 {
                     result.writesRejected++;
                     result.error = "END4: printer refused EEPROM write " + std::to_string(i + 1)
@@ -1049,7 +1051,7 @@ namespace ewr {
             {
                 if (result.httpReply)
                 {
-                    result.error = kHttpPersonalityError;
+                    result.error = d4::kHttpPersonalityError;
                 }
                 else if (!result.anyReply)
                 {
@@ -1084,7 +1086,7 @@ namespace ewr {
         return result;
     }
 
-    std::string DescribeTraceContext(const ExecutorOptions::TraceContext& context)
+    std::string exec::DescribeTraceContext(const ExecutorOptions::TraceContext& context)
     {
         // A run with no entry on purpose (--find-key) still says why.
         std::string selected = context.selectedEntry.empty() ? "(unknown)" : context.selectedEntry;

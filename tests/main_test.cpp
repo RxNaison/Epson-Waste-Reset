@@ -24,7 +24,9 @@
 #include <map>
 #include <thread>
 #include "ewr/parser.h"
-#include "ewr/generator.h"
+#include "ewr/ctrl.h"
+#include "ewr/format.h"
+#include "ewr/database.h"
 #include "ewr/executor.h"
 #include "ewr/status.h"
 #include "ewr/deviceid.h"
@@ -259,56 +261,56 @@ void test_ack_predicates()
 {
     std::cout << "[TEST] test_ack_predicates" << std::endl;
 
-    CHECK(ewr::IsEepromWriteOkAck(OkAck()));
-    CHECK(!ewr::IsEepromWriteOkAck({}));
-    CHECK(!ewr::IsEepromWriteOkAck(HandshakeAck()));
-    CHECK(!ewr::IsEepromWriteOkAck(NgAck()));
+    CHECK(ewr::ctrl::IsWriteOk(OkAck()));
+    CHECK(!ewr::ctrl::IsWriteOk({}));
+    CHECK(!ewr::ctrl::IsWriteOk(HandshakeAck()));
+    CHECK(!ewr::ctrl::IsWriteOk(NgAck()));
 
-    CHECK(ewr::IsEepromWriteNgAck(NgAck()));
-    CHECK(!ewr::IsEepromWriteNgAck(OkAck()));
-    CHECK(!ewr::IsEepromWriteNgAck({}));
+    CHECK(ewr::ctrl::IsWriteNg(NgAck()));
+    CHECK(!ewr::ctrl::IsWriteNg(OkAck()));
+    CHECK(!ewr::ctrl::IsWriteNg({}));
 
-    CHECK(ewr::IsEepromWriteNaAck(NaAck()));
-    CHECK(!ewr::IsEepromWriteNaAck(OkAck()));
-    CHECK(!ewr::IsEepromWriteNaAck(NgAck()));
-    CHECK(!ewr::IsEepromWriteNaAck({}));
-    CHECK(!ewr::IsEepromWriteOkAck(NaAck()));
-    CHECK(!ewr::IsEepromWriteNgAck(NaAck()));
+    CHECK(ewr::ctrl::IsWriteNa(NaAck()));
+    CHECK(!ewr::ctrl::IsWriteNa(OkAck()));
+    CHECK(!ewr::ctrl::IsWriteNa(NgAck()));
+    CHECK(!ewr::ctrl::IsWriteNa({}));
+    CHECK(!ewr::ctrl::IsWriteOk(NaAck()));
+    CHECK(!ewr::ctrl::IsWriteNg(NaAck()));
 
     std::vector<unsigned char> channelOpenAck = { 0x00, 0x00, 0x00, 0x0c, 0x01, 0x00, 0x81, 0x00, 0x02, 0x02, 0x00, 0x01 };
-    CHECK(ewr::IsChannelOpenAck(channelOpenAck));
-    CHECK(!ewr::IsChannelOpenAck({}));
-    CHECK(!ewr::IsChannelOpenAck(OkAck()));
+    CHECK(ewr::d4::IsChannelOpenAck(channelOpenAck));
+    CHECK(!ewr::d4::IsChannelOpenAck({}));
+    CHECK(!ewr::d4::IsChannelOpenAck(OkAck()));
 
     std::vector<unsigned char> strayByte = { 0x00, 0x81, 0x00, 0x0c, 0x01, 0x00, 0x7F, 0x00 };
-    CHECK(!ewr::IsChannelOpenAck(strayByte));
+    CHECK(!ewr::d4::IsChannelOpenAck(strayByte));
 }
 
 void test_write_packet_detection()
 {
     std::cout << "[TEST] test_write_packet_detection" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
     CHECK(seq.size() == 9);
 
     for (size_t i = 0; i < 5 && i < seq.size(); ++i)
-        CHECK(!ewr::IsWritePacket(seq[i]));
+        CHECK(!ewr::ctrl::IsWrite(seq[i]));
 
     if (seq.size() == 9)
     {
-        CHECK(ewr::IsWritePacket(seq[5]));
-        CHECK(ewr::IsWritePacket(seq[8]));
+        CHECK(ewr::ctrl::IsWrite(seq[5]));
+        CHECK(ewr::ctrl::IsWrite(seq[8]));
     }
 
     std::vector<unsigned char> adversarial = {
         0x02, 0x02, 0x00, 0x14, 0x00, 0x00, 0x7C, 0x7C,
         0x0A, 0x00, 0x01, 0x00, 0x41, 0xBE, 0xA0, 0x42, 0x42, 0x42, 0x42, 0x42
     };
-    CHECK(!ewr::IsWritePacket(adversarial));
+    CHECK(!ewr::ctrl::IsWrite(adversarial));
 
     std::vector<unsigned char> truncated = { 0x02, 0x02, 0x00, 0x08, 0x00, 0x00, 0x7C, 0x7C };
-    CHECK(!ewr::IsWritePacket(truncated));
+    CHECK(!ewr::ctrl::IsWrite(truncated));
 }
 
 void test_platen_only_detection()
@@ -363,12 +365,12 @@ void test_legacy_schema_loading()
         out << R"({"LegacyModel": {"rkey": 8, "wkey": "Arkanoid", "addresses": [24, 25], "reset": [0, 0]}})";
     }
 
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase(test_filename);
+    ewr::Database gen;
+    bool loaded = gen.Load(test_filename);
     fs::remove(test_filename);
 
     CHECK(loaded);
-    auto models = gen.GetAvailableModels();
+    auto models = gen.Models();
     CHECK(models.size() == 1);
 
     if (models.size() == 1)
@@ -379,12 +381,12 @@ void test_legacy_schema_loading()
         CHECK(m.HasResettableCounters());
         CHECK(!m.IsPlatenOnly());
 
-        auto seq = gen.GenerateSequence(m);
+        auto seq = ewr::ctrl::ResetSequence(m);
         CHECK(seq.size() == 9);
 
         size_t writes = 0;
         for (const auto& pkt : seq)
-            if (ewr::IsWritePacket(pkt))
+            if (ewr::ctrl::IsWrite(pkt))
                 writes++;
         CHECK(writes == 2);
     }
@@ -402,12 +404,12 @@ void test_superset_schema_loading()
             << R"( "pad_groups": [{"desc": "Main Pad Counter", "kind": "main", "addresses": [24, 25], "reset": [0, 0]}]}})";
     }
 
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase(test_filename);
+    ewr::Database gen;
+    bool loaded = gen.Load(test_filename);
     fs::remove(test_filename);
 
     CHECK(loaded);
-    auto models = gen.GetAvailableModels();
+    auto models = gen.Models();
     CHECK(models.size() == 1);
 
     if (models.size() == 1)
@@ -418,8 +420,8 @@ void test_superset_schema_loading()
         CHECK(m.pad_groups[0].kind == "main");
 
         size_t writes = 0;
-        for (const auto& pkt : gen.GenerateSequence(m))
-            if (ewr::IsWritePacket(pkt))
+        for (const auto& pkt : ewr::ctrl::ResetSequence(m))
+            if (ewr::ctrl::IsWrite(pkt))
                 writes++;
         CHECK(writes == 2);
     }
@@ -436,12 +438,12 @@ void test_envelope_schema_loading()
             << R"( "pad_groups": [{"desc": "Main Pad Counter", "kind": "main", "addresses": [24, 25], "reset": [0, 0]}]}}})";
     }
 
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase(test_filename);
+    ewr::Database gen;
+    bool loaded = gen.Load(test_filename);
     fs::remove(test_filename);
 
     CHECK(loaded);
-    auto models = gen.GetAvailableModels();
+    auto models = gen.Models();
     CHECK(models.size() == 1);
 
     if (models.size() == 1)
@@ -468,12 +470,12 @@ void test_alias_conflict_schema_loading()
             << R"( "pad_groups": [{"desc": "Main Pad Counter", "kind": "main", "addresses": [30], "reset": [0]}]}}})";
     }
 
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase(test_filename);
+    ewr::Database gen;
+    bool loaded = gen.Load(test_filename);
     fs::remove(test_filename);
 
     CHECK(loaded);
-    auto models = gen.GetAvailableModels();
+    auto models = gen.Models();
     CHECK(models.size() == 2);
 
     const ewr::DbPrinterModel* aliasModel = nullptr;
@@ -526,8 +528,8 @@ void test_future_schema_version_warning()
     const int sinkId = ewr::log::Default().AddSink(
         [&](const ewr::log::Event& e) { captured += e.message + "\n"; });
 
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase(test_filename);
+    ewr::Database gen;
+    bool loaded = gen.Load(test_filename);
 
     ewr::log::Default().RemoveSink(sinkId);
     fs::remove(test_filename);
@@ -736,8 +738,8 @@ void test_database_carries_no_recovery_channel()
 void test_generator_local_db()
 {
     std::cout << "[TEST] test_generator_local_db" << std::endl;
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase("database.json");
+    ewr::Database gen;
+    bool loaded = gen.Load("database.json");
     if (!loaded)
     {
         std::cout << "  [SKIP] no database file found in current working directory." << std::endl;
@@ -745,7 +747,7 @@ void test_generator_local_db()
     }
 
     CHECK(!gen.IsEmpty());
-    auto available = gen.GetAvailableModels();
+    auto available = gen.Models();
     CHECK(!available.empty());
     std::cout << "  Loaded " << available.size() << " models." << std::endl;
 }
@@ -753,13 +755,13 @@ void test_generator_local_db()
 void test_database_integrity()
 {
     std::cout << "[TEST] test_database_integrity" << std::endl;
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase("database.json");
+    ewr::Database gen;
+    bool loaded = gen.Load("database.json");
     CHECK(loaded);
     if (!loaded)
         return;
 
-    auto models = gen.GetAvailableModels();
+    auto models = gen.Models();
     CHECK(models.size() > 1400);
 
     size_t withCounters = 0;
@@ -813,13 +815,13 @@ void test_database_integrity()
 void test_packet_structure_integrity()
 {
     std::cout << "[TEST] test_packet_structure_integrity" << std::endl;
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase("database.json");
+    ewr::Database gen;
+    bool loaded = gen.Load("database.json");
     CHECK(loaded);
     if (!loaded)
         return;
 
-    auto models = gen.GetAvailableModels();
+    auto models = gen.Models();
     CHECK(!models.empty());
 
     size_t inspected = 0;
@@ -831,7 +833,7 @@ void test_packet_structure_integrity()
             continue;
 
         inspected++;
-        auto seq = gen.GenerateSequence(m);
+        auto seq = ewr::ctrl::ResetSequence(m);
 
         CHECK(seq.size() == 3 + (addrs.size() * 3));
         CHECK(seq[0].size() == 27);
@@ -846,17 +848,17 @@ void test_packet_structure_integrity()
             const size_t addrLen = m.WriteAddressLength();
 
             CHECK(writePkt.size() == 16 + addrLen + m.wkey.size());
-            CHECK(writePkt[0] == ewr::EpsonD4::SOCKET_EPSON_CTRL && writePkt[1] == ewr::EpsonD4::SOCKET_EPSON_CTRL);
+            CHECK(writePkt[0] == ewr::d4::SOCKET_EPSON_CTRL && writePkt[1] == ewr::d4::SOCKET_EPSON_CTRL);
             CHECK(((size_t)(writePkt[2] << 8) | writePkt[3]) == writePkt.size());
-            CHECK(writePkt[4] == ewr::EpsonD4::CREDIT);
-            CHECK(writePkt[6] == ewr::EpsonD4::PREFIX_PIPE && writePkt[7] == ewr::EpsonD4::PREFIX_PIPE);
+            CHECK(writePkt[4] == ewr::d4::CREDIT);
+            CHECK(writePkt[6] == ewr::ctrl::PREFIX_PIPE && writePkt[7] == ewr::ctrl::PREFIX_PIPE);
             CHECK(((size_t)writePkt[8] | ((size_t)writePkt[9] << 8)) == 6 + addrLen + m.wkey.size());
 
-            CHECK(writePkt[12] == ewr::EpsonD4::CMD_EEPROM_WRITE);
+            CHECK(writePkt[12] == ewr::ctrl::CMD_EEPROM_WRITE);
             CHECK(writePkt[13] == 0xBD);
             CHECK(writePkt[14] == 0x21);
 
-            CHECK(ewr::IsWritePacket(writePkt));
+            CHECK(ewr::ctrl::IsWrite(writePkt));
         }
     }
 
@@ -866,13 +868,13 @@ void test_packet_structure_integrity()
 void test_byte_parity()
 {
     std::cout << "[TEST] test_byte_parity" << std::endl;
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase("database.json");
+    ewr::Database gen;
+    bool loaded = gen.Load("database.json");
     CHECK(loaded);
     if (!loaded)
         return;
 
-    auto models = gen.GetAvailableModels();
+    auto models = gen.Models();
     CHECK(models.size() > 1400);
 
     size_t verifiedModels = 0;
@@ -884,7 +886,7 @@ void test_byte_parity()
 
     for (const auto& m : models)
     {
-        auto gotSeq = gen.GenerateSequence(m);
+        auto gotSeq = ewr::ctrl::ResetSequence(m);
 
         // Models with a 1-byte address field (wlen == 1, e.g. R220) are the one
         // deliberate break from the legacy generator, which always wrote a
@@ -899,7 +901,7 @@ void test_byte_parity()
 
             for (const auto& pkt : gotSeq)
             {
-                if (!ewr::IsWritePacket(pkt))
+                if (!ewr::ctrl::IsWrite(pkt))
                     continue;
 
                 if (pkt.size() != 17 + m.wkey.size())
@@ -941,17 +943,17 @@ void test_executor_success_path()
 {
     std::cout << "[TEST] test_executor_success_path" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>& pkt) {
-        return ewr::IsWritePacket(pkt) ? OkAck() : HandshakeAck();
+        return ewr::ctrl::IsWrite(pkt) ? OkAck() : HandshakeAck();
     };
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, FastOptions());
+    auto result = ewr::exec::RunSequence(t, seq, out, log, FastOptions());
 
     CHECK(result.success);
     CHECK(result.writesTotal == 2);
@@ -965,15 +967,15 @@ void test_executor_rejects_handshake_only_chatter()
 {
     std::cout << "[TEST] test_executor_rejects_handshake_only_chatter" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>&) { return HandshakeAck(); };
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, FastOptions());
+    auto result = ewr::exec::RunSequence(t, seq, out, log, FastOptions());
 
     CHECK(!result.success);
     CHECK(result.writesVerified == 0);
@@ -984,17 +986,17 @@ void test_executor_fails_on_ng_reply_without_retry()
 {
     std::cout << "[TEST] test_executor_fails_on_ng_reply_without_retry" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>& pkt) {
-        return ewr::IsWritePacket(pkt) ? NgAck() : HandshakeAck();
+        return ewr::ctrl::IsWrite(pkt) ? NgAck() : HandshakeAck();
     };
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, FastOptions());
+    auto result = ewr::exec::RunSequence(t, seq, out, log, FastOptions());
 
     CHECK(!result.success);
     CHECK(result.writesRejected == 1);
@@ -1006,13 +1008,13 @@ void test_executor_retries_missing_ack_with_credit_resend()
 {
     std::cout << "[TEST] test_executor_retries_missing_ack_with_credit_resend" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t;
     std::map<std::vector<unsigned char>, int> writeAttempts;
     t.replyFor = [&writeAttempts](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
-        if (!ewr::IsWritePacket(pkt))
+        if (!ewr::ctrl::IsWrite(pkt))
             return HandshakeAck();
         int attempt = ++writeAttempts[pkt];
         return attempt >= 2 ? OkAck() : std::vector<unsigned char>{};
@@ -1020,7 +1022,7 @@ void test_executor_retries_missing_ack_with_credit_resend()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, FastOptions());
+    auto result = ewr::exec::RunSequence(t, seq, out, log, FastOptions());
 
     CHECK(result.success);
     CHECK(result.writesTotal == 2);
@@ -1036,12 +1038,12 @@ void test_executor_event_stream_contract()
 {
     std::cout << "[TEST] test_executor_event_stream_contract" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>& pkt) {
-        return ewr::IsWritePacket(pkt) ? OkAck() : HandshakeAck();
+        return ewr::ctrl::IsWrite(pkt) ? OkAck() : HandshakeAck();
     };
 
     // The GUI contract: consume a full run as structured events - stable
@@ -1050,7 +1052,7 @@ void test_executor_event_stream_contract()
     ewr::log::Reporter reporter;
     reporter.AddSink([&events](const ewr::log::Event& e) { events.push_back(e); });
 
-    auto result = ewr::ExecuteSequence(t, seq, reporter, FastOptions());
+    auto result = ewr::exec::RunSequence(t, seq, reporter, FastOptions());
 
     CHECK(result.success);
     CHECK(result.writesTotal == 2);
@@ -1125,8 +1127,8 @@ void test_executor_fails_on_zero_write_sequence()
     emptyModel.rkey = 1;
     emptyModel.wkey = "AAAAAAAA";
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(emptyModel);
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(emptyModel);
     CHECK(seq.size() == 3);
 
     FakeTransport t;
@@ -1134,7 +1136,7 @@ void test_executor_fails_on_zero_write_sequence()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, FastOptions());
+    auto result = ewr::exec::RunSequence(t, seq, out, log, FastOptions());
 
     CHECK(!result.success);
     CHECK(result.writesTotal == 0);
@@ -1145,15 +1147,15 @@ void test_executor_fails_on_transport_error()
 {
     std::cout << "[TEST] test_executor_fails_on_transport_error" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t;
     t.failSend = true;
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, FastOptions());
+    auto result = ewr::exec::RunSequence(t, seq, out, log, FastOptions());
 
     CHECK(!result.success);
     CHECK(result.packetsSent == 0);
@@ -1164,8 +1166,8 @@ void test_executor_handshake_failfast_on_silence()
 {
     std::cout << "[TEST] test_executor_handshake_failfast_on_silence" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t; // total silence: the device never replies
 
@@ -1174,7 +1176,7 @@ void test_executor_handshake_failfast_on_silence()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, options);
+    auto result = ewr::exec::RunSequence(t, seq, out, log, options);
 
     CHECK(!result.success);
     CHECK(result.handshakeFailed);
@@ -1190,8 +1192,8 @@ void test_executor_handshake_failfast_on_chatter()
 {
     std::cout << "[TEST] test_executor_handshake_failfast_on_chatter" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     // The device talks (credit-grant chatter) but never actually opens the
     // channel - the classic wrong-interface signature. Must still fail fast.
@@ -1203,7 +1205,7 @@ void test_executor_handshake_failfast_on_chatter()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, options);
+    auto result = ewr::exec::RunSequence(t, seq, out, log, options);
 
     CHECK(!result.success);
     CHECK(result.handshakeFailed);
@@ -1216,12 +1218,12 @@ void test_executor_handshake_validation_success()
 {
     std::cout << "[TEST] test_executor_handshake_validation_success" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>& pkt) {
-        return ewr::IsWritePacket(pkt) ? OkAck() : OpenChannelAck();
+        return ewr::ctrl::IsWrite(pkt) ? OkAck() : OpenChannelAck();
     };
 
     auto options = FastOptions();
@@ -1229,7 +1231,7 @@ void test_executor_handshake_validation_success()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, options);
+    auto result = ewr::exec::RunSequence(t, seq, out, log, options);
 
     CHECK(result.success);
     CHECK(result.handshakeConfirmed);
@@ -1242,12 +1244,12 @@ void test_executor_drain_timeout_selection()
 {
     std::cout << "[TEST] test_executor_drain_timeout_selection" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>& pkt) {
-        return ewr::IsWritePacket(pkt) ? OkAck() : HandshakeAck();
+        return ewr::ctrl::IsWrite(pkt) ? OkAck() : HandshakeAck();
     };
 
     auto options = FastOptions();
@@ -1257,7 +1259,7 @@ void test_executor_drain_timeout_selection()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, options);
+    auto result = ewr::exec::RunSequence(t, seq, out, log, options);
 
     CHECK(result.success);
     CHECK(t.drainTimeouts.size() == 9);
@@ -1281,13 +1283,13 @@ void test_executor_retry_without_credit_resend()
 {
     std::cout << "[TEST] test_executor_retry_without_credit_resend" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t;
     std::map<std::vector<unsigned char>, int> writeAttempts;
     t.replyFor = [&writeAttempts](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
-        if (!ewr::IsWritePacket(pkt))
+        if (!ewr::ctrl::IsWrite(pkt))
             return HandshakeAck();
         int attempt = ++writeAttempts[pkt];
         return attempt >= 2 ? OkAck() : std::vector<unsigned char>{};
@@ -1298,7 +1300,7 @@ void test_executor_retry_without_credit_resend()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, options);
+    auto result = ewr::exec::RunSequence(t, seq, out, log, options);
 
     CHECK(result.success);
     CHECK(result.writesVerified == 2);
@@ -1316,8 +1318,8 @@ void test_executor_replay_relaxed_verification()
     emptyModel.rkey = 1;
     emptyModel.wkey = "AAAAAAAA";
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(emptyModel); // 3 handshake packets, 0 writes
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(emptyModel); // 3 handshake packets, 0 writes
 
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>&) { return HandshakeAck(); };
@@ -1327,7 +1329,7 @@ void test_executor_replay_relaxed_verification()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, options);
+    auto result = ewr::exec::RunSequence(t, seq, out, log, options);
 
     CHECK(result.success);
     CHECK(result.writesTotal == 0);
@@ -1343,8 +1345,8 @@ void test_executor_replay_silence_still_fails()
     emptyModel.rkey = 1;
     emptyModel.wkey = "AAAAAAAA";
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(emptyModel);
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(emptyModel);
 
     FakeTransport t; // device never says anything at all
 
@@ -1353,7 +1355,7 @@ void test_executor_replay_silence_still_fails()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, options);
+    auto result = ewr::exec::RunSequence(t, seq, out, log, options);
 
     // Even in relaxed replay mode, a dead-silent device is never a SUCCESS.
     CHECK(!result.success);
@@ -1364,12 +1366,12 @@ void test_executor_replay_ng_still_fatal()
 {
     std::cout << "[TEST] test_executor_replay_ng_still_fatal" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>& pkt) {
-        return ewr::IsWritePacket(pkt) ? NgAck() : HandshakeAck();
+        return ewr::ctrl::IsWrite(pkt) ? NgAck() : HandshakeAck();
     };
 
     auto options = FastOptions();
@@ -1377,7 +1379,7 @@ void test_executor_replay_ng_still_fatal()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, options);
+    auto result = ewr::exec::RunSequence(t, seq, out, log, options);
 
     // An explicit :42:NG; rejection aborts immediately even in replay mode.
     CHECK(!result.success);
@@ -1397,8 +1399,8 @@ void test_generator_respects_mem_high()
     const int sinkId = ewr::log::Default().AddSink(
         [&](const ewr::log::Event& e) { captured += e.message + "\n"; });
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(m);
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(m);
 
     ewr::log::Default().RemoveSink(sinkId);
 
@@ -1407,7 +1409,7 @@ void test_generator_respects_mem_high()
 
     size_t writes = 0;
     for (const auto& pkt : seq)
-        if (ewr::IsWritePacket(pkt))
+        if (ewr::ctrl::IsWrite(pkt))
             writes++;
     CHECK(writes == 1);
 
@@ -1436,15 +1438,15 @@ void test_database_load_skips_malformed_entries()
     const int sinkId = ewr::log::Default().AddSink(
         [&](const ewr::log::Event& e) { captured += e.message + "\n"; });
 
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase(path);
+    ewr::Database gen;
+    bool loaded = gen.Load(path);
 
     ewr::log::Default().RemoveSink(sinkId);
     fs::remove(path);
 
     // One rotten entry must not poison the other 1400+ models.
     CHECK(loaded);
-    CHECK(gen.GetAvailableModels().size() == 2);
+    CHECK(gen.Models().size() == 2);
     CHECK(captured.find("BadModel") != std::string::npos);
 }
 
@@ -1452,11 +1454,11 @@ void test_write_key_bytes_above_0x7f_are_sent_raw()
 {
     std::cout << "[TEST] test_write_key_bytes_above_0x7f_are_sent_raw" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    CHECK(gen.LoadDatabase("database.json"));
+    ewr::Database gen;
+    CHECK(gen.Load("database.json"));
 
     std::map<std::string, ewr::DbPrinterModel> byName;
-    for (auto& m : gen.GetAvailableModels())
+    for (auto& m : gen.Models())
         byName[m.name] = m;
 
     // The write #59's SC-P600 should have received: its trace had length
@@ -1468,7 +1470,7 @@ void test_write_key_bytes_above_0x7f_are_sent_raw()
         const std::vector<unsigned char> expected = {
             0x02, 0x02, 0x00, 0x1A, 0x00, 0x00, 0x7C, 0x7C, 0x10, 0x00, 0x02, 0x52, 0x42, 0xBD, 0x21,
             0x29, 0x01, 0x00, 0x97, 0x26, 0x86, 0x97, 0x36, 0x16, 0x16, 0xB6 };
-        CHECK(ewr::UniversalGenerator::GenerateWritePacket(p600->second.rkey, 0x0129, 0x00, p600->second.wkey,
+        CHECK(ewr::ctrl::WritePacket(p600->second.rkey, 0x0129, 0x00, p600->second.wkey,
                                                            p600->second.WriteAddressLength()) == expected);
     }
 
@@ -1488,7 +1490,7 @@ void test_write_key_bytes_above_0x7f_are_sent_raw()
             continue;
 
         const ewr::DbPrinterModel& m = it->second;
-        const auto pkt = ewr::UniversalGenerator::GenerateWritePacket(m.rkey, 0x30, 0x00, m.wkey,
+        const auto pkt = ewr::ctrl::WritePacket(m.rkey, 0x30, 0x00, m.wkey,
                                                                       m.WriteAddressLength());
         CHECK(((size_t)pkt[8] | ((size_t)pkt[9] << 8)) == 6 + m.WriteAddressLength() + 8u);
         CHECK(std::equal(c.key.begin(), c.key.end(), pkt.end() - c.key.size()));
@@ -1535,15 +1537,15 @@ void test_write_key_json_round_trip()
             skipped += e.message + "\n";
     });
 
-    ewr::UniversalGenerator gen;
-    const bool loaded = gen.LoadDatabase(path);
+    ewr::Database gen;
+    const bool loaded = gen.Load(path);
 
     ewr::log::Default().RemoveSink(sinkId);
     fs::remove(path);
 
     // A key with no byte spelling is skipped, never sent as something else.
     CHECK(loaded);
-    const auto models = gen.GetAvailableModels();
+    const auto models = gen.Models();
     CHECK(models.size() == 1);
     CHECK(models.size() == 1 && models[0].name == "HighKey" && models[0].wkey == p600);
     CHECK(skipped.find("'WideKey'") != std::string::npos);
@@ -1565,19 +1567,19 @@ void test_database_reload_replaces_previous_contents()
         out << R"({"ModelB": {"rkey": 8, "wkey": "Arkanoid", "addresses": [25], "reset": [0]}})";
     }
 
-    ewr::UniversalGenerator gen;
-    CHECK(gen.LoadDatabase(pathA));
-    auto models = gen.GetAvailableModels();
+    ewr::Database gen;
+    CHECK(gen.Load(pathA));
+    auto models = gen.Models();
     CHECK(models.size() == 1 && models[0].name == "ModelA");
 
     // A reload (e.g. after an OTA sync) fully replaces the old contents.
-    CHECK(gen.LoadDatabase(pathB));
-    models = gen.GetAvailableModels();
+    CHECK(gen.Load(pathB));
+    models = gen.Models();
     CHECK(models.size() == 1 && models[0].name == "ModelB");
 
     // A failed reload leaves the previous database untouched.
-    CHECK(!gen.LoadDatabase("no_such_db_file.json"));
-    models = gen.GetAvailableModels();
+    CHECK(!gen.Load("no_such_db_file.json"));
+    models = gen.Models();
     CHECK(models.size() == 1 && models[0].name == "ModelB");
 
     fs::remove(pathA);
@@ -1588,19 +1590,19 @@ void test_executor_na_refusal_fails_without_retry()
 {
     std::cout << "[TEST] test_executor_na_refusal_fails_without_retry" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     // The printer answers the handshake normally but refuses every EEPROM
     // write with ':42:NA;' (locked by another error, e.g. empty cartridge).
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>& pkt) {
-        return ewr::IsWritePacket(pkt) ? NaAck() : HandshakeAck();
+        return ewr::ctrl::IsWrite(pkt) ? NaAck() : HandshakeAck();
     };
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, FastOptions());
+    auto result = ewr::exec::RunSequence(t, seq, out, log, FastOptions());
 
     CHECK(!result.success);
     CHECK(result.writesRejected == 1);
@@ -1615,12 +1617,12 @@ void test_executor_na_refusal_fatal_in_replay_mode()
 {
     std::cout << "[TEST] test_executor_na_refusal_fatal_in_replay_mode" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>& pkt) {
-        return ewr::IsWritePacket(pkt) ? NaAck() : HandshakeAck();
+        return ewr::ctrl::IsWrite(pkt) ? NaAck() : HandshakeAck();
     };
 
     auto options = FastOptions();
@@ -1628,7 +1630,7 @@ void test_executor_na_refusal_fatal_in_replay_mode()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, seq, out, log, options);
+    auto result = ewr::exec::RunSequence(t, seq, out, log, options);
 
     // Even in relaxed replay mode an explicit refusal is never a SUCCESS.
     CHECK(!result.success);
@@ -1660,14 +1662,14 @@ static std::vector<unsigned char> WrapD4DataOnSocket(const std::vector<unsigned 
 
 static std::vector<unsigned char> WrapD4Data(const std::vector<unsigned char>& payload)
 {
-    return WrapD4DataOnSocket(payload, ewr::EpsonD4::SOCKET_EPSON_CTRL);
+    return WrapD4DataOnSocket(payload, ewr::d4::SOCKET_EPSON_CTRL);
 }
 
 // '@BDC ST2', a 2-byte little-endian body length, then the field block.
 // `declaredLength` overrides that length so a report can announce more than it
 // delivers, the way a reply cut short by the transport does.
 static std::vector<unsigned char> WrapSt2Body(const std::vector<unsigned char>& body,
-                                              unsigned char socket = ewr::EpsonD4::SOCKET_EPSON_CTRL,
+                                              unsigned char socket = ewr::d4::SOCKET_EPSON_CTRL,
                                               int declaredLength = -1)
 {
     const size_t declared = (declaredLength >= 0) ? static_cast<size_t>(declaredLength) : body.size();
@@ -1728,7 +1730,7 @@ void test_status_reply_parsing()
 {
     std::cout << "[TEST] test_status_reply_parsing" << std::endl;
 
-    const auto st = ewr::ParseStatusReply(MakeSt2Reply());
+    const auto st = ewr::ctrl::ParseStatusReply(MakeSt2Reply());
 
     CHECK(st.valid);
     CHECK(st.stateCode == 0x00);
@@ -1756,8 +1758,8 @@ void test_status_reply_parsing()
     CHECK(!st.truncated);
 
     // Streams that never contain '@BDC ST2' parse to valid == false.
-    CHECK(!ewr::ParseStatusReply(HandshakeAck()).valid);
-    CHECK(!ewr::ParseStatusReply({}).valid);
+    CHECK(!ewr::ctrl::ParseStatusReply(HandshakeAck()).valid);
+    CHECK(!ewr::ctrl::ParseStatusReply({}).valid);
 }
 
 // An '@BDC ST2' prefix and a length field are not a status report on their own.
@@ -1768,7 +1770,7 @@ void test_status_reply_without_fields_is_invalid()
     std::cout << "[TEST] test_status_reply_without_fields_is_invalid" << std::endl;
 
     // Declared length 0: the prefix arrived, the body did not.
-    const auto empty = ewr::ParseStatusReply(WrapSt2Body({}));
+    const auto empty = ewr::ctrl::ParseStatusReply(WrapSt2Body({}));
     CHECK(!empty.valid);
     CHECK(!empty.hasError);
     CHECK(empty.stateCode == -1);
@@ -1776,11 +1778,11 @@ void test_status_reply_without_fields_is_invalid()
 
     // A body of headers this build does not decode is no evidence either.
     const std::vector<unsigned char> unknownOnly = { 0x71, 0x01, 0x00, 0x72, 0x01, 0x00 };
-    CHECK(!ewr::ParseStatusReply(WrapSt2Body(unknownOnly)).valid);
+    CHECK(!ewr::ctrl::ParseStatusReply(WrapSt2Body(unknownOnly)).valid);
 
     // A recognized header with an empty body decodes nothing.
     const std::vector<unsigned char> emptyField = { 0x01, 0x00 };
-    CHECK(!ewr::ParseStatusReply(WrapSt2Body(emptyField)).valid);
+    CHECK(!ewr::ctrl::ParseStatusReply(WrapSt2Body(emptyField)).valid);
 }
 
 // A report that stops mid-field parses what arrived, but the error entry may be
@@ -1793,7 +1795,7 @@ void test_status_reply_truncation_is_recorded()
     std::vector<unsigned char> body = { 0x01, 0x01, 0x04, 0x40, 0x20, 'X', '7' };
 
     // The length field counts the bytes the report claims, not the ones sent.
-    const auto st = ewr::ParseStatusReply(WrapSt2Body(body, ewr::EpsonD4::SOCKET_EPSON_CTRL, 0x25));
+    const auto st = ewr::ctrl::ParseStatusReply(WrapSt2Body(body, ewr::d4::SOCKET_EPSON_CTRL, 0x25));
 
     CHECK(st.valid);        // the state field did arrive
     CHECK(st.truncated);    // the serial field did not
@@ -1802,7 +1804,7 @@ void test_status_reply_truncation_is_recorded()
     CHECK(!st.hasError);
 
     // A complete report is not flagged.
-    CHECK(!ewr::ParseStatusReply(WrapSt2Body({ 0x01, 0x01, 0x04 })).truncated);
+    CHECK(!ewr::ctrl::ParseStatusReply(WrapSt2Body({ 0x01, 0x01, 0x04 })).truncated);
 }
 
 void test_d4_payload_extraction()
@@ -1813,17 +1815,17 @@ void test_d4_payload_extraction()
     const auto pkt = WrapD4Data(inner);
 
     // Clean stream.
-    CHECK(ewr::ExtractD4Payload(pkt) == inner);
+    CHECK(ewr::d4::ExtractPayload(pkt) == inner);
 
     // Stray NAK byte before the packet (the ET-2803 mi_00 chatter): resync.
     std::vector<unsigned char> noisy = { 0x15 };
     noisy.insert(noisy.end(), pkt.begin(), pkt.end());
-    CHECK(ewr::ExtractD4Payload(noisy) == inner);
+    CHECK(ewr::d4::ExtractPayload(noisy) == inner);
 
     // A transaction-channel packet is skipped; the data packet after it is kept.
     std::vector<unsigned char> mixed = HandshakeAck();
     mixed.insert(mixed.end(), pkt.begin(), pkt.end());
-    CHECK(ewr::ExtractD4Payload(mixed) == inner);
+    CHECK(ewr::d4::ExtractPayload(mixed) == inner);
 }
 
 // GetSocketID answers with the socket the firmware chose, and the session
@@ -1839,28 +1841,28 @@ void test_d4_payload_extraction_on_negotiated_socket()
     for (unsigned char socket : { 0x01, 0x02, 0x04, 0x7F, 0xFE })
     {
         const auto pkt = WrapD4DataOnSocket(inner, socket);
-        CHECK(ewr::ExtractD4Payload(pkt) == inner);
+        CHECK(ewr::d4::ExtractPayload(pkt) == inner);
 
         // Transaction traffic ahead of it is still skipped, not merged in.
         std::vector<unsigned char> mixed = HandshakeAck();
         mixed.insert(mixed.end(), pkt.begin(), pkt.end());
-        CHECK(ewr::ExtractD4Payload(mixed) == inner);
+        CHECK(ewr::d4::ExtractPayload(mixed) == inner);
     }
 
     // Mismatched psid/ssid is not a data packet: resync rather than accept it.
     std::vector<unsigned char> mismatched = WrapD4DataOnSocket(inner, 0x04);
     mismatched[1] = 0x05;
-    CHECK(ewr::ExtractD4Payload(mismatched) != inner);
+    CHECK(ewr::d4::ExtractPayload(mismatched) != inner);
 
     // The whole status and read-back path has to survive the other socket, not
     // just the extractor.
-    const auto st = ewr::ParseStatusReply(WrapSt2Body({ 0x01, 0x01, 0x02 }, 0x04));
+    const auto st = ewr::ctrl::ParseStatusReply(WrapSt2Body({ 0x01, 0x01, 0x02 }, 0x04));
     CHECK(st.valid);
     CHECK(st.stateCode == 0x02);
 
     const std::string ps = "@BDC PS\r\nrw:41:5A;";
     uint8_t value = 0;
-    CHECK(ewr::ParseEepromReadReply(
+    CHECK(ewr::ctrl::ParseReadReply(
         WrapD4DataOnSocket(std::vector<unsigned char>(ps.begin(), ps.end()), 0x04), value));
     CHECK(value == 0x5A);
 }
@@ -1870,44 +1872,44 @@ void test_eeprom_read_reply_parsing()
     std::cout << "[TEST] test_eeprom_read_reply_parsing" << std::endl;
 
     uint8_t value = 0;
-    CHECK(ewr::ParseEepromReadReply(MakeEepromReadReply(0x5A), value));
+    CHECK(ewr::ctrl::ParseReadReply(MakeEepromReadReply(0x5A), value));
     CHECK(value == 0x5A);
 
     value = 0xFF;
-    CHECK(ewr::ParseEepromReadReply(MakeEepromReadReply(0x00), value));
+    CHECK(ewr::ctrl::ParseReadReply(MakeEepromReadReply(0x00), value));
     CHECK(value == 0x00);
 
     // A write ack (':42:OK;') is not a read reply.
-    CHECK(!ewr::ParseEepromReadReply(OkAck(), value));
-    CHECK(!ewr::ParseEepromReadReply({}, value));
+    CHECK(!ewr::ctrl::ParseReadReply(OkAck(), value));
+    CHECK(!ewr::ctrl::ParseReadReply({}, value));
 
     // '@BDC PS' prefix without a ':41:' echo is rejected too.
     const std::string s = "@BDC PS\r\nrw:42:OK;";
-    CHECK(!ewr::ParseEepromReadReply(WrapD4Data(std::vector<unsigned char>(s.begin(), s.end())), value));
+    CHECK(!ewr::ctrl::ParseReadReply(WrapD4Data(std::vector<unsigned char>(s.begin(), s.end())), value));
 
     // R220-style 'EE:AAVV;' form: address echo plus value (seen on real
     // Stylus Photo R220 hardware, trace 2026-08-03).
     value = 0;
-    CHECK(ewr::ParseEepromReadReply(MakeEepromReadReplyEE(0x0C, 0x1C), value));
+    CHECK(ewr::ctrl::ParseReadReply(MakeEepromReadReplyEE(0x0C, 0x1C), value));
     CHECK(value == 0x1C);
 
     // Address echo is validated when the caller provides the expected address.
     value = 0;
-    CHECK(ewr::ParseEepromReadReply(MakeEepromReadReplyEE(0x3E, 0x0C), value, 0x3E));
+    CHECK(ewr::ctrl::ParseReadReply(MakeEepromReadReplyEE(0x3E, 0x0C), value, 0x3E));
     CHECK(value == 0x0C);
 
     // A mismatching address echo is rejected.
-    CHECK(!ewr::ParseEepromReadReply(MakeEepromReadReplyEE(0x0D, 0x39), value, 0x2B));
+    CHECK(!ewr::ctrl::ParseReadReply(MakeEepromReadReplyEE(0x0D, 0x39), value, 0x2B));
 
     // Expected addresses above one byte skip the echo comparison (form B
     // only echoes a single byte).
     value = 0;
-    CHECK(ewr::ParseEepromReadReply(MakeEepromReadReplyEE(0xFC, 0x07), value, 0x2FC));
+    CHECK(ewr::ctrl::ParseReadReply(MakeEepromReadReplyEE(0xFC, 0x07), value, 0x2FC));
     CHECK(value == 0x07);
 
     // Truncated 'EE:' bodies are rejected.
     const std::string t = "@BDC PS\r\nEE:0C";
-    CHECK(!ewr::ParseEepromReadReply(WrapD4Data(std::vector<unsigned char>(t.begin(), t.end())), value));
+    CHECK(!ewr::ctrl::ParseReadReply(WrapD4Data(std::vector<unsigned char>(t.begin(), t.end())), value));
 }
 
 // ---------------------------------------------------------------------------
@@ -2242,10 +2244,10 @@ void test_query_session_failfast_on_silence()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteQuerySession(
+    auto result = ewr::exec::RunQuerySession(
         t,
-        ewr::UniversalGenerator::GenerateHandshake(),
-        { ewr::UniversalGenerator::GenerateStatusQueryPacket() },
+        ewr::d4::Handshake(),
+        { ewr::ctrl::StatusQueryPacket() },
         out, log, FastOptions());
 
     CHECK(!result.success);
@@ -2275,13 +2277,13 @@ void test_query_session_happy_path()
     const ewr::DbPrinterModel model = MakeTestModel();
 
     std::vector<std::vector<unsigned char>> queries;
-    queries.push_back(ewr::UniversalGenerator::GenerateStatusQueryPacket());
-    queries.push_back(ewr::UniversalGenerator::GenerateReadPacket(model.rkey, 0x0018));
+    queries.push_back(ewr::ctrl::StatusQueryPacket());
+    queries.push_back(ewr::ctrl::ReadPacket(model.rkey, 0x0018));
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteQuerySession(
-        t, ewr::UniversalGenerator::GenerateHandshake(), queries, out, log, FastOptions());
+    auto result = ewr::exec::RunQuerySession(
+        t, ewr::d4::Handshake(), queries, out, log, FastOptions());
 
     CHECK(result.success);
     CHECK(result.handshakeConfirmed);
@@ -2292,12 +2294,12 @@ void test_query_session_happy_path()
 
     if (result.replies.size() == 2)
     {
-        const auto st = ewr::ParseStatusReply(result.replies[0]);
+        const auto st = ewr::ctrl::ParseStatusReply(result.replies[0]);
         CHECK(st.valid);
         CHECK(st.hasError && st.errorCode == 0x05);
 
         uint8_t value = 0xFF;
-        CHECK(ewr::ParseEepromReadReply(result.replies[1], value));
+        CHECK(ewr::ctrl::ParseReadReply(result.replies[1], value));
         CHECK(value == 0x00);
     }
 }
@@ -2393,8 +2395,8 @@ void test_d4_framer_length_framing()
         t.chunks.push_back(std::vector<unsigned char>(pkt.begin(), pkt.begin() + 5));
         t.chunks.push_back(std::vector<unsigned char>(pkt.begin() + 5, pkt.end()));
 
-        ewr::D4Framer framer(t);
-        ewr::D4Packet out;
+        ewr::d4::Framer framer(t);
+        ewr::d4::Packet out;
         CHECK(framer.ReadPacket(out, 100, log));
         CHECK(out.psid == 0x02);
         CHECK(out.control == 0x01);
@@ -2410,8 +2412,8 @@ void test_d4_framer_length_framing()
         burst.insert(burst.end(), second.begin(), second.end());
         t.chunks.push_back(burst);
 
-        ewr::D4Framer framer(t);
-        ewr::D4Packet first, next;
+        ewr::d4::Framer framer(t);
+        ewr::d4::Packet first, next;
         CHECK(framer.ReadPacket(first, 100, log));
         CHECK(first.IsTransaction());
         CHECK(framer.HasBufferedData());
@@ -2425,8 +2427,8 @@ void test_d4_framer_length_framing()
         ChunkedTransport t;
         t.chunks.push_back({ 0x02, 0x02, 0x00, 0x03, 0x00, 0x00 });
 
-        ewr::D4Framer framer(t);
-        ewr::D4Packet out;
+        ewr::d4::Framer framer(t);
+        ewr::d4::Packet out;
         CHECK(!framer.ReadPacket(out, 50, log));
         CHECK(!framer.HasBufferedData());
     }
@@ -2450,8 +2452,8 @@ void test_d4_framer_resyncs_on_bogus_length()
         ChunkedTransport t;
         t.chunks.push_back({ 0x02, 0x02, 0xFF, 0xFF, 0x00, 0x00, 0xDE, 0xAD });
 
-        ewr::D4Framer framer(t);
-        ewr::D4Packet out;
+        ewr::d4::Framer framer(t);
+        ewr::d4::Packet out;
         CHECK(!framer.ReadPacket(out, 20, log));
         CHECK(!framer.HasBufferedData());
 
@@ -2470,8 +2472,8 @@ void test_d4_framer_resyncs_on_bogus_length()
         noisy.insert(noisy.end(), pkt.begin(), pkt.end());
         t.chunks.push_back(noisy);
 
-        ewr::D4Framer framer(t);
-        ewr::D4Packet out;
+        ewr::d4::Framer framer(t);
+        ewr::d4::Packet out;
         CHECK(framer.ReadPacket(out, 50, log));
         CHECK(out.psid == 0x02);
         CHECK(out.payload.size() == 4);
@@ -2484,8 +2486,8 @@ void test_d4_framer_resyncs_on_bogus_length()
         ChunkedTransport t;
         t.chunks.push_back({ 0x02, 0x05, 0x00, 0x40, 0x00, 0x00 });
 
-        ewr::D4Framer framer(t);
-        ewr::D4Packet out;
+        ewr::d4::Framer framer(t);
+        ewr::d4::Packet out;
         CHECK(!framer.ReadPacket(out, 20, log));
         CHECK(!framer.HasBufferedData());
     }
@@ -2498,8 +2500,8 @@ void test_d4_framer_resyncs_on_bogus_length()
         t.chunks.push_back(std::vector<unsigned char>(pkt.begin(), pkt.begin() + 2));
         t.chunks.push_back(std::vector<unsigned char>(pkt.begin() + 2, pkt.end()));
 
-        ewr::D4Framer framer(t);
-        ewr::D4Packet out;
+        ewr::d4::Framer framer(t);
+        ewr::d4::Packet out;
         CHECK(framer.ReadPacket(out, 100, log));
         CHECK(out.payload.size() == 2);
     }
@@ -2513,11 +2515,11 @@ void test_d4_session_start_negotiates_socket_and_mtu()
     t.replyFor = D4SessionReplier(0x04, nullptr);
 
     std::ofstream log = NullLog();
-    ewr::D4SessionOptions options;
+    ewr::d4::SessionOptions options;
     options.replyTimeoutMs = 200;
     options.dataTimeoutMs = 200;
 
-    ewr::D4Session session(t, log, options);
+    ewr::d4::Session session(t, log, options);
     CHECK(session.Start());
     CHECK(session.ChannelOpen());
     CHECK(session.Socket() == 0x04);         // GetSocketID honored, not hardcoded 2
@@ -2541,14 +2543,14 @@ void test_d4_session_socketid_fallback()
     t.replyFor = D4SessionReplier(0x02, nullptr, /*answerGetSocketId*/ false);
 
     std::ofstream log = NullLog();
-    ewr::D4SessionOptions options;
+    ewr::d4::SessionOptions options;
     options.replyTimeoutMs = 30; // GetSocketID times out fast in tests
     options.dataTimeoutMs = 30;
 
-    ewr::D4Session session(t, log, options);
+    ewr::d4::Session session(t, log, options);
     CHECK(session.Start());
     CHECK(session.ChannelOpen());
-    CHECK(session.Socket() == ewr::EpsonD4::SOCKET_EPSON_CTRL);
+    CHECK(session.Socket() == ewr::d4::SOCKET_EPSON_CTRL);
 }
 
 void test_d4_session_credit_gating_and_chunking()
@@ -2562,11 +2564,11 @@ void test_d4_session_credit_gating_and_chunking()
     }, true, 0x00, 0x0D);
 
     std::ofstream log = NullLog();
-    ewr::D4SessionOptions options;
+    ewr::d4::SessionOptions options;
     options.replyTimeoutMs = 200;
     options.dataTimeoutMs = 200;
 
-    ewr::D4Session session(t, log, options);
+    ewr::d4::Session session(t, log, options);
     CHECK(session.Start());
     CHECK(session.MtuToPrinter() == 0x000D);
 
@@ -2610,20 +2612,20 @@ void test_d4_query_session_layer()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteQuerySession(
+    auto result = ewr::exec::RunQuerySession(
         t,
-        ewr::UniversalGenerator::GenerateHandshake(),
-        { ewr::UniversalGenerator::GenerateStatusQueryPacket(),
-          ewr::UniversalGenerator::GenerateReadPacket(0x0008, 0x18) },
+        ewr::d4::Handshake(),
+        { ewr::ctrl::StatusQueryPacket(),
+          ewr::ctrl::ReadPacket(0x0008, 0x18) },
         out, log, options);
 
     CHECK(result.success);
     CHECK(result.handshakeConfirmed);
     CHECK(result.replies.size() == 2);
-    CHECK(ewr::ExtractD4Payload(result.replies[0]) == ewr::ExtractD4Payload(st2));
+    CHECK(ewr::d4::ExtractPayload(result.replies[0]) == ewr::d4::ExtractPayload(st2));
 
     uint8_t value = 0;
-    CHECK(ewr::ParseEepromReadReply(result.replies[1], value, 0x18));
+    CHECK(ewr::ctrl::ParseReadReply(result.replies[1], value, 0x18));
     CHECK(value == 0x2A);
 }
 
@@ -2639,7 +2641,7 @@ void test_d4_sequence_write_verified()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, options);
+    auto result = ewr::exec::RunSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, options);
 
     CHECK(result.success);
     CHECK(result.handshakeConfirmed);
@@ -2771,7 +2773,7 @@ static std::vector<std::vector<unsigned char>> LostReplyQueries()
 {
     std::vector<std::vector<unsigned char>> queries;
     for (uint8_t addr = 0x10; addr <= 0x15; ++addr)
-        queries.push_back(ewr::UniversalGenerator::GenerateReadPacket(0x0008, addr, 1));
+        queries.push_back(ewr::ctrl::ReadPacket(0x0008, addr, 1));
     return queries;
 }
 
@@ -2798,7 +2800,7 @@ static int CountAnsweredReads(const ewr::QuerySessionResult& result)
     {
         uint8_t value = 0;
         const int addr = 0x10 + static_cast<int>(i);
-        if (ewr::ParseEepromReadReply(result.replies[i], value, addr) && value == 0x40 + addr)
+        if (ewr::ctrl::ParseReadReply(result.replies[i], value, addr) && value == 0x40 + addr)
             ++answered;
     }
     return answered;
@@ -2820,7 +2822,7 @@ void test_d4_query_session_survives_a_lost_reply()
 
     ewr::log::Reporter reporter;
     const ewr::QuerySessionResult result =
-        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, LostReplyOptions());
+        ewr::d4::RunQuerySession(t, LostReplyQueries(), reporter, LostReplyOptions());
 
     CHECK(result.success);
     CHECK(result.replies.size() == 6);
@@ -2844,7 +2846,7 @@ void test_d4_query_session_survives_a_lost_credit_reply()
 
     ewr::log::Reporter reporter;
     const ewr::QuerySessionResult result =
-        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, LostReplyOptions());
+        ewr::d4::RunQuerySession(t, LostReplyQueries(), reporter, LostReplyOptions());
 
     CHECK(result.success);
     CHECK(CountAnsweredReads(result) == 6);
@@ -2867,7 +2869,7 @@ void test_d4_query_session_stops_when_a_fresh_session_stays_silent()
 
     ewr::log::Reporter reporter;
     const ewr::QuerySessionResult result =
-        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, LostReplyOptions());
+        ewr::d4::RunQuerySession(t, LostReplyQueries(), reporter, LostReplyOptions());
 
     CHECK(!result.success);
     CHECK(!result.error.empty());
@@ -2903,7 +2905,7 @@ void test_d4_session_discards_replies_held_from_an_earlier_session()
 
     ewr::log::Reporter reporter;
     const ewr::QuerySessionResult result =
-        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, LostReplyOptions());
+        ewr::d4::RunQuerySession(t, LostReplyQueries(), reporter, LostReplyOptions());
 
     CHECK(result.success);
     CHECK(CountAnsweredReads(result) == 6);
@@ -2927,7 +2929,7 @@ void test_d4_session_restart_waits_for_a_busy_control_service()
 
     ewr::log::Reporter reporter;
     const ewr::QuerySessionResult result =
-        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, LostReplyOptions());
+        ewr::d4::RunQuerySession(t, LostReplyQueries(), reporter, LostReplyOptions());
 
     CHECK(result.success);
     CHECK(CountAnsweredReads(result) == 6);
@@ -2953,7 +2955,7 @@ void test_d4_session_restart_gives_up_after_its_attempts()
 
     ewr::log::Reporter reporter;
     const ewr::QuerySessionResult result =
-        ewr::ExecuteQuerySessionD4(t, LostReplyQueries(), reporter, options);
+        ewr::d4::RunQuerySession(t, LostReplyQueries(), reporter, options);
 
     CHECK(!result.success);
     CHECK(result.error.find("would not open a fresh D4 session") != std::string::npos);
@@ -2978,7 +2980,7 @@ void test_d4_sequence_survives_a_lost_write_ack()
     std::ofstream log = NullLog();
     std::ostringstream out;
     const ewr::ExecutionResult result =
-        ewr::ExecuteSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, LostReplyOptions());
+        ewr::exec::RunSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, LostReplyOptions());
 
     CHECK(result.success);
     CHECK(result.writesTotal == 2);
@@ -2998,7 +3000,7 @@ void test_d4_sequence_na_fails_fast()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, options);
+    auto result = ewr::exec::RunSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, options);
 
     CHECK(!result.success);
     CHECK(result.handshakeConfirmed);
@@ -3032,7 +3034,7 @@ void test_d4_transport_failure_closes_channel()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    const auto result = ewr::ExecuteSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, options);
+    const auto result = ewr::exec::RunSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, options);
 
     CHECK(!result.success);
     CHECK(result.error.find("Transport failure") != std::string::npos);
@@ -3071,7 +3073,7 @@ void test_jig_packets_match_the_wic_capture()
 
     CHECK(ewr::jig::kLeavePacketMode == bytes({ 0x00, 0x00, 0x00, 0x1b, 0x01, '@', 'E', 'J', 'L', ' ', '1', '2', '8', '4',
                                                 '.', '4', '\n', '@', 'E', 'J', 'L', ' ', ' ', ' ', ' ', ' ', '\n' }));
-    CHECK(ewr::jig::BuildEnterJigMode() == bytes({ 0x1b, 0x28, 0x52, 0x08, 0x00, 0x00, 'J', 'I', 'G', 'M', 'O', 'D', 'E' }));
+    CHECK(ewr::jig::BuildEnter() == bytes({ 0x1b, 0x28, 0x52, 0x08, 0x00, 0x00, 'J', 'I', 'G', 'M', 'O', 'D', 'E' }));
     CHECK(ewr::jig::BuildReadPacket(0x214) == bytes({ 'J', 'G', 'P', 'G', 0x05, 0x00, 0x02, 0x14, 0x00, 0x01, 0x00 }));
     CHECK(ewr::jig::BuildReadPacket(0x138) == bytes({ 'J', 'G', 'P', 'G', 0x05, 0x00, 0x01, 0x38, 0x00, 0x01, 0x00 }));
     CHECK(ewr::jig::BuildExit() == bytes({ 'J', 'G', 0x1b, 0x00, 0x00, 0x00 }));
@@ -3128,7 +3130,7 @@ void test_jig_read_session_replays_the_capture()
     options.useSessionLayer = true; // jigMode wins
     std::ofstream log = NullLog();
     std::ostringstream out;
-    const ewr::QuerySessionResult result = ewr::ExecuteQuerySession(t, {}, queries, out, log, options);
+    const ewr::QuerySessionResult result = ewr::exec::RunQuerySession(t, {}, queries, out, log, options);
 
     CHECK(result.success);
     CHECK(result.handshakeConfirmed);
@@ -3147,10 +3149,10 @@ void test_jig_read_session_replays_the_capture()
     CHECK(t.sent.size() == 9);
     if (t.sent.size() == 9)
     {
-        CHECK(t.sent[0] == ewr::UniversalGenerator::GenerateHandshake()[0]);
+        CHECK(t.sent[0] == ewr::d4::Handshake()[0]);
         CHECK(t.sent[1] == std::vector<unsigned char>({ 0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00, 0x10 }));
         CHECK(t.sent[2] == ewr::jig::kLeavePacketMode);
-        CHECK(t.sent[3] == ewr::jig::BuildEnterJigMode());
+        CHECK(t.sent[3] == ewr::jig::BuildEnter());
         for (size_t i = 0; i < 4; ++i)
             CHECK(t.sent[4 + i] == queries[i]);
         CHECK(t.sent[8] == ewr::jig::BuildExit());
@@ -3177,7 +3179,7 @@ void test_jig_read_session_refuses_cleanly()
     {
         FakeTransport t = MakeJigPrinter({}, /*takesJigMode=*/false);
         ewr::log::Reporter reporter;
-        const ewr::QuerySessionResult result = ewr::ExecuteJigReadSession(t, queries, reporter, options);
+        const ewr::QuerySessionResult result = ewr::jig::RunReadSession(t, queries, reporter, options);
         CHECK(!result.success);
         CHECK(result.handshakeConfirmed);
         CHECK(!result.handshakeFailed);
@@ -3192,7 +3194,7 @@ void test_jig_read_session_refuses_cleanly()
     {
         FakeTransport t;
         ewr::log::Reporter reporter;
-        const ewr::QuerySessionResult result = ewr::ExecuteJigReadSession(t, queries, reporter, options);
+        const ewr::QuerySessionResult result = ewr::jig::RunReadSession(t, queries, reporter, options);
         CHECK(result.handshakeFailed);
         CHECK(!result.success);
         CHECK(result.packetsSent == 0);
@@ -3218,13 +3220,13 @@ void test_d4_reassembles_a_fragmented_reply()
         return both;
     });
 
-    ewr::D4SessionOptions options;
+    ewr::d4::SessionOptions options;
     options.replyTimeoutMs = 200;
     options.dataTimeoutMs = 200;
     options.fragmentTimeoutMs = 100;
 
     std::ofstream log = NullLog();
-    ewr::D4Session session(t, log, options);
+    ewr::d4::Session session(t, log, options);
     CHECK(session.Start());
     CHECK(session.MtuToHost() == 0x0100);
 
@@ -3257,13 +3259,13 @@ void test_d4_short_reply_costs_no_extra_round_trip()
             return D4Frame(0x02, 0x02, { ':', '4', '2', ':', 'O', 'K', ';' }, 0x00, control);
         });
 
-        ewr::D4SessionOptions options;
+        ewr::d4::SessionOptions options;
         options.replyTimeoutMs = 200;
         options.dataTimeoutMs = 200;
         options.fragmentTimeoutMs = 100;
 
         std::ofstream log = NullLog();
-        ewr::D4Session session(t, log, options);
+        ewr::d4::Session session(t, log, options);
         CHECK(session.Start());
 
         const size_t afterStart = t.sent.size();
@@ -3316,8 +3318,8 @@ void test_address_length_framing()
 
     // 'rlen'/'wlen' select the width of the ADDRESS field, so a 1-byte model's
     // packet is one byte shorter and every field after the address shifts.
-    const auto write2 = ewr::UniversalGenerator::GenerateWritePacket(0x0008, 0x0018, 0x2A, "Arkanoid", 2);
-    const auto write1 = ewr::UniversalGenerator::GenerateWritePacket(0x0008, 0x0018, 0x2A, "Arkanoid", 1);
+    const auto write2 = ewr::ctrl::WritePacket(0x0008, 0x0018, 0x2A, "Arkanoid", 2);
+    const auto write1 = ewr::ctrl::WritePacket(0x0008, 0x0018, 0x2A, "Arkanoid", 1);
 
     CHECK(write2.size() == write1.size() + 1);
 
@@ -3342,8 +3344,8 @@ void test_address_length_framing()
     CHECK(EndsWithKey(write1, "Arkanoid"));
     CHECK(EndsWithKey(write2, "Arkanoid"));
 
-    const auto read2 = ewr::UniversalGenerator::GenerateReadPacket(0x0008, 0x0018, 2);
-    const auto read1 = ewr::UniversalGenerator::GenerateReadPacket(0x0008, 0x0018, 1);
+    const auto read2 = ewr::ctrl::ReadPacket(0x0008, 0x0018, 2);
+    const auto read1 = ewr::ctrl::ReadPacket(0x0008, 0x0018, 1);
 
     CHECK(read2.size() == read1.size() + 1);
     CHECK(read1.size() == 16); // D4(6) + '||'(2) + len(2) + rkey(2) + triplet(3) + addr(1)
@@ -3351,7 +3353,7 @@ void test_address_length_framing()
     CHECK(read1[15] == 0x18);
 
     // 2-byte addressing stays the default for callers that do not specify.
-    CHECK(ewr::UniversalGenerator::GenerateReadPacket(0x0008, 0x0018) == read2);
+    CHECK(ewr::ctrl::ReadPacket(0x0008, 0x0018) == read2);
 }
 
 void test_one_byte_model_address_encoding()
@@ -3369,8 +3371,8 @@ void test_one_byte_model_address_encoding()
     CHECK(m.CanEncodeWriteAddress(0x00FF));
     CHECK(!m.CanEncodeWriteAddress(0x0120));
 
-    ewr::UniversalGenerator generator;
-    const auto sequence = generator.GenerateSequence(m);
+    ewr::Database generator;
+    const auto sequence = ewr::ctrl::ResetSequence(m);
 
     // Handshake (3) + credit pair + one write: 0x120 does not fit a 1-byte
     // address field, so it is skipped rather than silently truncated to 0x20.
@@ -3379,7 +3381,7 @@ void test_one_byte_model_address_encoding()
     size_t writes = 0;
     for (const auto& pkt : sequence)
     {
-        if (ewr::IsWritePacket(pkt))
+        if (ewr::ctrl::IsWrite(pkt))
         {
             writes++;
             CHECK(pkt[15] == 0x18); // address, then value - no high byte
@@ -3392,7 +3394,7 @@ void test_one_byte_model_address_encoding()
     ewr::DbPrinterModel wide = m;
     wide.rlen = 2;
     wide.wlen = 2;
-    CHECK(generator.GenerateSequence(wide).size() == 9);
+    CHECK(ewr::ctrl::ResetSequence(wide).size() == 9);
 }
 
 void test_eeprom_read_reply_two_byte_address()
@@ -3402,32 +3404,32 @@ void test_eeprom_read_reply_two_byte_address()
     uint8_t value = 0;
 
     // 6 hex digits: 2-byte address echo (big endian) followed by the value.
-    CHECK(ewr::ParseEepromReadReply(MakeEepromReadReplyEE16(0x0130, 0x2A), value, 0x0130));
+    CHECK(ewr::ctrl::ParseReadReply(MakeEepromReadReplyEE16(0x0130, 0x2A), value, 0x0130));
     CHECK(value == 0x2A);
 
     // A wide echo can be verified against the requested address in full.
-    CHECK(!ewr::ParseEepromReadReply(MakeEepromReadReplyEE16(0x0130, 0x2A), value, 0x0131));
+    CHECK(!ewr::ctrl::ParseReadReply(MakeEepromReadReplyEE16(0x0130, 0x2A), value, 0x0131));
 
     value = 0;
-    CHECK(ewr::ParseEepromReadReply(MakeEepromReadReplyEE16(0x0002, 0x5E), value));
+    CHECK(ewr::ctrl::ParseReadReply(MakeEepromReadReplyEE16(0x0002, 0x5E), value));
     CHECK(value == 0x5E);
 
     // The 1-byte form still parses, including the case where the echo is too
     // narrow to confirm an address above 0xFF.
     value = 0;
-    CHECK(ewr::ParseEepromReadReply(MakeEepromReadReplyEE(0x0C, 0x1C), value, 0x0C));
+    CHECK(ewr::ctrl::ParseReadReply(MakeEepromReadReplyEE(0x0C, 0x1C), value, 0x0C));
     CHECK(value == 0x1C);
-    CHECK(ewr::ParseEepromReadReply(MakeEepromReadReplyEE(0xFC, 0x07), value, 0x02FC));
+    CHECK(ewr::ctrl::ParseReadReply(MakeEepromReadReplyEE(0xFC, 0x07), value, 0x02FC));
 }
 
 void test_write_key_substitution()
 {
     std::cout << "[TEST] test_write_key_substitution" << std::endl;
 
-    const auto packet = ewr::UniversalGenerator::GenerateWritePacket(0x0008, 0x0018, 0x00, "Arkanoid", 2);
+    const auto packet = ewr::ctrl::WritePacket(0x0008, 0x0018, 0x00, "Arkanoid", 2);
 
     std::vector<unsigned char> out;
-    CHECK(ewr::SubstituteTrailingWriteKey(packet, "Arkanoid", "Bslbopje", out));
+    CHECK(ewr::ctrl::SubstituteTrailingWriteKey(packet, "Arkanoid", "Bslbopje", out));
     CHECK(out.size() == packet.size());
     CHECK(EndsWithKey(out, "Bslbopje"));
 
@@ -3440,9 +3442,9 @@ void test_write_key_substitution()
 
     // Refused when the keyword is absent, empty, or a different length.
     std::vector<unsigned char> ignored;
-    CHECK(!ewr::SubstituteTrailingWriteKey(packet, "Wrongkey", "Bslbopje", ignored));
-    CHECK(!ewr::SubstituteTrailingWriteKey(packet, "Arkanoid", "", ignored));
-    CHECK(!ewr::SubstituteTrailingWriteKey(packet, "Arkanoid", "Short", ignored));
+    CHECK(!ewr::ctrl::SubstituteTrailingWriteKey(packet, "Wrongkey", "Bslbopje", ignored));
+    CHECK(!ewr::ctrl::SubstituteTrailingWriteKey(packet, "Arkanoid", "", ignored));
+    CHECK(!ewr::ctrl::SubstituteTrailingWriteKey(packet, "Arkanoid", "Short", ignored));
 }
 
 void test_alternate_write_key_retry()
@@ -3453,7 +3455,7 @@ void test_alternate_write_key_retry()
 
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
-        if (!ewr::IsWritePacket(pkt))
+        if (!ewr::ctrl::IsWrite(pkt))
             return HandshakeAck();
         return EndsWithKey(pkt, "Bslbopje") ? OkAck() : NgAck();
     };
@@ -3463,7 +3465,7 @@ void test_alternate_write_key_retry()
     options.alternateWriteKey = "Bslbopje";
 
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, options);
+    auto result = ewr::exec::RunSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, options);
 
     CHECK(result.success);
     CHECK(result.alternateKeyUsed);
@@ -3474,11 +3476,11 @@ void test_alternate_write_key_retry()
     // Without an alternate keyword, ':42:NG;' stays fatal on the first write.
     FakeTransport plain;
     plain.replyFor = [](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
-        return ewr::IsWritePacket(pkt) ? NgAck() : HandshakeAck();
+        return ewr::ctrl::IsWrite(pkt) ? NgAck() : HandshakeAck();
     };
 
     std::ostringstream plainOut;
-    auto rejected = ewr::ExecuteSequence(plain, legacy::GenerateSequence(MakeTestModel()),
+    auto rejected = ewr::exec::RunSequence(plain, legacy::GenerateSequence(MakeTestModel()),
                                          plainOut, log, FastOptions());
 
     CHECK(!rejected.success);
@@ -3491,11 +3493,11 @@ void test_alternate_write_key_retry()
     // whose keys are both wrong must not be reported as one that was fixed.
     FakeTransport bothBad;
     bothBad.replyFor = [](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
-        return ewr::IsWritePacket(pkt) ? NgAck() : HandshakeAck();
+        return ewr::ctrl::IsWrite(pkt) ? NgAck() : HandshakeAck();
     };
 
     std::ostringstream bothOut;
-    auto bothRejected = ewr::ExecuteSequence(bothBad, legacy::GenerateSequence(MakeTestModel()),
+    auto bothRejected = ewr::exec::RunSequence(bothBad, legacy::GenerateSequence(MakeTestModel()),
                                              bothOut, log, options);
 
     CHECK(!bothRejected.success);
@@ -3526,7 +3528,7 @@ void test_alternate_write_key_retry_d4()
 
     std::ofstream log = NullLog();
     std::ostringstream out;
-    auto result = ewr::ExecuteSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, options);
+    auto result = ewr::exec::RunSequence(t, legacy::GenerateSequence(MakeTestModel()), out, log, options);
 
     CHECK(result.success);
     CHECK(result.alternateKeyUsed);
@@ -3540,7 +3542,7 @@ void test_alternate_write_key_retry_d4()
     });
 
     std::ostringstream bothOut;
-    auto bothRejected = ewr::ExecuteSequence(bothBad, legacy::GenerateSequence(MakeTestModel()),
+    auto bothRejected = ewr::exec::RunSequence(bothBad, legacy::GenerateSequence(MakeTestModel()),
                                              bothOut, log, options);
 
     CHECK(!bothRejected.success);
@@ -3567,12 +3569,12 @@ void test_schema4_counter_specs_loading()
             << R"( "close": [{"addr": 256, "and": 254}, {"addr": 300, "and": 255, "or": 0}]}}})";
     }
 
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase(test_filename);
+    ewr::Database gen;
+    bool loaded = gen.Load(test_filename);
     fs::remove(test_filename);
 
     CHECK(loaded);
-    auto models = gen.GetAvailableModels();
+    auto models = gen.Models();
     CHECK(models.size() == 1);
     if (models.size() != 1)
         return;
@@ -3658,12 +3660,12 @@ void test_schema4_close_ops()
             << R"( }})";
     }
 
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase(test_filename);
+    ewr::Database gen;
+    bool loaded = gen.Load(test_filename);
     fs::remove(test_filename);
 
     CHECK(loaded);
-    auto models = gen.GetAvailableModels();
+    auto models = gen.Models();
     CHECK(models.size() == 2);
 
     const ewr::DbPrinterModel* commit = nullptr;
@@ -3727,13 +3729,13 @@ void test_schema4_spec_groups()
             << R"( }})";
     }
 
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase(test_filename);
+    ewr::Database gen;
+    bool loaded = gen.Load(test_filename);
     fs::remove(test_filename);
 
     CHECK(loaded);
 
-    auto models = gen.GetAvailableModels();
+    auto models = gen.Models();
     CHECK(models.size() == 3);
 
     const ewr::DbPrinterModel* inherited = nullptr;
@@ -3766,8 +3768,8 @@ void test_schema4_spec_groups()
     CHECK(inherited->close_ops[0].address == 0x100);
 
     size_t writes = 0;
-    for (const auto& pkt : gen.GenerateSequence(*inherited))
-        if (ewr::IsWritePacket(pkt))
+    for (const auto& pkt : ewr::ctrl::ResetSequence(*inherited))
+        if (ewr::ctrl::IsWrite(pkt))
             writes++;
     CHECK(writes == 2);
 
@@ -3794,13 +3796,13 @@ void test_schema4_spec_groups()
             << R"( "FlatModel": {"spec": "L-family"}})";
     }
 
-    ewr::UniversalGenerator flatGen;
-    bool flatLoaded = flatGen.LoadDatabase(flat_filename);
+    ewr::Database flatGen;
+    bool flatLoaded = flatGen.Load(flat_filename);
     fs::remove(flat_filename);
 
     CHECK(flatLoaded);
 
-    auto flatModels = flatGen.GetAvailableModels();
+    auto flatModels = flatGen.Models();
     CHECK(flatModels.size() == 1);
     if (flatModels.size() == 1)
     {
@@ -3863,8 +3865,8 @@ void test_log_reporter_and_database_events()
         })";
     }
 
-    ewr::UniversalGenerator gen;
-    CHECK(gen.LoadDatabase(test_filename));
+    ewr::Database gen;
+    CHECK(gen.Load(test_filename));
     fs::remove(test_filename);
 
     ewr::log::Default().RemoveSink(defaultId);
@@ -4037,7 +4039,7 @@ void test_trace_context_description()
     context.selectedEntry = "L565";
     context.selectedBy = "--yes: the detected model";
 
-    const std::string same = ewr::DescribeTraceContext(context);
+    const std::string same = ewr::exec::DescribeTraceContext(context);
     CHECK(same.find("Printer reports: L565 Series\n") != std::string::npos);
     CHECK(same.find("Detected entry:  L565\n") != std::string::npos);
     CHECK(same.find("Selected entry:  L565 (--yes: the detected model)\n") != std::string::npos);
@@ -4045,11 +4047,11 @@ void test_trace_context_description()
 
     context.selectedEntry = "L3110";
     context.selectedBy = "--model \"L3110\"";
-    CHECK(ewr::DescribeTraceContext(context).find("[!] The selected entry is not the one the printer matches.")
+    CHECK(ewr::exec::DescribeTraceContext(context).find("[!] The selected entry is not the one the printer matches.")
           != std::string::npos);
 
     // Nothing known: every line still printed, none claiming a mismatch.
-    const std::string empty = ewr::DescribeTraceContext({});
+    const std::string empty = ewr::exec::DescribeTraceContext({});
     CHECK(empty.find("Printer reports: (unknown)\n") != std::string::npos);
     CHECK(empty.find("Detected entry:  (none)\n") != std::string::npos);
     CHECK(empty.find("Selected entry:  (unknown)\n") != std::string::npos);
@@ -4059,7 +4061,7 @@ void test_trace_context_description()
     ewr::ExecutorOptions::TraceContext unmatched;
     unmatched.printerReports = "EPSON Mystery 9000";
     unmatched.selectedEntry = "L3110";
-    CHECK(ewr::DescribeTraceContext(unmatched).find("[!]") == std::string::npos);
+    CHECK(ewr::exec::DescribeTraceContext(unmatched).find("[!]") == std::string::npos);
 
     // A run with no entry on purpose says why, and is no mismatch: --find-key
     // on a printer the database does know selects nothing.
@@ -4067,7 +4069,7 @@ void test_trace_context_description()
     searching.printerReports = "Stylus Photo R220";
     searching.detectedEntry = "R220";
     searching.selectedBy = "--find-key";
-    const std::string search = ewr::DescribeTraceContext(searching);
+    const std::string search = ewr::exec::DescribeTraceContext(searching);
     CHECK(search.find("Selected entry:  (none: --find-key)\n") != std::string::npos);
     CHECK(search.find("[!]") == std::string::npos);
 }
@@ -4260,11 +4262,11 @@ void test_jig_models_load_and_stay_out_of_the_key_search()
         }})";
     }
 
-    ewr::UniversalGenerator gen;
-    CHECK(gen.LoadDatabase(path));
+    ewr::Database gen;
+    CHECK(gen.Load(path));
     fs::remove(path);
 
-    const auto models = gen.GetAvailableModels();
+    const auto models = gen.Models();
     bool sawJig = false, sawKeyed = false;
     for (const auto& model : models)
     {
@@ -4291,10 +4293,10 @@ void test_jig_models_load_and_stay_out_of_the_key_search()
 
     // The real database: the SX110 names itself "Epson Stylus SX110" in its
     // device ID, and that has to land on the JIG entry, read-only.
-    ewr::UniversalGenerator real;
-    CHECK(real.LoadDatabase("database.json"));
+    ewr::Database real;
+    CHECK(real.Load("database.json"));
     std::vector<ewr::ModelNameEntry> entries;
-    for (const auto& model : real.GetAvailableModels())
+    for (const auto& model : real.Models())
     {
         entries.push_back({ model.name, model.aliases });
         if (model.name == "SX110")
@@ -4318,21 +4320,21 @@ void test_classify_eeprom_read_reply()
     auto text = [](const std::string& s) { return WrapD4Data(std::vector<unsigned char>(s.begin(), s.end())); };
 
     uint8_t value = 0;
-    CHECK(ewr::ClassifyEepromReadReply({}, value, 0) == ewr::ReadAnswer::Silent);
+    CHECK(ewr::ctrl::ClassifyReadReply({}, value, 0) == ewr::ReadAnswer::Silent);
 
-    CHECK(ewr::ClassifyEepromReadReply(MakeEepromReadReplyEE16(0, 0x5E), value, 0) == ewr::ReadAnswer::Value);
+    CHECK(ewr::ctrl::ClassifyReadReply(MakeEepromReadReplyEE16(0, 0x5E), value, 0) == ewr::ReadAnswer::Value);
     CHECK(value == 0x5E);
-    CHECK(ewr::ClassifyEepromReadReply(MakeEepromReadReplyEE(0, 0x07), value, 0) == ewr::ReadAnswer::Value);
+    CHECK(ewr::ctrl::ClassifyReadReply(MakeEepromReadReplyEE(0, 0x07), value, 0) == ewr::ReadAnswer::Value);
     CHECK(value == 0x07);
 
-    CHECK(ewr::ClassifyEepromReadReply(text("||:41:NA;\f"), value, 0) == ewr::ReadAnswer::Refused);
-    CHECK(ewr::ClassifyEepromReadReply(text("||:;\f"), value, 0) == ewr::ReadAnswer::Empty);
-    CHECK(ewr::ClassifyEepromReadReply(text("||:;\r\n\f"), value, 0) == ewr::ReadAnswer::Empty);
+    CHECK(ewr::ctrl::ClassifyReadReply(text("||:41:NA;\f"), value, 0) == ewr::ReadAnswer::Refused);
+    CHECK(ewr::ctrl::ClassifyReadReply(text("||:;\f"), value, 0) == ewr::ReadAnswer::Empty);
+    CHECK(ewr::ctrl::ClassifyReadReply(text("||:;\r\n\f"), value, 0) == ewr::ReadAnswer::Empty);
 
     // Neither a value nor a known refusal: reported, never guessed at.
-    CHECK(ewr::ClassifyEepromReadReply(text("zz:;\f"), value, 0) == ewr::ReadAnswer::Other);
+    CHECK(ewr::ctrl::ClassifyReadReply(text("zz:;\f"), value, 0) == ewr::ReadAnswer::Other);
     // A value for another address is not an answer to this read.
-    CHECK(ewr::ClassifyEepromReadReply(MakeEepromReadReplyEE16(0x18, 1), value, 0) == ewr::ReadAnswer::Other);
+    CHECK(ewr::ctrl::ClassifyReadReply(MakeEepromReadReplyEE16(0x18, 1), value, 0) == ewr::ReadAnswer::Other);
 }
 
 void test_collect_read_key_candidates()
@@ -4364,9 +4366,9 @@ void test_collect_read_key_candidates()
 
     // The real database: every keyed model lands in exactly one candidate,
     // and no JIG model in any.
-    ewr::UniversalGenerator gen;
-    CHECK(gen.LoadDatabase("database.json"));
-    const auto models = gen.GetAvailableModels();
+    ewr::Database gen;
+    CHECK(gen.Load("database.json"));
+    const auto models = gen.Models();
     const auto real = ewr::CollectReadKeyCandidates(models);
 
     const size_t keyed = static_cast<size_t>(std::count_if(models.begin(), models.end(),
@@ -4779,7 +4781,7 @@ void test_session_ink_reset()
         // write keyword and every protocol safeguard on.
         size_t writePackets = 0;
         for (const auto& packet : gw.lastSequence)
-            writePackets += ewr::IsWritePacket(packet) ? 1 : 0;
+            writePackets += ewr::ctrl::IsWrite(packet) ? 1 : 0;
         CHECK(writePackets == 2);
         CHECK(gw.lastResetOptions.writeKey == "McLaren");
         CHECK(gw.lastResetOptions.verifyWrites);
@@ -4839,12 +4841,12 @@ void test_ink_groups_loading()
             << R"(]}}})";
     }
 
-    ewr::UniversalGenerator gen;
-    bool loaded = gen.LoadDatabase(test_filename);
+    ewr::Database gen;
+    bool loaded = gen.Load(test_filename);
     fs::remove(test_filename);
 
     CHECK(loaded);
-    auto models = gen.GetAvailableModels();
+    auto models = gen.Models();
     CHECK(models.size() == 1);
 
     if (models.size() == 1)
@@ -5162,7 +5164,7 @@ void test_esc_remote_sequence_verified()
 
     const ewr::DbPrinterModel model = MakeTestModel();
     const std::vector<std::vector<unsigned char>> commands =
-        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+        ewr::ctrl::ExtractWriteCommands(legacy::GenerateSequence(model));
     CHECK(commands.size() == 2);
 
     FakeTransport transport;
@@ -5177,8 +5179,8 @@ void test_esc_remote_sequence_verified()
     options.interPacketDelayMs = 0;
 
     ewr::log::Reporter reporter;
-    const ewr::End4Result result =
-        ewr::ExecuteEscRemoteSequence(transport, commands, reporter, options);
+    const ewr::exec::End4Result result =
+        ewr::exec::RunEscRemoteSequence(transport, commands, reporter, options);
 
     CHECK(result.success);
     CHECK(result.anyReply);
@@ -5205,7 +5207,7 @@ void test_esc_remote_sequence_silent_fails()
 
     const ewr::DbPrinterModel model = MakeTestModel();
     const std::vector<std::vector<unsigned char>> commands =
-        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+        ewr::ctrl::ExtractWriteCommands(legacy::GenerateSequence(model));
 
     FakeTransport transport; // no replyFor -> the printer never answers
 
@@ -5216,8 +5218,8 @@ void test_esc_remote_sequence_silent_fails()
     options.handshakeDrainTimeoutMs = 100;
 
     ewr::log::Reporter reporter;
-    const ewr::End4Result result =
-        ewr::ExecuteEscRemoteSequence(transport, commands, reporter, options);
+    const ewr::exec::End4Result result =
+        ewr::exec::RunEscRemoteSequence(transport, commands, reporter, options);
 
     CHECK(!result.success);
     CHECK(!result.anyReply);
@@ -5235,7 +5237,7 @@ void test_esc_remote_alternate_key()
 
     const ewr::DbPrinterModel model = MakeTestModel(); // writes end with wkey "Arkanoid"
     const std::vector<std::vector<unsigned char>> commands =
-        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+        ewr::ctrl::ExtractWriteCommands(legacy::GenerateSequence(model));
 
     const std::string alternate = "Tetris01"; // same length, so the tail swap applies
 
@@ -5256,8 +5258,8 @@ void test_esc_remote_alternate_key()
     options.handshakeDrainTimeoutMs = 100;
 
     ewr::log::Reporter reporter;
-    const ewr::End4Result result =
-        ewr::ExecuteEscRemoteSequence(transport, commands, reporter, options);
+    const ewr::exec::End4Result result =
+        ewr::exec::RunEscRemoteSequence(transport, commands, reporter, options);
 
     CHECK(result.success);
     CHECK(result.alternateKeyUsed);
@@ -5273,7 +5275,7 @@ void test_esc_remote_both_keys_rejected_claims_nothing()
 
     const ewr::DbPrinterModel model = MakeTestModel();
     const std::vector<std::vector<unsigned char>> commands =
-        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+        ewr::ctrl::ExtractWriteCommands(legacy::GenerateSequence(model));
 
     FakeTransport transport;
     transport.replyFor = [](const std::vector<unsigned char>&) -> std::vector<unsigned char> {
@@ -5289,8 +5291,8 @@ void test_esc_remote_both_keys_rejected_claims_nothing()
     options.handshakeDrainTimeoutMs = 100;
 
     ewr::log::Reporter reporter;
-    const ewr::End4Result result =
-        ewr::ExecuteEscRemoteSequence(transport, commands, reporter, options);
+    const ewr::exec::End4Result result =
+        ewr::exec::RunEscRemoteSequence(transport, commands, reporter, options);
 
     CHECK(!result.success);
     CHECK(!result.alternateKeyUsed);
@@ -5302,7 +5304,7 @@ void test_end4_framing()
     std::cout << "[TEST] test_end4_framing" << std::endl;
 
     const std::vector<unsigned char> cmd = { 's', 't', 0x01 };
-    const std::vector<unsigned char> end4Pkt = ewr::end4::BuildEnd4Packet(cmd);
+    const std::vector<unsigned char> end4Pkt = ewr::end4::BuildPacket(cmd);
 
     CHECK(end4Pkt.size() == 14 + cmd.size());
     CHECK(end4Pkt[0] == 'E' && end4Pkt[1] == 'N' && end4Pkt[2] == 'D' && end4Pkt[3] == '4');
@@ -5336,7 +5338,7 @@ void test_end4_framing()
         '@', 'B', 'D', 'C'
     };
     std::vector<unsigned char> payload;
-    bool parsed = ewr::end4::ParseEnd4Response(rawReply, payload);
+    bool parsed = ewr::end4::ParseResponse(rawReply, payload);
     CHECK(parsed);
     CHECK(payload.size() == 4);
     if (payload.size() == 4)
@@ -5346,7 +5348,7 @@ void test_end4_framing()
     }
 }
 
-// The END4 path hands ParseEnd4Response an arbitrary suffix found by searching
+// The END4 path hands ParseResponse an arbitrary suffix found by searching
 // for the literal 'END4' anywhere in a raw drain, prefix junk included, so a
 // length byte that makes no sense is the expected case rather than the
 // exceptional one. A declared total below the header's own size would run the
@@ -5363,7 +5365,7 @@ void test_end4_response_rejects_short_declared_length()
         };
 
         std::vector<unsigned char> body = { 0xFF }; // must be cleared, not kept
-        CHECK(!ewr::end4::ParseEnd4Response(malformed, body));
+        CHECK(!ewr::end4::ParseResponse(malformed, body));
         CHECK(body.empty());
     }
 
@@ -5374,7 +5376,7 @@ void test_end4_response_rejects_short_declared_length()
     };
 
     std::vector<unsigned char> emptyBody = { 0xFF };
-    CHECK(ewr::end4::ParseEnd4Response(headerOnly, emptyBody));
+    CHECK(ewr::end4::ParseResponse(headerOnly, emptyBody));
     CHECK(emptyBody.empty());
 
     // A frame that announces more than arrived still hands back the partial
@@ -5385,7 +5387,7 @@ void test_end4_response_rejects_short_declared_length()
     };
 
     std::vector<unsigned char> partial;
-    CHECK(!ewr::end4::ParseEnd4Response(short_, partial));
+    CHECK(!ewr::end4::ParseResponse(short_, partial));
     CHECK(partial.size() == 4);
 }
 
@@ -5414,11 +5416,11 @@ void test_end4_factory_command_extraction()
     std::vector<std::vector<unsigned char>> expected;
     for (const auto& pkt : sequence)
     {
-        if (ewr::IsWritePacket(pkt))
+        if (ewr::ctrl::IsWrite(pkt))
             expected.emplace_back(pkt.begin() + 6, pkt.end());
     }
 
-    const std::vector<std::vector<unsigned char>> commands = ewr::ExtractFactoryWriteCommands(sequence);
+    const std::vector<std::vector<unsigned char>> commands = ewr::ctrl::ExtractWriteCommands(sequence);
 
     CHECK(commands.size() == 2);
     CHECK(commands.size() == expected.size());
@@ -5450,7 +5452,7 @@ void test_end4_sequence_verified()
 
     const ewr::DbPrinterModel model = MakeTestModel();
     const std::vector<std::vector<unsigned char>> commands =
-        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+        ewr::ctrl::ExtractWriteCommands(legacy::GenerateSequence(model));
     CHECK(commands.size() == 2);
 
     FakeTransport transport;
@@ -5465,8 +5467,8 @@ void test_end4_sequence_verified()
     options.interPacketDelayMs = 0;
 
     ewr::log::Reporter reporter;
-    const ewr::End4Result result =
-        ewr::ExecuteEnd4Sequence(transport, "MFG:EPSON;DDS:0020;", commands, reporter, options);
+    const ewr::exec::End4Result result =
+        ewr::exec::RunEnd4Sequence(transport, "MFG:EPSON;DDS:0020;", commands, reporter, options);
 
     CHECK(result.success);
     CHECK(result.anyReply);
@@ -5494,7 +5496,7 @@ void test_end4_sequence_silent_fails()
 
     const ewr::DbPrinterModel model = MakeTestModel();
     const std::vector<std::vector<unsigned char>> commands =
-        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+        ewr::ctrl::ExtractWriteCommands(legacy::GenerateSequence(model));
 
     FakeTransport transport; // no replyFor -> the printer never answers
 
@@ -5505,8 +5507,8 @@ void test_end4_sequence_silent_fails()
     options.handshakeDrainTimeoutMs = 100; // keep the bounded give-up quick for the test
 
     ewr::log::Reporter reporter;
-    const ewr::End4Result result =
-        ewr::ExecuteEnd4Sequence(transport, "DDS:0000;", commands, reporter, options);
+    const ewr::exec::End4Result result =
+        ewr::exec::RunEnd4Sequence(transport, "DDS:0000;", commands, reporter, options);
 
     // Honest failure: no false success, and silence is reported as silence.
     CHECK(!result.success);
@@ -5526,7 +5528,7 @@ void test_end4_sequence_reports_unframed_bytes()
 
     const ewr::DbPrinterModel model = MakeTestModel();
     const std::vector<std::vector<unsigned char>> commands =
-        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+        ewr::ctrl::ExtractWriteCommands(legacy::GenerateSequence(model));
 
     FakeTransport transport;
     transport.replyFor = [](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
@@ -5549,8 +5551,8 @@ void test_end4_sequence_reports_unframed_bytes()
     ewr::log::Reporter reporter;
     reporter.AddSink([&events](const ewr::log::Event& e) { events.push_back(e); });
 
-    const ewr::End4Result result =
-        ewr::ExecuteEnd4Sequence(transport, "DDS:0020;", commands, reporter, options);
+    const ewr::exec::End4Result result =
+        ewr::exec::RunEnd4Sequence(transport, "DDS:0020;", commands, reporter, options);
 
     CHECK(!result.success);
     CHECK(!result.anyReply);      // nothing carried the 'END4' marker
@@ -5587,8 +5589,8 @@ void test_executor_caps_inbound_trace_dumps()
 {
     std::cout << "[TEST] test_executor_caps_inbound_trace_dumps" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    const auto seq = gen.GenerateSequence(MakeTestModel());
+    ewr::Database gen;
+    const auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     // A channel-open ack trailed by a burst the size of a full drain window.
     std::vector<unsigned char> flood = HandshakeAck();
@@ -5596,12 +5598,12 @@ void test_executor_caps_inbound_trace_dumps()
 
     FakeTransport t;
     t.replyFor = [&flood](const std::vector<unsigned char>& pkt) {
-        return ewr::IsWritePacket(pkt) ? OkAck() : flood;
+        return ewr::ctrl::IsWrite(pkt) ? OkAck() : flood;
     };
 
     std::ostringstream out;
     std::ostringstream log;
-    ewr::ExecuteSequence(t, seq, out, log, FastOptions());
+    ewr::exec::RunSequence(t, seq, out, log, FastOptions());
 
     const std::string trace = log.str();
 
@@ -5620,15 +5622,15 @@ void test_hex_dump_capping()
 
     const std::vector<unsigned char> eight = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
-    CHECK(ewr::HexDumpCapped(eight.data(), eight.size(), 8) == ewr::HexDump(eight.data(), eight.size()));
-    CHECK(ewr::HexDumpCapped(eight.data(), eight.size(), 64) == ewr::HexDump(eight.data(), eight.size()));
+    CHECK(ewr::format::HexDumpCapped(eight.data(), eight.size(), 8) == ewr::format::HexDump(eight.data(), eight.size()));
+    CHECK(ewr::format::HexDumpCapped(eight.data(), eight.size(), 64) == ewr::format::HexDump(eight.data(), eight.size()));
 
     // Over the cap: head kept, remainder counted rather than silently dropped.
-    const std::string capped = ewr::HexDumpCapped(eight.data(), eight.size(), 4);
+    const std::string capped = ewr::format::HexDumpCapped(eight.data(), eight.size(), 4);
     CHECK(capped.find("... 4 further byte(s) not shown") != std::string::npos);
-    CHECK(capped.find(ewr::HexDump(eight.data(), 4)) == 0);
+    CHECK(capped.find(ewr::format::HexDump(eight.data(), 4)) == 0);
 
-    CHECK(ewr::HexDumpCapped(eight.data(), 0, 16) == ewr::HexDump(eight.data(), 0));
+    CHECK(ewr::format::HexDumpCapped(eight.data(), 0, 16) == ewr::format::HexDump(eight.data(), 0));
 }
 
 void test_end4_sequence_alternate_key()
@@ -5637,7 +5639,7 @@ void test_end4_sequence_alternate_key()
 
     const ewr::DbPrinterModel model = MakeTestModel(); // writes end with wkey "Arkanoid"
     const std::vector<std::vector<unsigned char>> commands =
-        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+        ewr::ctrl::ExtractWriteCommands(legacy::GenerateSequence(model));
     CHECK(commands.size() == 2);
 
     FakeTransport transport;
@@ -5663,8 +5665,8 @@ void test_end4_sequence_alternate_key()
     options.interPacketDelayMs = 0;
 
     ewr::log::Reporter reporter;
-    const ewr::End4Result result =
-        ewr::ExecuteEnd4Sequence(transport, "DDS:0000;", commands, reporter, options);
+    const ewr::exec::End4Result result =
+        ewr::exec::RunEnd4Sequence(transport, "DDS:0000;", commands, reporter, options);
 
     CHECK(result.success);
     CHECK(result.alternateKeyUsed);
@@ -5814,14 +5816,14 @@ void test_every_counter_kind_matches_its_own_description()
 {
     std::cout << "[TEST] test_every_counter_kind_matches_its_own_description" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    CHECK(gen.LoadDatabase("database.json"));
+    ewr::Database gen;
+    CHECK(gen.Load("database.json"));
 
     size_t named = 0;
     size_t platen = 0;
     size_t unnamed = 0;
 
-    for (const auto& model : gen.GetAvailableModels())
+    for (const auto& model : gen.Models())
     {
         for (const auto& counter : model.GetAllCounters())
         {
@@ -5916,13 +5918,13 @@ void test_reset_coverage_over_the_database()
 {
     std::cout << "[TEST] test_reset_coverage_over_the_database" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    CHECK(gen.LoadDatabase("database.json"));
+    ewr::Database gen;
+    CHECK(gen.Load("database.json"));
 
     size_t resettable = 0;
     size_t withUnreadable = 0;
 
-    for (const auto& model : gen.GetAvailableModels())
+    for (const auto& model : gen.Models())
     {
         std::vector<uint16_t> written;
         std::vector<uint16_t> read;
@@ -6891,24 +6893,24 @@ void test_http_personality_detection()
 
     const std::vector<unsigned char> http = Http500Reply();
     CHECK(http.size() == 57);
-    CHECK(ewr::LooksLikeHttpReply(http.data(), http.size()));
+    CHECK(ewr::d4::LooksLikeHttpReply(http.data(), http.size()));
 
     const std::string ok = "HTTP/1.1 200 OK\r\n";
-    CHECK(ewr::LooksLikeHttpReply(reinterpret_cast<const unsigned char*>(ok.data()), ok.size()));
+    CHECK(ewr::d4::LooksLikeHttpReply(reinterpret_cast<const unsigned char*>(ok.data()), ok.size()));
 
     // Only a leading status line counts. A D4 packet that happens to carry the
     // bytes further in is still a D4 packet.
     const std::vector<unsigned char> d4 = { 0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0x80, 0x00 };
-    CHECK(!ewr::LooksLikeHttpReply(d4.data(), d4.size()));
+    CHECK(!ewr::d4::LooksLikeHttpReply(d4.data(), d4.size()));
 
     std::vector<unsigned char> buried = { 0x00, 0x00 };
     buried.insert(buried.end(), http.begin(), http.end());
-    CHECK(!ewr::LooksLikeHttpReply(buried.data(), buried.size()));
+    CHECK(!ewr::d4::LooksLikeHttpReply(buried.data(), buried.size()));
 
     // Short and empty buffers must not read past the end.
     const std::vector<unsigned char> shortBuf = { 'H', 'T', 'T' };
-    CHECK(!ewr::LooksLikeHttpReply(shortBuf.data(), shortBuf.size()));
-    CHECK(!ewr::LooksLikeHttpReply(nullptr, 0));
+    CHECK(!ewr::d4::LooksLikeHttpReply(shortBuf.data(), shortBuf.size()));
+    CHECK(!ewr::d4::LooksLikeHttpReply(nullptr, 0));
 }
 
 // The four-week bug: the run reported "returned data but never an END4 reply",
@@ -6919,7 +6921,7 @@ void test_end4_reports_the_http_personality()
 
     const ewr::DbPrinterModel model = MakeTestModel();
     const std::vector<std::vector<unsigned char>> commands =
-        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+        ewr::ctrl::ExtractWriteCommands(legacy::GenerateSequence(model));
 
     FakeTransport transport;
     transport.replyFor = [](const std::vector<unsigned char>&) { return Http500Reply(); };
@@ -6931,13 +6933,13 @@ void test_end4_reports_the_http_personality()
     options.handshakeDrainTimeoutMs = 100;
 
     ewr::log::Reporter reporter;
-    const ewr::End4Result result =
-        ewr::ExecuteEnd4Sequence(transport, "DDS:0000;", commands, reporter, options);
+    const ewr::exec::End4Result result =
+        ewr::exec::RunEnd4Sequence(transport, "DDS:0000;", commands, reporter, options);
 
     CHECK(!result.success);
     CHECK(result.httpReply);
     CHECK(result.anyBytes);
-    CHECK(result.error == ewr::kHttpPersonalityError);
+    CHECK(result.error == ewr::d4::kHttpPersonalityError);
 }
 
 void test_esc_remote_reports_the_http_personality()
@@ -6946,7 +6948,7 @@ void test_esc_remote_reports_the_http_personality()
 
     const ewr::DbPrinterModel model = MakeTestModel();
     const std::vector<std::vector<unsigned char>> commands =
-        ewr::ExtractFactoryWriteCommands(legacy::GenerateSequence(model));
+        ewr::ctrl::ExtractWriteCommands(legacy::GenerateSequence(model));
 
     FakeTransport transport;
     transport.replyFor = [](const std::vector<unsigned char>&) { return Http500Reply(); };
@@ -6958,12 +6960,12 @@ void test_esc_remote_reports_the_http_personality()
     options.handshakeDrainTimeoutMs = 100;
 
     ewr::log::Reporter reporter;
-    const ewr::End4Result result =
-        ewr::ExecuteEscRemoteSequence(transport, commands, reporter, options);
+    const ewr::exec::End4Result result =
+        ewr::exec::RunEscRemoteSequence(transport, commands, reporter, options);
 
     CHECK(!result.success);
     CHECK(result.httpReply);
-    CHECK(result.error == ewr::kHttpPersonalityError);
+    CHECK(result.error == ewr::d4::kHttpPersonalityError);
 }
 
 // The D4 framer sees the status line before its resync discards it as junk.
@@ -6981,11 +6983,11 @@ void test_d4_session_reports_the_http_personality()
 
     ewr::log::Reporter reporter;
     const ewr::QuerySessionResult result =
-        ewr::ExecuteQuerySessionD4(transport, {}, reporter, options);
+        ewr::d4::RunQuerySession(transport, {}, reporter, options);
 
     CHECK(!result.success);
     CHECK(result.handshakeFailed);
-    CHECK(result.error == ewr::kHttpPersonalityError);
+    CHECK(result.error == ewr::d4::kHttpPersonalityError);
 }
 
 // ---------------------------------------------------------------------------
@@ -7124,11 +7126,11 @@ void test_l3110_shows_both_counters_sharing_a_byte()
 {
     std::cout << "[TEST] test_l3110_shows_both_counters_sharing_a_byte" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    CHECK(gen.LoadDatabase("database.json"));
+    ewr::Database gen;
+    CHECK(gen.Load("database.json"));
 
     const ewr::DbPrinterModel* l3110 = nullptr;
-    const std::vector<ewr::DbPrinterModel> models = gen.GetAvailableModels();
+    const std::vector<ewr::DbPrinterModel> models = gen.Models();
     for (const auto& m : models)
     {
         if (m.name == "L3110")
@@ -7178,10 +7180,10 @@ void test_counter_names_follow_wicreset_pad_order()
 {
     std::cout << "[TEST] test_counter_names_follow_wicreset_pad_order" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    CHECK(gen.LoadDatabase("database.json"));
+    ewr::Database gen;
+    CHECK(gen.Load("database.json"));
 
-    const std::vector<ewr::DbPrinterModel> models = gen.GetAvailableModels();
+    const std::vector<ewr::DbPrinterModel> models = gen.Models();
     for (const std::string name : { "EP-708A", "EP-808A", "XP-630" })
     {
         const ewr::DbPrinterModel* model = nullptr;
@@ -7212,12 +7214,12 @@ void test_no_model_repeats_a_gauge_label()
 {
     std::cout << "[TEST] test_no_model_repeats_a_gauge_label" << std::endl;
 
-    ewr::UniversalGenerator gen;
-    CHECK(gen.LoadDatabase("database.json"));
+    ewr::Database gen;
+    CHECK(gen.Load("database.json"));
 
     size_t repeating = 0;
     std::string firstOffender;
-    for (const auto& model : gen.GetAvailableModels())
+    for (const auto& model : gen.Models())
     {
         std::vector<std::string> seen;
         bool repeats = false;
@@ -7753,7 +7755,7 @@ namespace snmp_test {
     std::vector<unsigned char> CommandOf(const std::vector<unsigned char>& packet)
     {
         std::vector<unsigned char> command;
-        ewr::ExtractDataPayload(packet, command);
+        ewr::d4::ExtractDataPayload(packet, command);
         return command;
     }
 
@@ -7857,7 +7859,7 @@ void test_snmp_control_oid_carries_the_read_command()
     // The form every SNMP tool for these printers sends:
     // <ctrl>.124.124.7.0.<rkey lo>.<rkey hi>.65.190.160.<addr lo>.<addr hi>
     const std::vector<unsigned char> command =
-        snmp_test::CommandOf(ewr::UniversalGenerator::GenerateReadPacket(0x0797, 0x01FE));
+        snmp_test::CommandOf(ewr::ctrl::ReadPacket(0x0797, 0x01FE));
     const ewr::snmp::Oid expected = { 1, 3, 6, 1, 4, 1, 1248, 1, 2, 2, 44, 1, 1, 2, 1,
                                       124, 124, 7, 0, 151, 7, 65, 190, 160, 254, 1 };
     CHECK(ewr::SnmpControlOid(command) == expected);
@@ -7873,13 +7875,13 @@ void test_snmp_gateway_reads_state_through_the_session()
     snmp_test::ScriptedPrinter* script = printer.get();
 
     script->Serve(ewr::SnmpDeviceIdOid(), snmp_test::Bytes("MFG:EPSON;CMD:ESCPL2,BDC,D4;MDL:L3150 Series;CLS:PRINTER;"));
-    script->Serve(ewr::SnmpStatusOid(), ewr::ExtractD4Payload(MakeSt2Reply()));
+    script->Serve(ewr::SnmpStatusOid(), ewr::d4::ExtractPayload(MakeSt2Reply()));
     script->Serve(ewr::SnmpControlOid(snmp_test::CommandOf(
-                      ewr::UniversalGenerator::GenerateReadPacket(model.rkey, 0x30))),
+                      ewr::ctrl::ReadPacket(model.rkey, 0x30))),
                   snmp_test::Bytes("@BDC PS\r\nEE:00302A;\f"));
     // 0x1FE is known to the printer but refused, as an unserved OID is.
     script->Know(ewr::SnmpControlOid(snmp_test::CommandOf(
-        ewr::UniversalGenerator::GenerateReadPacket(model.rkey, 0x1FE))));
+        ewr::ctrl::ReadPacket(model.rkey, 0x1FE))));
 
     std::ostringstream trace;
     ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer), &trace);
@@ -7919,7 +7921,7 @@ void test_snmp_gateway_retries_a_lost_datagram()
 
     auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
     snmp_test::ScriptedPrinter* script = printer.get();
-    script->Serve(ewr::SnmpStatusOid(), ewr::ExtractD4Payload(MakeSt2Reply()));
+    script->Serve(ewr::SnmpStatusOid(), ewr::d4::ExtractPayload(MakeSt2Reply()));
     script->dropFirst = 2;
 
     ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
@@ -7953,7 +7955,7 @@ void test_snmp_gateway_reports_silence_without_asking_on()
     // never sent into the same silence.
     CHECK(script->requested.size() == 3);
 
-    const ewr::QueryRunResult run = gateway.RunQuery({}, { ewr::UniversalGenerator::GenerateStatusQueryPacket() },
+    const ewr::QueryRunResult run = gateway.RunQuery({}, { ewr::ctrl::StatusQueryPacket() },
                                                      ewr::DefaultQueryOptions());
     CHECK(!run.deviceFound);
     CHECK(run.query.handshakeFailed);
@@ -7988,7 +7990,7 @@ void test_snmp_query_path_never_sends_a_write()
 
     const ewr::DbPrinterModel model = snmp_test::TwoByteModel();
     const std::vector<unsigned char> write =
-        ewr::UniversalGenerator::GenerateWritePacket(model.rkey, 0x30, 0x00, model.wkey);
+        ewr::ctrl::WritePacket(model.rkey, 0x30, 0x00, model.wkey);
 
     auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
     snmp_test::ScriptedPrinter* script = printer.get();
@@ -8042,7 +8044,7 @@ namespace snmp_test {
             for (auto& cell : eeprom)
             {
                 if (oid == ewr::SnmpControlOid(CommandOf(
-                               ewr::UniversalGenerator::GenerateReadPacket(model.rkey, cell.first))))
+                               ewr::ctrl::ReadPacket(model.rkey, cell.first))))
                 {
                     if (locked)
                     {
@@ -8067,7 +8069,7 @@ namespace snmp_test {
                     // Any byte: a restore writes back what a reset cleared.
                     for (int value = 0; value < 256; ++value)
                     {
-                        if (oid != ewr::SnmpControlOid(CommandOf(ewr::UniversalGenerator::GenerateWritePacket(
+                        if (oid != ewr::SnmpControlOid(CommandOf(ewr::ctrl::WritePacket(
                                        model.rkey, cell.first, static_cast<uint8_t>(value), key))))
                             continue;
 
@@ -8226,8 +8228,8 @@ void test_snmp_reset_stops_at_a_refused_write()
         if (e.code == "snmp.reset_not_confirmed")
             ++notConfirmed;
     });
-    ewr::UniversalGenerator generator;
-    const ewr::ResetRunResult run = silentGateway.RunReset(generator.GenerateSequence(model), ewr::ExecutorOptions{});
+    ewr::Database generator;
+    const ewr::ResetRunResult run = silentGateway.RunReset(ewr::ctrl::ResetSequence(model), ewr::ExecutorOptions{});
     ewr::log::Default().RemoveSink(countId);
 
     CHECK(!run.deviceFound);
@@ -8244,10 +8246,10 @@ void test_snmp_reset_refuses_a_replay_dump()
 
     ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
 
-    ewr::UniversalGenerator generator;
+    ewr::Database generator;
     ewr::ExecutorOptions replay;
     replay.verifyWrites = false;
-    const ewr::ResetRunResult run = gateway.RunReset(generator.GenerateSequence(model), replay);
+    const ewr::ResetRunResult run = gateway.RunReset(ewr::ctrl::ResetSequence(model), replay);
 
     CHECK(!run.exec.success);
     CHECK(!run.exec.error.empty());
@@ -8282,13 +8284,13 @@ void test_snmp_gateway_waits_for_the_run_lock()
     CHECK(!gateway.ClaimPrinter());
     CHECK(!gateway.QueryDeviceId().found);
 
-    const ewr::QueryRunResult query = gateway.RunQuery({}, { ewr::UniversalGenerator::GenerateStatusQueryPacket() },
+    const ewr::QueryRunResult query = gateway.RunQuery({}, { ewr::ctrl::StatusQueryPacket() },
                                                        ewr::DefaultQueryOptions());
     CHECK(!query.query.success);
     CHECK(query.query.error.find("Another EWR run") != std::string::npos);
 
-    ewr::UniversalGenerator generator;
-    const ewr::ResetRunResult reset = gateway.RunReset(generator.GenerateSequence(snmp_test::TwoByteModel()),
+    ewr::Database generator;
+    const ewr::ResetRunResult reset = gateway.RunReset(ewr::ctrl::ResetSequence(snmp_test::TwoByteModel()),
                                                        ewr::ExecutorOptions{});
     CHECK(!reset.exec.success);
     CHECK(reset.exec.packetsSent == 0);
@@ -9025,7 +9027,7 @@ void test_session_restore_writes_only_what_differs()
     CHECK(asked.size() == 1 && asked[0] == "INK OUT"); // same serial: no unit gate
     CHECK(out.unchanged.size() == 1 && out.unchanged[0] == 0x0D);
     CHECK(CountWritePackets(gw.lastSequence) == 1);
-    CHECK(SequenceHas(gw.lastSequence, ewr::UniversalGenerator::GenerateWritePacket(
+    CHECK(SequenceHas(gw.lastSequence, ewr::ctrl::WritePacket(
                                            model.rkey, 0x0C, 0x12, model.wkey, model.WriteAddressLength())));
     CHECK(kept.target == "restore");
     CHECK(kept.bytes.size() == 1);
@@ -9137,14 +9139,14 @@ void test_factory_packet_matches_the_verified_builders()
 {
     std::cout << "[TEST] test_factory_packet_matches_the_verified_builders" << std::endl;
 
-    using G = ewr::UniversalGenerator;
+    namespace G = ewr::ctrl;
 
     // The generic builder must produce exactly what the hardware-verified
     // read builder does, at both address widths.
-    CHECK(G::GenerateFactoryPacket(0x3B10, 0x41, { 0x0C }) == G::GenerateReadPacket(0x3B10, 0x0C, 1));
-    CHECK(G::GenerateFactoryPacket(0x0797, 0x41, { 0x2F, 0x01 }) == G::GenerateReadPacket(0x0797, 0x012F, 2));
+    CHECK(G::FactoryPacket(0x3B10, 0x41, { 0x0C }) == G::ReadPacket(0x3B10, 0x0C, 1));
+    CHECK(G::FactoryPacket(0x0797, 0x41, { 0x2F, 0x01 }) == G::ReadPacket(0x0797, 0x012F, 2));
 
-    const std::vector<unsigned char> range1 = G::GenerateRangeReadPacket(0x3B10, 0x0C, 32, 1);
+    const std::vector<unsigned char> range1 = G::RangeReadPacket(0x3B10, 0x0C, 32, 1);
     const std::vector<unsigned char> expected1 = {
         0x02, 0x02, 0x00, 0x11, 0x00, 0x00,       // D4 header, 17 bytes
         '|', '|', 0x07, 0x00,                     // factory command, 7 bytes
@@ -9153,7 +9155,7 @@ void test_factory_packet_matches_the_verified_builders()
     };
     CHECK(range1 == expected1);
 
-    const std::vector<unsigned char> range2 = G::GenerateRangeReadPacket(0x0797, 0x0120, 16, 2);
+    const std::vector<unsigned char> range2 = G::RangeReadPacket(0x0797, 0x0120, 16, 2);
     CHECK(range2.size() == expected1.size() + 1);
     CHECK(range2[range2.size() - 3] == 0x20 && range2[range2.size() - 2] == 0x01 && range2.back() == 16);
 }
@@ -9171,24 +9173,24 @@ void test_range_reply_parsing()
     std::vector<uint8_t> values;
 
     // Address echo, one byte (R220-era) and two bytes.
-    CHECK(ewr::ParseEepromRangeReply(MakeRangeReply("EE:0C1234AB;"), 0x0C, 3, values));
+    CHECK(ewr::ctrl::ParseRangeReadReply(MakeRangeReply("EE:0C1234AB;"), 0x0C, 3, values));
     CHECK((values == std::vector<uint8_t>{ 0x12, 0x34, 0xAB }));
-    CHECK(ewr::ParseEepromRangeReply(MakeRangeReply("EE:012000ff;"), 0x0120, 2, values));
+    CHECK(ewr::ctrl::ParseRangeReadReply(MakeRangeReply("EE:012000ff;"), 0x0120, 2, values));
     CHECK((values == std::vector<uint8_t>{ 0x00, 0xFF }));
 
     // Action echo.
-    CHECK(ewr::ParseEepromRangeReply(MakeRangeReply("||:51:0102;"), 0x40, 2, values));
+    CHECK(ewr::ctrl::ParseRangeReadReply(MakeRangeReply("||:51:0102;"), 0x40, 2, values));
     CHECK((values == std::vector<uint8_t>{ 0x01, 0x02 }));
 
     // Anything else is not values: a refusal, a short or long run, another
     // address, a non-hex digit, a missing terminator.
-    CHECK(!ewr::ParseEepromRangeReply(MakeRangeReply("||:51:NA;"), 0x40, 2, values));
-    CHECK(!ewr::ParseEepromRangeReply(MakeRangeReply("EE:0C1234;"), 0x0C, 3, values));
-    CHECK(!ewr::ParseEepromRangeReply(MakeRangeReply("EE:0C12345678;"), 0x0C, 3, values));
-    CHECK(!ewr::ParseEepromRangeReply(MakeRangeReply("EE:0D1234AB;"), 0x0C, 3, values));
-    CHECK(!ewr::ParseEepromRangeReply(MakeRangeReply("EE:0C12G4AB;"), 0x0C, 3, values));
-    CHECK(!ewr::ParseEepromRangeReply(MakeRangeReply("EE:0C1234AB"), 0x0C, 3, values));
-    CHECK(!ewr::ParseEepromRangeReply(MakeRangeReply("EE:0C;"), 0x0C, 0, values));
+    CHECK(!ewr::ctrl::ParseRangeReadReply(MakeRangeReply("||:51:NA;"), 0x40, 2, values));
+    CHECK(!ewr::ctrl::ParseRangeReadReply(MakeRangeReply("EE:0C1234;"), 0x0C, 3, values));
+    CHECK(!ewr::ctrl::ParseRangeReadReply(MakeRangeReply("EE:0C12345678;"), 0x0C, 3, values));
+    CHECK(!ewr::ctrl::ParseRangeReadReply(MakeRangeReply("EE:0D1234AB;"), 0x0C, 3, values));
+    CHECK(!ewr::ctrl::ParseRangeReadReply(MakeRangeReply("EE:0C12G4AB;"), 0x0C, 3, values));
+    CHECK(!ewr::ctrl::ParseRangeReadReply(MakeRangeReply("EE:0C1234AB"), 0x0C, 3, values));
+    CHECK(!ewr::ctrl::ParseRangeReadReply(MakeRangeReply("EE:0C;"), 0x0C, 0, values));
     CHECK(values.empty());
 }
 
@@ -9454,9 +9456,9 @@ void test_database_maintenance_facts()
 {
     std::cout << "[TEST] test_database_maintenance_facts" << std::endl;
 
-    ewr::UniversalGenerator generator;
-    CHECK(generator.LoadDatabase("database.json"));
-    const std::vector<ewr::DbPrinterModel> models = generator.GetAvailableModels();
+    ewr::Database generator;
+    CHECK(generator.Load("database.json"));
+    const std::vector<ewr::DbPrinterModel> models = generator.Models();
     CHECK(models.size() >= 1450); // a malformed new key must never drop a model
 
     size_t withCleaning = 0;
@@ -9736,7 +9738,7 @@ void test_maintenance_factory_clean_runs_once_and_is_watched()
     CHECK(out.route == "factory" && confirmedRoute == "factory");
     CHECK(out.reply == "||:84:OK;");
     CHECK(gw.commands.size() == 1);
-    CHECK(gw.commands[0] == ewr::UniversalGenerator::GenerateFactoryPacket(model.rkey, 0x84, { 0x02 }));
+    CHECK(gw.commands[0] == ewr::ctrl::FactoryPacket(model.rkey, 0x84, { 0x02 }));
     CHECK(gw.jobs.empty());
     CHECK(progress == 3);
     CHECK(out.after.available); // the pads are read again for the delta
@@ -9840,15 +9842,15 @@ void test_query_path_refuses_what_is_not_a_read()
 {
     std::cout << "[TEST] test_query_path_refuses_what_is_not_a_read" << std::endl;
 
-    using G = ewr::UniversalGenerator;
-    CHECK(ewr::IsReadOnlyQueryPacket(G::GenerateStatusQueryPacket()));
-    CHECK(ewr::IsReadOnlyQueryPacket(G::GenerateReadPacket(0x3B10, 0x0C, 1)));
-    CHECK(ewr::IsReadOnlyQueryPacket(G::GenerateRangeReadPacket(0x3B10, 0x0C, 8, 1)));
-    CHECK(!ewr::IsReadOnlyQueryPacket(G::GenerateWritePacket(0x3B10, 0x0C, 0, "McLaren", 1)));
-    CHECK(!ewr::IsReadOnlyQueryPacket(G::GenerateFactoryPacket(0x3B10, 0x84, { 0x02 })));
-    CHECK(!ewr::IsReadOnlyQueryPacket(G::GenerateFactoryPacket(0x3B10, 0x21, {})));
-    CHECK(!ewr::IsReadOnlyQueryPacket({ 0x02, 0x02, 0x00, 0x0B, 0x00, 0x00, 'f', 'l', 0x01, 0x00, 0x01 }));
-    CHECK(!ewr::IsReadOnlyQueryPacket({}));
+    namespace G = ewr::ctrl;
+    CHECK(ewr::ctrl::IsReadOnlyQuery(G::StatusQueryPacket()));
+    CHECK(ewr::ctrl::IsReadOnlyQuery(G::ReadPacket(0x3B10, 0x0C, 1)));
+    CHECK(ewr::ctrl::IsReadOnlyQuery(G::RangeReadPacket(0x3B10, 0x0C, 8, 1)));
+    CHECK(!ewr::ctrl::IsReadOnlyQuery(G::WritePacket(0x3B10, 0x0C, 0, "McLaren", 1)));
+    CHECK(!ewr::ctrl::IsReadOnlyQuery(G::FactoryPacket(0x3B10, 0x84, { 0x02 })));
+    CHECK(!ewr::ctrl::IsReadOnlyQuery(G::FactoryPacket(0x3B10, 0x21, {})));
+    CHECK(!ewr::ctrl::IsReadOnlyQuery({ 0x02, 0x02, 0x00, 0x0B, 0x00, 0x00, 'f', 'l', 0x01, 0x00, 0x01 }));
+    CHECK(!ewr::ctrl::IsReadOnlyQuery({}));
 }
 
 // JIG models live under "keyless_models": a pre-1.6 loader, which reads
@@ -9882,10 +9884,10 @@ void test_database_keeps_keyless_models_from_old_loaders()
     }
     CHECK(keyless == 14);
 
-    ewr::UniversalGenerator generator;
-    CHECK(generator.LoadDatabase("database.json"));
+    ewr::Database generator;
+    CHECK(generator.Load("database.json"));
     size_t jig = 0;
-    for (const auto& model : generator.GetAvailableModels())
+    for (const auto& model : generator.Models())
         jig += model.jig ? 1 : 0;
     CHECK(jig == keyless);
 }
@@ -10094,7 +10096,7 @@ void test_snmp_runs_a_command_once_and_queries_refuse_it()
 {
     std::cout << "[TEST] test_snmp_runs_a_command_once_and_queries_refuse_it" << std::endl;
 
-    const std::vector<unsigned char> clean = ewr::UniversalGenerator::GenerateFactoryPacket(0x0797, 0x84, { 0x02 });
+    const std::vector<unsigned char> clean = ewr::ctrl::FactoryPacket(0x0797, 0x84, { 0x02 });
     const ewr::snmp::Oid oid = ewr::SnmpControlOid(snmp_test::CommandOf(clean));
 
     auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
@@ -10111,7 +10113,7 @@ void test_snmp_runs_a_command_once_and_queries_refuse_it()
     const ewr::CommandRunResult run = gateway.RunCommand(clean, ewr::DefaultQueryOptions());
     CHECK(run.supported && run.sent && run.deviceFound);
     CHECK(script->requested.size() == 1);
-    const std::vector<unsigned char> payload = ewr::ExtractD4Payload(run.reply);
+    const std::vector<unsigned char> payload = ewr::d4::ExtractPayload(run.reply);
     CHECK(std::string(payload.begin(), payload.end()).find("||:84:OK;") != std::string::npos);
 }
 

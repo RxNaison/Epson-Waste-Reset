@@ -1,4 +1,6 @@
 #include "ewr/info.h"
+#include "ewr/ctrl.h"
+#include "ewr/d4session.h"
 
 #include <algorithm>
 
@@ -40,9 +42,9 @@ namespace ewr {
 
     } // namespace
 
-    std::string ParseVersionReply(const std::vector<unsigned char>& raw)
+    std::string ctrl::ParseVersionReply(const std::vector<unsigned char>& raw)
     {
-        const std::vector<unsigned char> payload = ExtractD4Payload(raw);
+        const std::vector<unsigned char> payload = d4::ExtractPayload(raw);
         const std::string text(payload.begin(), payload.end());
 
         const size_t vi = text.find("vi:");
@@ -76,18 +78,18 @@ namespace ewr {
 
         // Status and firmware in one session: neither needs a key.
         std::vector<std::vector<unsigned char>> queries;
-        queries.push_back(UniversalGenerator::GenerateStatusQueryPacket());
-        queries.push_back(UniversalGenerator::GenerateControlPacket('v', 'i', { 0x00 }));
+        queries.push_back(ctrl::StatusQueryPacket());
+        queries.push_back(ctrl::ControlPacket('v', 'i', { 0x00 }));
 
-        const QueryRunResult run = gateway.RunQuery(UniversalGenerator::GenerateHandshake(), queries, options);
+        const QueryRunResult run = gateway.RunQuery(d4::Handshake(), queries, options);
         if (!run.deviceFound || run.query.handshakeFailed || run.query.replies.empty()
             || run.query.replies[0].empty())
             return info;
 
         info.available = true;
-        info.status = ParseStatusReply(run.query.replies[0]);
+        info.status = ctrl::ParseStatusReply(run.query.replies[0]);
         if (run.query.replies.size() > 1)
-            info.firmware = ParseVersionReply(run.query.replies[1]);
+            info.firmware = ctrl::ParseVersionReply(run.query.replies[1]);
 
         if (!info.status.serial.empty())
         {

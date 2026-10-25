@@ -1,4 +1,7 @@
 #include "ewr/snmp_gateway.h"
+#include "ewr/ctrl.h"
+#include "ewr/executor.h"
+#include "ewr/format.h"
 #include "ewr/d4session.h"
 #include "ewr/deviceid.h"
 #include "ewr/paths.h"
@@ -33,7 +36,7 @@ namespace ewr {
             const std::size_t total = kHeader + body;
 
             std::vector<unsigned char> packet = {
-                EpsonD4::SOCKET_EPSON_CTRL, EpsonD4::SOCKET_EPSON_CTRL,
+                d4::SOCKET_EPSON_CTRL, d4::SOCKET_EPSON_CTRL,
                 static_cast<unsigned char>((total >> 8) & 0xFF),
                 static_cast<unsigned char>(total & 0xFF),
                 0x00, 0x01
@@ -410,7 +413,7 @@ namespace ewr {
 
                 value = response.value;
                 Trace("[IN]  " + std::to_string(value.size()) + " bytes:\n"
-                      + HexDumpCapped(value.data(), value.size(), kTraceDumpCapBytes) + "\n");
+                      + format::HexDumpCapped(value.data(), value.size(), format::kTraceDumpCapBytes) + "\n");
                 return true;
             }
         }
@@ -453,11 +456,11 @@ namespace ewr {
         StartTrace();
         Trace("==================================================\n"
               "BEGIN COMMAND (sent once)\n"
-              + DescribeTraceContext(options.trace)
+              + exec::DescribeTraceContext(options.trace)
               + "==================================================\n\n");
 
         std::vector<unsigned char> payload;
-        if (!ExtractDataPayload(command, payload))
+        if (!d4::ExtractDataPayload(command, payload))
         {
             out.error = "The command is not an EPSON-CTRL packet.";
             Trace("[!] " + out.error + "\n");
@@ -494,10 +497,10 @@ namespace ewr {
         StartTrace();
         Trace("==================================================\n"
               "BEGIN PRINT DATA (TCP " + std::to_string(snmp::kRawPrintPort) + ")\n"
-              + DescribeTraceContext(options.trace)
+              + exec::DescribeTraceContext(options.trace)
               + "Bytes:         " + std::to_string(data.size()) + "\n"
               "==================================================\n"
-              + HexDump(data.data(), data.size()) + "\n");
+              + format::HexDump(data.data(), data.size()) + "\n");
 
         std::string error;
         out.sent = snmp::SendRawTcp(m_host, snmp::kRawPrintPort, data, 3000, error);
@@ -525,7 +528,7 @@ namespace ewr {
 
         Trace("==================================================\n"
               "BEGIN QUERY SESSION (read-only)\n"
-              + DescribeTraceContext(options.trace)
+              + exec::DescribeTraceContext(options.trace)
               + "Queries:       " + std::to_string(queries.size()) + "\n"
               "==================================================\n\n");
 
@@ -535,11 +538,11 @@ namespace ewr {
         for (std::size_t i = 0; i < queries.size(); ++i)
         {
             std::vector<unsigned char> command;
-            if (!ExtractDataPayload(queries[i], command))
+            if (!d4::ExtractDataPayload(queries[i], command))
                 continue;
 
             // The query path stays read-only, whatever it is handed.
-            if (!IsReadOnlyQueryPacket(queries[i]))
+            if (!ctrl::IsReadOnlyQuery(queries[i]))
             {
                 Trace("[!] Query " + std::to_string(i + 1) + " is not a read - not sent.\n");
                 continue;
@@ -633,8 +636,8 @@ namespace ewr {
 
         // The handshake and credit packets of the sequence belong to a D4
         // channel that does not exist here; the writes are all that travels.
-        std::vector<CtrlCommand> writes;
-        for (CtrlCommand& command : ExtractCtrlCommands(sequence))
+        std::vector<ctrl::Command> writes;
+        for (ctrl::Command& command : ctrl::ExtractCommands(sequence))
         {
             if (command.isWrite)
                 writes.push_back(std::move(command));
@@ -642,7 +645,7 @@ namespace ewr {
 
         Trace("==================================================\n"
               "BEGIN WRITE SESSION\n"
-              + DescribeTraceContext(options.trace)
+              + exec::DescribeTraceContext(options.trace)
               + "Writes:        " + std::to_string(writes.size()) + "\n"
               "==================================================\n\n");
 
@@ -692,7 +695,7 @@ namespace ewr {
 
         // A GET whose OID carries the command. Silence before anything ever
         // answered means nothing at this address will.
-        const CtrlExchange exchange = [this](const std::vector<unsigned char>& command,
+        const ctrl::Exchange exchange = [this](const std::vector<unsigned char>& command,
                                              std::vector<unsigned char>& reply, std::string& error)
         {
             if (Get(SnmpControlOid(command), reply) || m_answered)
@@ -702,7 +705,7 @@ namespace ewr {
             return false;
         };
 
-        RunCtrlCommands(exchange, writes, reporter, options, result);
+        ctrl::RunCommands(exchange, writes, reporter, options, result);
         return finish();
     }
 

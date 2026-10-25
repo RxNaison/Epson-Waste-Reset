@@ -1,6 +1,6 @@
 #pragma once
 #include "ewr/backup.h"
-#include "ewr/generator.h"
+#include "ewr/database.h"
 
 #include <cstdint>
 #include <string>

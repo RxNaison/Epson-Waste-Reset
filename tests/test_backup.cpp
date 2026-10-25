@@ -512,7 +512,7 @@ void test_session_restore_gates()
         handlers.onBlocker = [](const ewr::Blocker&) { return true; };
 
         const ewr::ResetOutcome out = session.Restore(plan, handlers);
-        CHECK(out.phase == ewr::ResetPhase::Aborted);
+        CHECK(out.phase == ewr::ResetPhase::NotStarted);
         CHECK(gw.resetCalls == 0);
     }
 

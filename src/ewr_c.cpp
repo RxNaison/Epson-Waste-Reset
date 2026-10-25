@@ -340,6 +340,7 @@ namespace {
     {
         switch (outcome.phase)
         {
+            case ewr::ResetPhase::NotStarted:     return EWR_ERR_READ_FAILED;
             case ewr::ResetPhase::Aborted:        return EWR_ERR_BLOCKED;
             case ewr::ResetPhase::DeviceNotFound: return EWR_ERR_DEVICE_NOT_FOUND;
             case ewr::ResetPhase::NotSupported:   return EWR_ERR_NOT_SUPPORTED;
@@ -852,8 +853,9 @@ int ewr_list_models(ewr_session* session, char** out_json)
             nlohmann::json entry;
             entry["name"] = model.name;
             entry["aliases"] = model.aliases;
-            entry["resettable"] = !model.GetAllAddresses().empty();
-            entry["has_ink_reset"] = model.HasInkReset();
+            // A JIG model keeps its pad groups for reading; no reset can use them.
+            entry["resettable"] = !model.jig && model.HasResettableCounters();
+            entry["has_ink_reset"] = !model.jig && model.HasInkReset();
             models.push_back(std::move(entry));
         }
 
@@ -873,6 +875,13 @@ int ewr_plan(ewr_session* session, const char* model, int ink, char** out_json)
         if (ink && !target.HasInkReset())
         {
             session->Fail(target.name + " has no cartridge ink map in the database.");
+            return EWR_ERR_NOT_SUPPORTED;
+        }
+
+        // A plan for a reset ewr_reset refuses would read as one it can run.
+        if (target.jig)
+        {
+            session->Fail(target.name + " cannot be reset yet: no JIG write command is known.");
             return EWR_ERR_NOT_SUPPORTED;
         }
 
@@ -937,6 +946,13 @@ int ewr_dump(ewr_session* session, const char* model, char** out_json)
 
         if (session->RefuseOverNetwork("An EEPROM dump"))
             return EWR_ERR_NOT_SUPPORTED;
+
+        // As --dump: a dump walks 0x00-0xFF, and JIG memory is only known from 0x100.
+        if (target.jig)
+        {
+            session->Fail("An EEPROM dump does not support JIG-mode printers yet.");
+            return EWR_ERR_NOT_SUPPORTED;
+        }
 
         const std::vector<uint16_t> addresses = ewr::restore::DumpAddresses(target);
 

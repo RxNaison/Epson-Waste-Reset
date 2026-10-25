@@ -281,11 +281,13 @@ namespace ewr::cli {
             std::cout << "    which bytes hold the waste counter, and it will not guess." << std::endl;
             std::cout << "\n    To find them, run:" << std::endl;
             std::cout << "        ewr --model \"" << selected.smartModel.name << "\" --find-addresses" << std::endl;
-            std::cout << "\n    EWR will read the EEPROM three times and ask you to run a head cleaning" << std::endl;
-            std::cout << "    between reads. Nothing is written. The bytes that rise every time are the" << std::endl;
+            std::cout << "\n    EWR will read the EEPROM three times with a head cleaning between reads." << std::endl;
+            std::cout << "    No EEPROM byte is written. The bytes that rise every time are the" << std::endl;
             std::cout << "    counters, and the result is saved for a pull request." << std::endl;
             std::cout << "================================================================================" << std::endl;
-            return FinishRun(0);
+            // Nothing was reset, so the run did not do what it was asked.
+            JsonFail("not_supported", selected.smartModel.name + " has no reset addresses in the database yet.");
+            return FinishRun(1);
         }
 
         // ---- Cartridge ink reset choice: --cartridge names it outright, models
@@ -579,6 +581,8 @@ namespace ewr::cli {
             // reasons for the same thing.
             if (outcome.phase == ewr::ResetPhase::Aborted)
                 JsonFail("blocked", outcome.error);
+            else if (outcome.phase == ewr::ResetPhase::NotStarted)
+                JsonFail("read_failed", outcome.error);
             else if (outcome.phase == ewr::ResetPhase::DeviceNotFound)
                 JsonFail("device_not_found", outcome.error);
             else if (outcome.phase == ewr::ResetPhase::NotSupported)
@@ -591,11 +595,14 @@ namespace ewr::cli {
 
         // The session already narrated why it stopped; skip the FAILED banner.
         if (outcome.phase == ewr::ResetPhase::Aborted
+            || outcome.phase == ewr::ResetPhase::NotStarted
             || outcome.phase == ewr::ResetPhase::DeviceNotFound
             || outcome.phase == ewr::ResetPhase::NotSupported)
         {
             if (outcome.phase == ewr::ResetPhase::Aborted)
                 JsonFail("blocked", "The run stopped at a gate; nothing was written.");
+            else if (outcome.phase == ewr::ResetPhase::NotStarted)
+                JsonFail("read_failed", "The printer did not answer the preflight read; nothing was written.");
             else if (outcome.phase == ewr::ResetPhase::NotSupported)
                 JsonFail("not_supported", outcome.error);
             else

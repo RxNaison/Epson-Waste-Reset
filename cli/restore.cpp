@@ -373,7 +373,8 @@ namespace ewr::cli {
             else
                 JsonFail("write_failed", outcome.error);
 
-            if (outcome.phase != ewr::ResetPhase::WriteFailed)
+            // Done here is a read-back that disagreed: as failed as a write.
+            if (outcome.phase != ewr::ResetPhase::WriteFailed && outcome.phase != ewr::ResetPhase::Done)
                 return FinishRun(1);
         }
 

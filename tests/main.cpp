@@ -209,6 +209,9 @@ void test_run_lock_hands_over_to_the_network();
 void test_snmp_locked_eeprom_stops_before_any_write();
 void test_snmp_runs_a_command_once_and_queries_refuse_it();
 void test_raw_tcp_delivers_print_data();
+void test_read_back_that_disagrees_is_no_success();
+void test_reset_refuses_a_model_with_nothing_to_write();
+void test_c_abi_refuses_what_a_jig_model_cannot_do();
 
 int main()
 {
@@ -424,6 +427,9 @@ int main()
     test_snmp_locked_eeprom_stops_before_any_write();
     test_snmp_runs_a_command_once_and_queries_refuse_it();
     test_raw_tcp_delivers_print_data();
+    test_read_back_that_disagrees_is_no_success();
+    test_reset_refuses_a_model_with_nothing_to_write();
+    test_c_abi_refuses_what_a_jig_model_cannot_do();
 
     std::cout << "\n----------------------------------------" << std::endl;
     if (g_failures == 0)

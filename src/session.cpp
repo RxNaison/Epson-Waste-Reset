@@ -505,6 +505,19 @@ namespace ewr {
 
     ResetOutcome Session::Reset(const ResetHandlers& handlers)
     {
+        ResetOutcome out;
+
+        // An entry with a read key and nothing to write would otherwise ask its
+        // host to confirm a reset, open a session and send no write at all.
+        if (!m_model.HasResettableCounters())
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Database, "session.reset_unmapped",
+                           "[ERROR] " + m_model.name + " has no reset addresses in the database yet. Nothing was sent.");
+            out.phase = ResetPhase::NotSupported;
+            out.error = m_model.name + " has no reset addresses in the database yet.";
+            return out;
+        }
+
         // ---- Plan: build the write sequence from the database model.
         m_reporter.Log(log::Level::Info, log::Stage::Database, "session.generating",
                        "[*] Generating safe Smart Protocol R/W sequence for " + m_model.name + "...");
@@ -518,6 +531,16 @@ namespace ewr {
         {
             if (addr <= m_model.mem_high && m_model.CanEncodeWriteAddress(addr))
                 flow.writeAddresses.push_back(addr);
+        }
+
+        if (flow.writeAddresses.empty())
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Database, "session.reset_unwritable",
+                           "[ERROR] None of " + m_model.name + "'s reset addresses can be written: they lie beyond its"
+                           " memory or its address field. Nothing was sent.");
+            out.phase = ResetPhase::NotSupported;
+            out.error = "None of the model's reset addresses can be encoded for writing.";
+            return out;
         }
 
         flow.verifyAddresses = m_model.GetAllAddresses();
@@ -538,6 +561,7 @@ namespace ewr {
         {
             m_reporter.Log(log::Level::Error, log::Stage::Database, "session.ink_unmapped",
                            "[ERROR] " + m_model.name + " has no cartridge ink map in the database.");
+            out.phase = ResetPhase::NotSupported;
             out.error = "No cartridge ink map for this model.";
             return out;
         }
@@ -560,6 +584,7 @@ namespace ewr {
         {
             m_reporter.Log(log::Level::Error, log::Stage::Database, "session.ink_unwritable",
                            "[ERROR] None of the ink counter addresses are writable on " + m_model.name + ".");
+            out.phase = ResetPhase::NotSupported;
             out.error = "The model's ink counter addresses cannot be encoded for writing.";
             return out;
         }
@@ -914,6 +939,7 @@ namespace ewr {
             m_reporter.Log(log::Level::Error, log::Stage::Write, "session.jig_reset_unsupported",
                            "[!] " + m_model.name + " is read in JIG mode, and EWR cannot reset it yet:"
                            " its write command is not known. Nothing was sent.");
+            out.phase = ResetPhase::NotSupported;
             out.error = m_model.name + " cannot be reset yet: no JIG write command is known.";
             return out;
         }
@@ -977,7 +1003,8 @@ namespace ewr {
                            "[ERROR] The printer did not answer the read-only preflight, and this reset\n"
                            "        does not run blind: no preflight means no error check and no\n"
                            "        read-back verification. Nothing was written.");
-            out.phase = ResetPhase::Aborted;
+            // Not a gate anyone declined: the read itself failed.
+            out.phase = ResetPhase::NotStarted;
             out.error = "Preflight unavailable; this reset does not run without one.";
             return out;
         }
@@ -1146,6 +1173,16 @@ namespace ewr {
                 m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_unavailable",
                                "[i] Read-back verification unavailable (the printer did not answer the read queries).");
             }
+        }
+
+        // Acknowledged is not applied. A printer can answer ':42:OK;' to every
+        // write and keep its old values (#18, #63); the read-back is what says
+        // so, and a run it contradicts did not do what it was asked.
+        if (out.verifyMismatches > 0)
+        {
+            out.success = false;
+            out.error = "The printer acknowledged the writes, but " + std::to_string(out.verifyMismatches) + " " +
+                        flow.counterNoun + "(s) read back without their " + flow.expectedValueNoun + ".";
         }
 
         out.phase = ResetPhase::Done;

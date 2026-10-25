@@ -347,14 +347,16 @@ void test_session_refuses_to_reset_a_jig_model()
     handlers.onBlocker = [](const ewr::Blocker&) { return true; };
     handlers.confirmWrite = [](const ewr::StateSnapshot&) { return true; };
 
+    // NotSupported, not NotStarted: a host maps the phase to its answer, and
+    // this one is "cannot", which nothing about the printer will change.
     const ewr::ResetOutcome outcome = session.Reset(handlers);
-    CHECK(outcome.phase == ewr::ResetPhase::NotStarted);
+    CHECK(outcome.phase == ewr::ResetPhase::NotSupported);
     CHECK(!outcome.error.empty());
     CHECK(gw.resets == 0);
     CHECK(gw.queryOptions.empty());
 
     const ewr::ResetOutcome ink = session.ResetInk(handlers);
-    CHECK(ink.phase == ewr::ResetPhase::NotStarted);
+    CHECK(ink.phase == ewr::ResetPhase::NotSupported);
     CHECK(gw.resets == 0);
 
     // An ordinary model is unaffected.
@@ -675,7 +677,7 @@ void test_session_ink_reset()
         ewr::Session session(plain, gw, reporter);
 
         const ewr::ResetOutcome out = session.ResetInk();
-        CHECK(out.phase == ewr::ResetPhase::NotStarted);
+        CHECK(out.phase == ewr::ResetPhase::NotSupported);
         CHECK(!out.success);
         CHECK(!out.error.empty());
         CHECK(gw.queryCalls == 0);
@@ -773,7 +775,7 @@ void test_snapshot_requires_a_reply()
     ewr::Session inkSession(inkModel, silentInk, reporter);
 
     const ewr::ResetOutcome out = inkSession.ResetInk();
-    CHECK(out.phase == ewr::ResetPhase::Aborted);
+    CHECK(out.phase == ewr::ResetPhase::NotStarted);
     CHECK(!out.success);
     CHECK(silentInk.resetCalls == 0); // nothing was written
 }
@@ -959,8 +961,9 @@ void test_ink_reset_requires_preflight()
     ewr::log::Reporter reporter;
     ewr::Session session(model, gw, reporter);
 
+    // A read that failed, not a gate anyone declined.
     const ewr::ResetOutcome out = session.ResetInk();
-    CHECK(out.phase == ewr::ResetPhase::Aborted);
+    CHECK(out.phase == ewr::ResetPhase::NotStarted);
     CHECK(!out.success);
     CHECK(!out.error.empty());
     CHECK(gw.queryCalls == 1);  // the preflight attempt
@@ -1073,4 +1076,90 @@ void test_session_range_reads()
         CHECK(ordered);
         CHECK(gw.rangePackets == 1 + 2);
     }
+}
+
+// An ':42:OK;' is the printer taking the command, not keeping the value: the
+// ET-3950 in #63 acknowledged every write and changed nothing, the ET-2800 in
+// #18 before it. The read-back is what tells, and a run it contradicts did not
+// do what it was asked.
+void test_read_back_that_disagrees_is_no_success()
+{
+    std::cout << "[TEST] test_read_back_that_disagrees_is_no_success" << std::endl;
+
+    const ewr::DbPrinterModel model = MakeSessionModel();
+    ewr::log::Reporter reporter;
+
+    ewr::ResetHandlers handlers;
+    handlers.onBlocker = [](const ewr::Blocker&) { return true; }; // past the fixture's INK OUT
+
+    // Every write acknowledged; 0x0C still reads its old value afterwards.
+    {
+        FakeGateway gw = MakeSessionGateway();
+        gw.queryResult.query.replies = { MakeSt2Reply(), MakeEepromReadReplyEE(0x0C, 0x12),
+                                         MakeEepromReadReplyEE(0x0D, 0x00) };
+        gw.resetResult.exec.writesTotal = 2;
+        gw.resetResult.exec.writesVerified = 2;
+        ewr::Session session(model, gw, reporter);
+
+        const ewr::ResetOutcome out = session.Reset(handlers);
+        CHECK(gw.resetCalls == 1);
+        CHECK(out.phase == ewr::ResetPhase::Done); // the writes did go out
+        CHECK(out.verificationRan);
+        CHECK(out.verifyMismatches == 1);
+        CHECK(!out.success);
+        CHECK(!out.error.empty());
+        CHECK(ewr::json::ResetData(model, false, out)["phase"] == "done");
+    }
+
+    // A byte that did not answer the read-back is unknown, not contradicted.
+    {
+        FakeGateway gw = MakeSessionGateway();
+        gw.queryResult.query.replies = { MakeSt2Reply(), MakeEepromReadReplyEE(0x0C, 0x00), {} };
+        ewr::Session session(model, gw, reporter);
+
+        const ewr::ResetOutcome out = session.Reset(handlers);
+        CHECK(out.verificationRan);
+        CHECK(out.verifyMismatches == 0 && out.verifyUnread == 1);
+        CHECK(out.success);
+    }
+}
+
+// An entry with a read key and nothing to write stops before any I/O. It used
+// to ask its host to confirm, open a session, send no write and fail.
+void test_reset_refuses_a_model_with_nothing_to_write()
+{
+    std::cout << "[TEST] test_reset_refuses_a_model_with_nothing_to_write" << std::endl;
+
+    ewr::log::Reporter reporter;
+    bool asked = false;
+    ewr::ResetHandlers handlers;
+    handlers.onBlocker = [&](const ewr::Blocker&) { asked = true; return true; };
+    handlers.confirmWrite = [&](const ewr::StateSnapshot&) { asked = true; return true; };
+
+    // No pad group with an address: the 113 entries waiting for --find-addresses.
+    {
+        ewr::DbPrinterModel stub = MakeSessionModel();
+        stub.pad_groups.clear();
+
+        FakeGateway gw = MakeSessionGateway();
+        ewr::Session session(stub, gw, reporter);
+        const ewr::ResetOutcome out = session.Reset(handlers);
+        CHECK(out.phase == ewr::ResetPhase::NotSupported);
+        CHECK(!out.success && !out.error.empty());
+        CHECK(gw.queryCalls == 0 && gw.resetCalls == 0);
+    }
+
+    // Addresses, but none a 1-byte address field can name.
+    {
+        ewr::DbPrinterModel unreachable = MakeSessionModel();
+        unreachable.pad_groups[0].addresses = { 0x120, 0x121 };
+
+        FakeGateway gw = MakeSessionGateway();
+        ewr::Session session(unreachable, gw, reporter);
+        const ewr::ResetOutcome out = session.Reset(handlers);
+        CHECK(out.phase == ewr::ResetPhase::NotSupported);
+        CHECK(gw.queryCalls == 0 && gw.resetCalls == 0);
+    }
+
+    CHECK(!asked);
 }

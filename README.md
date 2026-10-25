@@ -114,7 +114,8 @@ menu default. What it deliberately does **not** do:
   falls back to picking an entry from a list.
 
 Exit status is `0` when the reset completed and verified, `1` when it was stopped or failed,
-`2` for a bad command line.
+`2` for a bad command line. Writes the printer acknowledged but did not keep are a failure:
+the read-back shows the old values, and the run says so instead of claiming success.
 
 Two EWR runs must not drive one printer: they share the USB handle and take each other's
 replies, and the run that loses one may be the one mid-write. A second run stops with a

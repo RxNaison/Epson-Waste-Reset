@@ -53,6 +53,16 @@ The point of this API is that a newer EWR does not mean a rewrite.
 - `ewr_dump` fills its JSON *and* returns `EWR_ERR_INCOMPLETE_DUMP` when any
   byte went unread. The bytes are yours either way; the code says they are not
   a backup.
+- **Acknowledged is not applied.** A printer can answer every write with
+  `:42:OK;` and keep its old values. When the read-back after a reset or a
+  restore shows any written byte with another value, the call returns
+  `EWR_ERR_WRITE_UNVERIFIED` (`phase` `done`, `verification.mismatches` above
+  0), not `EWR_OK`.
+- **What EWR cannot reset, it refuses before any I/O.** A model with no reset
+  addresses yet, or one read in JIG mode, answers `EWR_ERR_NOT_SUPPORTED` from
+  `ewr_reset`, `ewr_plan` and (JIG) `ewr_dump`, and `ewr_list_models` gives it
+  `"resettable": false`. A reset that needs its preflight read - the ink reset,
+  a restore - and finds the printer silent answers `EWR_ERR_READ_FAILED`.
 
 ## A printer on the network (ABI 2)
 

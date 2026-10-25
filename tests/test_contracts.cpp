@@ -788,3 +788,47 @@ void test_c_abi_event_levels_use_the_header_numbers()
     CHECK((levels == std::vector<int>{ EWR_LEVEL_INFO, EWR_LEVEL_WARNING, EWR_LEVEL_ERROR }));
     ewr_session_close(session);
 }
+
+// What the CLI refuses for a JIG model, the C ABI refuses too: no plan for a
+// reset ewr_reset will not run, no dump walking memory JIG mode was never seen
+// to serve, and no "resettable" in the model list. None of it touches USB.
+void test_c_abi_refuses_what_a_jig_model_cannot_do()
+{
+    std::cout << "[TEST] test_c_abi_refuses_what_a_jig_model_cannot_do" << std::endl;
+
+    ewr_session* session = nullptr;
+    if (ewr_session_open("database.json", &session) == EWR_ERR_ANOTHER_RUN)
+    {
+        std::cout << "  [skip] another EWR run holds the printer" << std::endl;
+        ewr_session_close(session);
+        return;
+    }
+
+    char* json = nullptr;
+    CHECK(ewr_list_models(session, &json) == EWR_OK);
+    const nlohmann::json models = nlohmann::json::parse(json);
+    ewr_string_free(json);
+
+    int seen = 0;
+    for (const auto& entry : models["models"])
+    {
+        if (entry["name"] == "SX110")
+        {
+            ++seen;
+            CHECK(entry["resettable"] == false);
+            CHECK(entry["has_ink_reset"] == false);
+        }
+        if (entry["name"] == "R220")
+            CHECK(entry["resettable"] == true);
+    }
+    CHECK(seen == 1);
+
+    json = nullptr;
+    CHECK(ewr_plan(session, "SX110", 0, &json) == EWR_ERR_NOT_SUPPORTED);
+    CHECK(json == nullptr);
+    CHECK(ewr_dump(session, "SX110", &json) == EWR_ERR_NOT_SUPPORTED);
+    CHECK(json == nullptr);
+    CHECK(!std::string(ewr_session_last_error(session)).empty());
+
+    ewr_session_close(session);
+}

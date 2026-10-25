@@ -24,12 +24,12 @@ namespace ewr {
 
     enum class ResetPhase
     {
-        NotStarted,     // nothing was attempted yet
+        NotStarted,     // nothing was attempted: the preflight a flow requires did not answer
         Aborted,        // a blocker was declined - nothing was written
         DeviceNotFound, // no Epson interface answered at write time
         WriteFailed,    // the write session ran and did not succeed
         Done,           // the reset writes were acknowledged
-        NotSupported,   // this way to the printer cannot reach its EEPROM - nothing was written
+        NotSupported,   // EWR cannot reset this model, or not this way to the printer - nothing was written
     };
 
     // A gate that objected and was told to go ahead: by --force-yes, a typed
@@ -46,6 +46,8 @@ namespace ewr {
     {
         ResetPhase phase = ResetPhase::NotStarted;
 
+        // The writes were acknowledged and nothing read back disagreed. A
+        // read-back mismatch leaves phase Done and this false.
         bool success = false;
         // What the write session acknowledged. Both stay 0 when it never ran.
         size_t writesVerified = 0;

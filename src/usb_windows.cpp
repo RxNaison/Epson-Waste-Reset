@@ -688,7 +688,7 @@ namespace ewr {
                 return "";
             }
 
-            const std::string id = ExtractDeviceIdString(buffer, bytesReturned);
+            const std::string id = deviceid::ExtractString(buffer, bytesReturned);
             if (id.empty())
                 trace << "[!] Device ID reply was empty on " << DescribeCandidate(cand) << ".\n";
 

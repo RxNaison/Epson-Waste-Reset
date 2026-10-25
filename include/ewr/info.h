@@ -38,9 +38,13 @@ namespace ewr {
         std::vector<InfoFatal> fatal;
     };
 
-    // `model` may be null: then only the status and the firmware are read.
-    PrinterInfo ReadPrinterInfo(IDeviceGateway& gateway, const DbPrinterModel* model,
-                                log::Reporter& reporter = log::Default(),
-                                const ExecutorOptions& options = DefaultQueryOptions());
-
 } // namespace ewr
+
+namespace ewr::info {
+
+    // `model` may be null: then only the status and the firmware are read.
+    PrinterInfo Read(IDeviceGateway& gateway, const DbPrinterModel* model,
+                     log::Reporter& reporter = log::Default(),
+                     const ExecutorOptions& options = ExecutorOptions::ForQueries());
+
+} // namespace ewr::info

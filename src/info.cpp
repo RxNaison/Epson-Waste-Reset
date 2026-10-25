@@ -71,7 +71,7 @@ namespace ewr {
         return version;
     }
 
-    PrinterInfo ReadPrinterInfo(IDeviceGateway& gateway, const DbPrinterModel* model,
+    PrinterInfo info::Read(IDeviceGateway& gateway, const DbPrinterModel* model,
                                 log::Reporter& reporter, const ExecutorOptions& options)
     {
         PrinterInfo info;

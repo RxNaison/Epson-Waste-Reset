@@ -3,13 +3,15 @@
 #include <string>
 #include <cctype>
 #include <filesystem>
-#include "ewr/payload.h"
-#include "ewr/ctrl.h"
 #include "ewr/paths.h"
+#include "ewr/gates.h"
+#include "ewr/format.h"
+#include "ewr/keysearch.h"
+#include "ewr/backup.h"
 #include "ewr/restore.h"
 #include "ewr/info.h"
 #include "ewr/maintenance.h"
-#include "ewr/parser.h"
+#include "ewr/replay.h"
 #include "ewr/session.h"
 #include "ewr/network.h"
 #include "ewr/usb.h"
@@ -17,10 +19,10 @@
 #include "ewr/database.h"
 #include "ewr/status.h"
 #include "ewr/updater.h"
-#include "ewr/discover.h"
+#include "ewr/discovery.h"
 #include "ewr/version.h"
 #include "ewr/log.h"
-#include "ewr/json_out.h"
+#include "ewr/json.h"
 #include "backup_store.h"
 #include "color.h"
 #include "console.h"
@@ -60,7 +62,7 @@ struct MenuOption
 {
     std::string displayName;
     bool isReplay;
-    ewr::PrinterModel replayModel;
+    ewr::replay::Capture replayModel;
     ewr::DbPrinterModel smartModel;
 };
 
@@ -116,7 +118,7 @@ namespace {
 
     NullBuffer g_nullBuffer;
     std::unique_ptr<std::ostream> g_realStdout;
-    std::unique_ptr<ewr::JsonEmitter> g_json;
+    std::unique_ptr<ewr::json::Emitter> g_json;
 
     // Filled in as the run goes; spent by the single result line.
     std::string g_jsonCommand = "unknown";
@@ -405,7 +407,7 @@ static void PrintPrinterStatus(const ewr::PrinterStatus& st)
     }
 
     std::cout << "\n----------- PRINTER STATUS -----------" << std::endl;
-    std::cout << "  State:  " << ewr::cli::Paint(ewr::DescribePrinterCondition(st), ConditionColor(st)) << std::endl;
+    std::cout << "  State:  " << ewr::cli::Paint(ewr::status::Describe(st), ConditionColor(st)) << std::endl;
 
     if (!st.serial.empty())
         std::cout << "  Serial: " << st.serial << std::endl;
@@ -473,7 +475,7 @@ static void PrintCounterSummary(const ewr::DbPrinterModel& model,
     bool printedHeader = false;
     for (const auto& spec : specs)
     {
-        const ewr::CounterReading reading = ewr::EvaluateCounter(spec, values);
+        const ewr::CounterReading reading = spec.Evaluate(values);
         if (!reading.complete)
             continue;
 
@@ -759,7 +761,7 @@ constexpr int kNoInputForPrinter = -2;
 // The network search's menu. Even a lone printer is picked, not assumed: the
 // network may hold someone else's Epson.
 static int ChooseNetworkPrinter(const std::vector<ewr::NetworkPrinter>& found,
-                                const std::vector<ewr::ModelNameEntry>& entries)
+                                const std::vector<ewr::deviceid::ModelNameEntry>& entries)
 {
     std::cout << std::endl;
     for (std::size_t i = 0; i < found.size(); ++i)
@@ -769,7 +771,7 @@ static int ChooseNetworkPrinter(const std::vector<ewr::NetworkPrinter>& found,
                   << "   " << printer.address;
 
         const std::vector<std::string> matches = printer.model.empty()
-            ? std::vector<std::string>{} : ewr::MatchModelEntries(printer.model, entries);
+            ? std::vector<std::string>{} : ewr::deviceid::MatchEntries(printer.model, entries);
         if (!matches.empty())
             std::cout << "   (database: " << matches[0] << ")";
         std::cout << std::endl;
@@ -909,7 +911,7 @@ static std::string WriteEepromDump(const ewr::DbPrinterModel& model,
     out << "# format: 2\n";
     out << "# model: " << model.name << "\n";
     out << "# ewr: " << kEwrCurrentVersion << "\n";
-    out << "# created: " << ewr::UtcTimestamp() << "\n";
+    out << "# created: " << ewr::format::UtcTimestamp() << "\n";
     if (!deviceId.empty())
         out << "# device_id: " << deviceId << "\n";
     if (!serial.empty())
@@ -939,9 +941,9 @@ static int RunReadKeySearch(ewr::IDeviceGateway& gateway,
                             const std::string& detectedMdl,
                             const std::string& detectedMatch)
 {
-    const std::vector<ewr::ReadKeyCandidate> candidates = ewr::CollectReadKeyCandidates(models);
+    const std::vector<ewr::keysearch::Candidate> candidates = ewr::keysearch::CollectCandidates(models);
 
-    ewr::ExecutorOptions options = ewr::DefaultQueryOptions();
+    ewr::ExecutorOptions options = ewr::ExecutorOptions::ForQueries();
     options.interfaceCandidate = cli.interfaceCandidate;
     options.usbSoftReset = cli.usbSoftReset;
     options.trace.printerReports = detectedMdl;
@@ -955,7 +957,7 @@ static int RunReadKeySearch(ewr::IDeviceGateway& gateway,
     std::cout << "    Read-only: only read commands are sent. This takes a few minutes." << std::endl;
 
     const bool animate = !g_json && StdoutIsTerminal();
-    const ewr::ReadKeySearch search = ewr::SearchReadKey(gateway, candidates, options,
+    const ewr::keysearch::Result search = ewr::keysearch::Search(gateway, candidates, options,
         [animate](size_t tried, size_t total)
         {
             if (animate)
@@ -965,7 +967,7 @@ static int RunReadKeySearch(ewr::IDeviceGateway& gateway,
     if (animate && !search.probes.empty())
         std::cout << std::endl;
 
-    g_jsonData = ewr::JsonKeySearchData(detectedMdl, search);
+    g_jsonData = ewr::json::KeySearchData(detectedMdl, search);
 
     if (!search.deviceFound)
     {
@@ -1001,7 +1003,7 @@ static int RunReadKeySearch(ewr::IDeviceGateway& gateway,
 
     if (found > 0)
     {
-        for (const ewr::ReadKeyProbe& probe : search.probes)
+        for (const ewr::keysearch::Probe& probe : search.probes)
         {
             if (probe.answer != ewr::ReadAnswer::Value)
                 continue;
@@ -1112,8 +1114,8 @@ static int RunInfo(const ewr::DbPrinterModel* model, ewr::IDeviceGateway& gatewa
 {
     std::cout << "\n[*] Reading what the printer says about itself (read-only)..." << std::endl;
 
-    const ewr::PrinterInfo info = ewr::ReadPrinterInfo(gateway, model, ewr::log::Default(), options);
-    g_jsonData = ewr::JsonPrinterInfo(model, info);
+    const ewr::PrinterInfo info = ewr::info::Read(gateway, model, ewr::log::Default(), options);
+    g_jsonData = ewr::json::InfoData(model, info);
 
     if (!info.available)
     {
@@ -1206,7 +1208,7 @@ static int RunMaintenance(const ewr::DbPrinterModel* model, ewr::IDeviceGateway&
     {
         std::cerr << "[!] " << why << std::endl;
         JsonFail("not_supported", why);
-        g_jsonData = ewr::JsonMaintenanceData(model, request, {});
+        g_jsonData = ewr::json::MaintenanceData(model, request, {});
         return FinishRun(1);
     }
 
@@ -1217,7 +1219,7 @@ static int RunMaintenance(const ewr::DbPrinterModel* model, ewr::IDeviceGateway&
 
     if (cli.dryRun)
     {
-        const ewr::StateSnapshot state = ewr::ReadPrinterStatus(gateway, options);
+        const ewr::StateSnapshot state = ewr::status::Read(gateway, options);
         if (!state.available)
         {
             std::cerr << "[!] The printer did not answer the status query." << std::endl;
@@ -1226,7 +1228,7 @@ static int RunMaintenance(const ewr::DbPrinterModel* model, ewr::IDeviceGateway&
         }
 
         PrintPrinterStatus(state.status);
-        if (const auto blocker = ewr::EvaluateMaintenanceBlocker(state.status, request.action))
+        if (const auto blocker = ewr::gates::EvaluateMaintenance(state.status, request.action))
             std::cout << "\n[!] A real run would stop here: " << blocker->errorName << ".\n    "
                       << blocker->explanation << std::endl;
 
@@ -1234,7 +1236,7 @@ static int RunMaintenance(const ewr::DbPrinterModel* model, ewr::IDeviceGateway&
         ewr::MaintenanceOutcome preview;
         preview.route = route;
         preview.before = state;
-        g_jsonData = ewr::JsonMaintenanceData(model, request, preview);
+        g_jsonData = ewr::json::MaintenanceData(model, request, preview);
         return FinishRun(0);
     }
 
@@ -1333,7 +1335,7 @@ static int RunMaintenance(const ewr::DbPrinterModel* model, ewr::IDeviceGateway&
     if (!mismatchPassed.empty())
         outcome.overrides.insert(outcome.overrides.begin(), { "model_mismatch", mismatchPassed, -1 });
 
-    g_jsonData = ewr::JsonMaintenanceData(model, request, outcome);
+    g_jsonData = ewr::json::MaintenanceData(model, request, outcome);
 
     switch (outcome.phase)
     {
@@ -1423,7 +1425,7 @@ static void WarnOnFullPads(const ewr::DbPrinterModel& model, const std::vector<s
 {
     for (const auto& spec : model.GetAllCounters())
     {
-        const ewr::CounterReading reading = ewr::EvaluateCounter(spec, after);
+        const ewr::CounterReading reading = spec.Evaluate(after);
         if (reading.complete && reading.Percent() >= 100)
         {
             std::cout << "\n[!] After the restore, " << (reading.description.empty() ? "a counter" : reading.description)
@@ -1440,12 +1442,12 @@ static int RunRestore(const ewr::DbPrinterModel& model, const ewr::Backup& sourc
                       const std::string& deviceId, const std::string& mismatchPassed)
 {
     const bool all = cli.restoreAll;
-    const ewr::RestorePlan plan = all ? ewr::PlanRestoreAll(model, source) : ewr::PlanRestore(model, source);
+    const ewr::RestorePlan plan = all ? ewr::restore::PlanAll(model, source) : ewr::restore::Plan(model, source);
     const bool overNetwork = gateway.OverNetwork();
 
     // In place before any early exit, so a refused restore still names
     // what it was asked to write.
-    g_jsonData = ewr::JsonRestorePlan(source, plan, file);
+    g_jsonData = ewr::json::RestorePlanData(source, plan, file);
 
     std::cout << "\n[*] RESTORE for " << model.name << " from " << file << std::endl;
     std::cout << "    " << (source.source == "dump" ? "An EEPROM dump" : "A backup EWR kept before a write");
@@ -1569,7 +1571,7 @@ static int RunRestore(const ewr::DbPrinterModel& model, const ewr::Backup& sourc
                 for (const auto& entry : state.values)
                     matching += (entry.first == proof.first && entry.second == proof.second) ? 1 : 0;
             }
-            const bool proven = plan.unitProof.size() >= ewr::kMinimumUnitProof && matching == plan.unitProof.size();
+            const bool proven = plan.unitProof.size() >= ewr::restore::kMinimumUnitProof && matching == plan.unitProof.size();
             std::cout << "\n" << (proven ? "[i] Same printer: " : "[!] A real run would stop: only ")
                       << matching << " of " << plan.unitProof.size() << " identity byte(s) match the dump's." << std::endl;
         }
@@ -1577,8 +1579,8 @@ static int RunRestore(const ewr::DbPrinterModel& model, const ewr::Backup& sourc
         std::cout << "\n[DRY RUN] Nothing was written. " << changing << " byte(s) would change; run without"
                   << " --dry-run to restore them." << std::endl;
 
-        g_jsonData["printer"] = ewr::JsonPrinterStatus(state.status);
-        g_jsonData["before"] = ewr::JsonCounterValues(state.values);
+        g_jsonData["printer"] = ewr::json::Status(state.status);
+        g_jsonData["before"] = ewr::json::CounterValues(state.values);
         return FinishRun(0);
     }
 
@@ -1697,7 +1699,7 @@ static int RunRestore(const ewr::DbPrinterModel& model, const ewr::Backup& sourc
         PrintCounterValues(outcome.after.values, "EEPROM values AFTER the restore:");
     }
 
-    g_jsonData = ewr::JsonRestoreData(model, source, plan, file, outcome);
+    g_jsonData = ewr::json::RestoreData(model, source, plan, file, outcome);
 
     if (outcome.success && outcome.writesTotal == 0)
         return FinishRun(0); // every byte already held the file's value
@@ -1757,7 +1759,7 @@ int main(int argc, char* argv[])
     {
         g_realStdout = std::make_unique<std::ostream>(std::cout.rdbuf());
         std::cout.rdbuf(&g_nullBuffer);
-        g_json = std::make_unique<ewr::JsonEmitter>(*g_realStdout);
+        g_json = std::make_unique<ewr::json::Emitter>(*g_realStdout);
 
         // Events become contract lines instead of console text; the CLI's own
         // stderr writes are untouched and stay human.
@@ -2078,7 +2080,7 @@ int main(int argc, char* argv[])
         std::cout << "[i] --yes: the reset confirmation is answered automatically. Every other gate\n"
                      "    still stops the run before any write.\n" << std::endl;
 
-    ewr::CleanupStaleTempFiles();
+    ewr::update::CleanupStaleTempFiles();
 
     // Read before anything is asked of the printer: a file EWR cannot trust
     // stops the run here. The file names the model, so it picks the entry
@@ -2100,7 +2102,7 @@ int main(int argc, char* argv[])
         else
         {
             const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-            ewr::ParseBackupText(text, restoreSource, error);
+            ewr::backup::Parse(text, restoreSource, error);
         }
 
         if (!error.empty())
@@ -2129,7 +2131,7 @@ int main(int argc, char* argv[])
     if (cli.listOnly)
     {
         ewr::Database listDb;
-        std::vector<ewr::ModelNameEntry> listEntries;
+        std::vector<ewr::deviceid::ModelNameEntry> listEntries;
         if (listDb.Load(databasePath))
         {
             for (const auto& m : listDb.Models())
@@ -2163,17 +2165,17 @@ int main(int argc, char* argv[])
             if (iface.deviceId.empty())
             {
                 std::cout << "      IEEE 1284 device ID: (no reply)" << std::endl;
-                jsonInterfaces.push_back(ewr::JsonInterface(iface, ""));
+                jsonInterfaces.push_back(ewr::json::InterfaceEntry(iface, ""));
                 continue;
             }
 
-            const ewr::DeviceIdInfo devId = ewr::ParseIeee1284DeviceId(iface.deviceId);
+            const ewr::deviceid::Info devId = ewr::deviceid::Parse(iface.deviceId);
             std::cout << "      IEEE 1284 device ID: " << (devId.model.empty() ? iface.deviceId : "MDL \"" + devId.model + "\"") << std::endl;
 
             std::string match;
             if (!devId.model.empty() && !listEntries.empty())
             {
-                const std::vector<std::string> matches = ewr::MatchModelEntries(devId.model, listEntries);
+                const std::vector<std::string> matches = ewr::deviceid::MatchEntries(devId.model, listEntries);
                 if (!matches.empty())
                 {
                     std::cout << "      Database entry:      " << matches[0] << std::endl;
@@ -2181,7 +2183,7 @@ int main(int argc, char* argv[])
                 }
             }
 
-            jsonInterfaces.push_back(ewr::JsonInterface(iface, match));
+            jsonInterfaces.push_back(ewr::json::InterfaceEntry(iface, match));
         }
 
         if (!interfaces.empty())
@@ -2212,7 +2214,7 @@ int main(int argc, char* argv[])
             std::string match;
             if (!printer.model.empty() && !listEntries.empty())
             {
-                const std::vector<std::string> matches = ewr::MatchModelEntries(printer.model, listEntries);
+                const std::vector<std::string> matches = ewr::deviceid::MatchEntries(printer.model, listEntries);
                 if (!matches.empty())
                 {
                     std::cout << "      Database entry:      " << matches[0] << std::endl;
@@ -2220,7 +2222,7 @@ int main(int argc, char* argv[])
                 }
             }
 
-            jsonNetwork.push_back(ewr::JsonNetworkPrinter(printer, match));
+            jsonNetwork.push_back(ewr::json::NetworkEntry(printer, match));
         }
 
         if (!network.empty())
@@ -2248,8 +2250,8 @@ int main(int argc, char* argv[])
         // The database is refreshed before it is loaded, so this run already
         // writes with it. The release check runs alongside: offline, the two
         // wait out one connect timeout instead of one each.
-        auto database = std::async(std::launch::async, [&databasePath] { return ewr::Updater::UpdateDatabaseNow(databasePath); });
-        auto release = std::async(std::launch::async, ewr::Updater::CheckLatestRelease, kEwrCurrentVersion);
+        auto database = std::async(std::launch::async, [&databasePath] { return ewr::update::UpdateDatabaseNow(databasePath); });
+        auto release = std::async(std::launch::async, ewr::update::CheckLatestRelease, kEwrCurrentVersion);
 
         auto ready = [](const auto& task) { return task.wait_for(std::chrono::seconds(0)) == std::future_status::ready; };
 
@@ -2276,7 +2278,7 @@ int main(int argc, char* argv[])
     if (!db.Load(databasePath))
         std::cerr << "[!] Could not load database.json (missing or corrupted). Smart Protocol models are unavailable this run." << std::endl;
 
-    auto replayModels = ewr::ScanModelsFolder("models");
+    auto replayModels = ewr::replay::ScanFolder("models");
     auto smartModels = db.Models();
 
     if (replayModels.empty() && smartModels.empty())
@@ -2409,7 +2411,7 @@ int main(int argc, char* argv[])
     }
 
     // The database owns the name table, so no model strings here.
-    std::vector<ewr::ModelNameEntry> smartEntries;
+    std::vector<ewr::deviceid::ModelNameEntry> smartEntries;
     for (const auto& opt : options)
     {
         if (!opt.isReplay)
@@ -2501,14 +2503,14 @@ int main(int argc, char* argv[])
 
     if (devIdQuery.found)
     {
-        const ewr::DeviceIdInfo devId = ewr::ParseIeee1284DeviceId(devIdQuery.deviceId);
+        const ewr::deviceid::Info devId = ewr::deviceid::Parse(devIdQuery.deviceId);
         detectedMdl = devId.model;
 
         if (!detectedMdl.empty())
         {
             std::cout << "found \"" << detectedMdl << "\"." << std::endl;
 
-            const std::vector<std::string> matches = ewr::MatchModelEntries(detectedMdl, smartEntries);
+            const std::vector<std::string> matches = ewr::deviceid::MatchEntries(detectedMdl, smartEntries);
             if (!matches.empty())
             {
                 detectedMatch = matches[0];
@@ -2544,7 +2546,7 @@ int main(int argc, char* argv[])
 
             if (!iface.deviceId.empty())
             {
-                const std::string bannerMdl = ewr::ParseIeee1284DeviceId(iface.deviceId).model;
+                const std::string bannerMdl = ewr::deviceid::Parse(iface.deviceId).model;
                 if (!bannerMdl.empty())
                     std::cout << " - \"" << bannerMdl << "\"";
                 else
@@ -2611,7 +2613,7 @@ int main(int argc, char* argv[])
         // Fall back to the fuzzy matcher: normalization, aliases, families.
         if (resolvedName.empty())
         {
-            std::vector<ewr::ModelNameEntry> allEntries;
+            std::vector<ewr::deviceid::ModelNameEntry> allEntries;
             for (const auto& opt : options)
             {
                 if (opt.isReplay)
@@ -2620,7 +2622,7 @@ int main(int argc, char* argv[])
                     allEntries.push_back({ opt.smartModel.name, opt.smartModel.aliases });
             }
 
-            const std::vector<std::string> matches = ewr::MatchModelEntries(cli.modelOverride, allEntries);
+            const std::vector<std::string> matches = ewr::deviceid::MatchEntries(cli.modelOverride, allEntries);
 
             std::vector<std::string> uniqueNames;
             for (const auto& match : matches)
@@ -2939,7 +2941,7 @@ int main(int argc, char* argv[])
     // One object for every device session this run, so the --interface pin
     // and the soft-reset switch reach queries, writes and replays alike. The
     // gateway spends the soft reset on the first of them.
-    ewr::ExecutorOptions sessionOptions = ewr::DefaultQueryOptions();
+    ewr::ExecutorOptions sessionOptions = ewr::ExecutorOptions::ForQueries();
     sessionOptions.interfaceCandidate = cli.interfaceCandidate;
     sessionOptions.usbSoftReset = cli.usbSoftReset;
     sessionOptions.trace.printerReports = detectedMdl;
@@ -2965,7 +2967,7 @@ int main(int argc, char* argv[])
         if (selected.isReplay)
         {
             // No read key in a dump: the '@BDC ST2' status is all we can ask.
-            state = ewr::ReadPrinterStatus(gateway, sessionOptions);
+            state = ewr::status::Read(gateway, sessionOptions);
         }
         else
         {
@@ -2982,7 +2984,7 @@ int main(int argc, char* argv[])
         {
             // No read key in a dump, so there is no model to count pads on.
             g_jsonData["model"] = selected.replayModel.name;
-            g_jsonData["printer"] = ewr::JsonPrinterStatus(state.status);
+            g_jsonData["printer"] = ewr::json::Status(state.status);
             g_jsonData["counters"] = nlohmann::json::array();
             g_jsonData["pads"] = nlohmann::json::array();
             g_jsonData["pads_total"] = 0;
@@ -2991,7 +2993,7 @@ int main(int argc, char* argv[])
         }
         else
         {
-            g_jsonData = ewr::JsonStateData(selected.smartModel, state);
+            g_jsonData = ewr::json::StateData(selected.smartModel, state);
         }
 
         g_jsonData["detected_model"] = detectedMatch.empty() ? nlohmann::json(nullptr)
@@ -3048,7 +3050,7 @@ int main(int argc, char* argv[])
 
         // The low page, where the classic models keep everything, plus every
         // byte the database names above it - a restore needs those.
-        const std::vector<uint16_t> addresses = ewr::DumpAddresses(selected.smartModel, cli.dumpFull);
+        const std::vector<uint16_t> addresses = ewr::restore::DumpAddresses(selected.smartModel, cli.dumpFull);
         if (cli.dumpFull)
             std::cout << "    --full: all " << addresses.size() << " bytes up to mem_high. This takes a while." << std::endl;
 
@@ -3072,7 +3074,7 @@ int main(int argc, char* argv[])
         g_jsonData["model"] = selected.smartModel.name;
         g_jsonData["answered"] = answered;
         g_jsonData["total"] = state.values.size();
-        g_jsonData["values"] = ewr::JsonCounterValues(state.values);
+        g_jsonData["values"] = ewr::json::CounterValues(state.values);
         g_jsonData["file"] = nullptr;
 
         const std::string path = WriteEepromDump(selected.smartModel, state.values, devIdQuery.deviceId,
@@ -3135,7 +3137,7 @@ int main(int argc, char* argv[])
             return FinishRun(1);
         }
 
-        const std::vector<uint16_t> addresses = ewr::DumpAddresses(selected.smartModel, cli.dumpFull);
+        const std::vector<uint16_t> addresses = ewr::restore::DumpAddresses(selected.smartModel, cli.dumpFull);
         const uint32_t end = addresses.empty() ? 0 : addresses.back();
 
         std::cout << "\n[*] ADDRESS DISCOVERY for " << selected.smartModel.name << std::endl;
@@ -3177,7 +3179,7 @@ int main(int argc, char* argv[])
         }
         std::cout << std::endl;
 
-        std::vector<ewr::EepromSnapshot> snapshots;
+        std::vector<ewr::discovery::EepromSnapshot> snapshots;
         const int passes = 3;
         int shortPasses = 0;
 
@@ -3248,7 +3250,7 @@ int main(int argc, char* argv[])
                 if (!cleaned.success)
                 {
                     std::cerr << "[ERROR] Cleaning " << pass << " did not complete ("
-                              << ewr::MaintenancePhaseName(cleaned.phase) << "): " << cleaned.error << std::endl;
+                              << ewr::ToString(cleaned.phase) << "): " << cleaned.error << std::endl;
                     std::cerr << "        Run --find-addresses again and answer 'n' to start the cleanings from"
                                  " the printer's panel." << std::endl;
                     JsonFail("not_started", "Cleaning " + std::to_string(pass) + " did not complete: " + cleaned.error);
@@ -3279,11 +3281,11 @@ int main(int argc, char* argv[])
             std::cout << std::endl;
         }
 
-        const std::vector<ewr::ByteTrend> trends = ewr::FindTrendingBytes(snapshots);
+        const std::vector<ewr::discovery::ByteTrend> trends = ewr::discovery::FindTrendingBytes(snapshots);
 
         // The shape docs/json-output.md has promised since the command had no --json.
         nlohmann::json readings = nlohmann::json::array();
-        for (const ewr::ByteTrend& t : trends)
+        for (const ewr::discovery::ByteTrend& t : trends)
             readings.push_back({ { "addresses", t.addresses }, { "pair", t.IsPair() }, { "values", t.values },
                                  { "deltas", t.deltas }, { "direction", t.rising ? "rising" : "falling" } });
         g_jsonData["model"] = selected.smartModel.name;
@@ -3313,7 +3315,7 @@ int main(int argc, char* argv[])
         }
 
         std::cout << "  ADDRESS          WIDTH       DUMP 1   DUMP 2   DUMP 3   TREND" << std::endl;
-        for (const ewr::ByteTrend& t : trends)
+        for (const ewr::discovery::ByteTrend& t : trends)
         {
             std::string addr;
             for (size_t i = 0; i < t.addresses.size(); ++i)
@@ -3351,9 +3353,9 @@ int main(int argc, char* argv[])
         body << "            \"mem_high\": " << selected.smartModel.mem_high << ",\n";
         body << "            \"rkey\": " << selected.smartModel.rkey << ",\n";
         body << "            \"rlen\": " << selected.smartModel.rlen << ",\n";
-        body << "            \"wkey\": " << ewr::WriteKeyToJson(selected.smartModel.wkey) << ",\n";
+        body << "            \"wkey\": " << ewr::db::WriteKeyToJson(selected.smartModel.wkey) << ",\n";
         if (!selected.smartModel.wkey1.empty())
-            body << "            \"wkey1\": " << ewr::WriteKeyToJson(selected.smartModel.wkey1) << ",\n";
+            body << "            \"wkey1\": " << ewr::db::WriteKeyToJson(selected.smartModel.wkey1) << ",\n";
         body << "            \"wlen\": " << selected.smartModel.wlen << ",\n";
 
         std::string safeName;
@@ -3368,12 +3370,12 @@ int main(int argc, char* argv[])
             JsonFail("io_error", "Could not write " + outPath + ".");
             return FinishRun(1);
         }
-        out << ewr::FormatDiscoveryJson(selected.smartModel.name, body.str(), trends);
+        out << ewr::discovery::ToJson(selected.smartModel.name, body.str(), trends);
         out.close();
         g_jsonData["file"] = outPath;
 
         size_t rising = 0;
-        for (const ewr::ByteTrend& t : trends)
+        for (const ewr::discovery::ByteTrend& t : trends)
             rising += t.rising ? 1 : 0;
 
         std::cout << "\n[SUCCESS] Wrote " << trends.size() << " reading(s) (" << rising
@@ -3424,14 +3426,9 @@ int main(int argc, char* argv[])
         {
             // Opaque bytes: count what it would send, send nothing.
             const std::vector<std::vector<unsigned char>> dumpSequence =
-                ewr::ParseWiresharkDump(selected.replayModel.filepath);
+                ewr::replay::ParseWiresharkDump(selected.replayModel.filepath);
 
-            size_t dumpWrites = 0;
-            for (const auto& packet : dumpSequence)
-            {
-                if (ewr::ctrl::IsWrite(packet))
-                    dumpWrites++;
-            }
+            const size_t dumpWrites = ewr::replay::CountWrites(dumpSequence);
 
             std::cout << "\n[DRY RUN] " << selected.displayName << ": the dump holds "
                       << dumpSequence.size() << " packets, " << dumpWrites << " of them EEPROM writes." << std::endl;
@@ -3530,7 +3527,7 @@ int main(int argc, char* argv[])
             planned.push_back(std::move(write));
         }
 
-        g_jsonData = ewr::JsonStateData(selected.smartModel, state);
+        g_jsonData = ewr::json::StateData(selected.smartModel, state);
         g_jsonData["detected_model"] = detectedMatch.empty() ? nlohmann::json(nullptr)
                                                              : nlohmann::json(detectedMatch);
         g_jsonData["target"] = cli.cartridge ? "ink" : "waste";
@@ -3560,7 +3557,7 @@ int main(int argc, char* argv[])
     {
         std::cout << "\n[!] Parsing replay Wireshark dump for " << selected.displayName << "..." << std::endl;
         const std::vector<std::vector<unsigned char>> executionSequence =
-            ewr::ParseWiresharkDump(selected.replayModel.filepath);
+            ewr::replay::ParseWiresharkDump(selected.replayModel.filepath);
 
         if (executionSequence.empty())
         {
@@ -3931,7 +3928,7 @@ int main(int argc, char* argv[])
 
     // Built where ewr_reset builds it, so the two answers cannot drift. Named:
     // items() on the temporary would outlive it.
-    const nlohmann::json resetData = ewr::JsonResetData(selected.smartModel, resetInk, outcome);
+    const nlohmann::json resetData = ewr::json::ResetData(selected.smartModel, resetInk, outcome);
     for (const auto& item : resetData.items())
         g_jsonData[item.key()] = item.value();
 

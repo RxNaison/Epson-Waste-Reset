@@ -4,6 +4,7 @@
 #ifdef _WIN32
 
 #include "ewr/updater.h"
+#include "ewr/update_platform.h"
 
 #include <windows.h>
 #include <wininet.h>
@@ -16,7 +17,7 @@
 namespace fs = std::filesystem;
 
 namespace ewr {
-    namespace platform {
+    namespace update::platform {
 
         namespace {
 
@@ -139,7 +140,7 @@ namespace ewr {
                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != FALSE;
         }
 
-    } // namespace platform
+    } // namespace update::platform
 } // namespace ewr
 
 #endif // _WIN32

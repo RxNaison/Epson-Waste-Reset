@@ -82,12 +82,9 @@ namespace ewr {
         std::function<void(const PrinterStatus&, int seconds)> onProgress;
     };
 
-    // nullopt when the printer is in a state to do this.
-    std::optional<Blocker> EvaluateMaintenanceBlocker(const PrinterStatus& status, MaintenanceAction action);
-
     // The contract's spellings.
-    const char* MaintenanceActionName(MaintenanceAction action);
-    const char* MaintenancePhaseName(MaintenancePhase phase);
+    const char* ToString(MaintenanceAction action);
+    const char* ToString(MaintenancePhase phase);
 
     class Maintenance
     {
@@ -96,7 +93,7 @@ namespace ewr {
         // need no database entry. When given it must outlive this object.
         Maintenance(IDeviceGateway& gateway, const DbPrinterModel* model,
                     log::Reporter& reporter = log::Default(),
-                    ExecutorOptions options = DefaultQueryOptions());
+                    ExecutorOptions options = ExecutorOptions::ForQueries());
 
         // The route `request` would take - "factory" or "remote" - or empty,
         // with `why`, when there is none.
@@ -125,3 +122,10 @@ namespace ewr {
     };
 
 } // namespace ewr
+
+namespace ewr::gates {
+
+    // nullopt when the printer is in a state to do this.
+    std::optional<Blocker> EvaluateMaintenance(const PrinterStatus& status, MaintenanceAction action);
+
+} // namespace ewr::gates

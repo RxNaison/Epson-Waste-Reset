@@ -1,4 +1,5 @@
 #include "ewr/backup.h"
+#include "ewr/format.h"
 
 #include <nlohmann/json.hpp>
 
@@ -261,7 +262,7 @@ namespace ewr {
         return answered;
     }
 
-    std::string UtcTimestamp()
+    std::string format::UtcTimestamp()
     {
         const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         std::tm utc{};
@@ -275,7 +276,7 @@ namespace ewr {
         return text;
     }
 
-    std::string BackupToJson(const Backup& backup)
+    std::string backup::ToJson(const Backup& backup)
     {
         nlohmann::ordered_json root;
         root["format"] = kFormat;
@@ -312,7 +313,7 @@ namespace ewr {
         return root.dump(2) + "\n";
     }
 
-    bool ParseBackupText(const std::string& text, Backup& out, std::string& error)
+    bool backup::Parse(const std::string& text, Backup& out, std::string& error)
     {
         const std::string trimmed = Trim(text);
         if (trimmed.empty())
@@ -331,7 +332,7 @@ namespace ewr {
         return false;
     }
 
-    std::string BackupFileName(const Backup& backup)
+    std::string backup::FileName(const Backup& backup)
     {
         std::string stamp;
         for (char c : backup.created)
@@ -347,7 +348,7 @@ namespace ewr {
         return model + "_" + serial + "_" + stamp + ".json";
     }
 
-    bool WriteBackupFile(const Backup& backup, const std::string& dir,
+    bool backup::WriteFile(const Backup& backup, const std::string& dir,
                          std::string& pathOut, std::string& error)
     {
         std::error_code ec;
@@ -358,7 +359,7 @@ namespace ewr {
             return false;
         }
 
-        const std::string name = BackupFileName(backup);
+        const std::string name = backup::FileName(backup);
         const std::string stem = name.substr(0, name.size() - 5); // ".json"
 
         fs::path target = fs::path(dir) / name;
@@ -380,7 +381,7 @@ namespace ewr {
                 return false;
             }
 
-            out << BackupToJson(backup);
+            out << backup::ToJson(backup);
             out.flush();
             if (!out)
             {

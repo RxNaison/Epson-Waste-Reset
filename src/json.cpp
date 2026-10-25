@@ -1,8 +1,9 @@
-#include "ewr/json_out.h"
+#include "ewr/json.h"
+#include "ewr/keysearch.h"
 
 namespace ewr {
 
-    const char* JsonLevelName(log::Level level)
+    const char* json::Name(log::Level level)
     {
         switch (level)
         {
@@ -17,7 +18,7 @@ namespace ewr {
         return "info";
     }
 
-    const char* JsonStageName(log::Stage stage)
+    const char* json::Name(log::Stage stage)
     {
         switch (stage)
         {
@@ -35,7 +36,7 @@ namespace ewr {
         return "general";
     }
 
-    nlohmann::json JsonCounterValues(const std::vector<std::pair<uint16_t, int>>& values)
+    nlohmann::json json::CounterValues(const std::vector<std::pair<uint16_t, int>>& values)
     {
         nlohmann::json out = nlohmann::json::array();
         for (const auto& value : values)
@@ -48,14 +49,14 @@ namespace ewr {
         return out;
     }
 
-    nlohmann::json JsonPadUsage(const DbPrinterModel& model,
+    nlohmann::json json::PadUsage(const DbPrinterModel& model,
                                 const std::vector<std::pair<uint16_t, int>>& values)
     {
         nlohmann::json out = nlohmann::json::array();
 
         for (const auto& spec : model.GetAllCounters())
         {
-            const CounterReading reading = EvaluateCounter(spec, values);
+            const CounterReading reading = spec.Evaluate(values);
             if (!reading.complete)
                 continue;
 
@@ -75,7 +76,7 @@ namespace ewr {
         return out;
     }
 
-    nlohmann::json JsonResetCoverage(const DbPrinterModel& model)
+    nlohmann::json json::ResetCoverage(const DbPrinterModel& model)
     {
         nlohmann::json out = nlohmann::json::array();
         for (const PadCoverage& pad : model.GetResetCoverage())
@@ -89,7 +90,7 @@ namespace ewr {
         return out;
     }
 
-    nlohmann::json JsonPrinterStatus(const PrinterStatus& status)
+    nlohmann::json json::Status(const PrinterStatus& status)
     {
         if (!status.valid)
             return nullptr;
@@ -124,7 +125,7 @@ namespace ewr {
         return out;
     }
 
-    nlohmann::json JsonInterface(const usb::InterfaceInfo& info, const std::string& modelMatch)
+    nlohmann::json json::InterfaceEntry(const usb::InterfaceInfo& info, const std::string& modelMatch)
     {
         nlohmann::json out;
         out["index"] = info.index;
@@ -138,7 +139,7 @@ namespace ewr {
         return out;
     }
 
-    nlohmann::json JsonNetworkPrinter(const NetworkPrinter& printer, const std::string& modelMatch)
+    nlohmann::json json::NetworkEntry(const NetworkPrinter& printer, const std::string& modelMatch)
     {
         nlohmann::json out;
         out["address"] = printer.address;
@@ -148,7 +149,7 @@ namespace ewr {
         return out;
     }
 
-    nlohmann::json JsonBlocker(const Blocker& blocker)
+    nlohmann::json json::BlockerData(const Blocker& blocker)
     {
         nlohmann::json out;
         out["error"] = blocker.errorName;
@@ -159,16 +160,16 @@ namespace ewr {
         return out;
     }
 
-    nlohmann::json JsonStateData(const DbPrinterModel& model, const StateSnapshot& state)
+    nlohmann::json json::StateData(const DbPrinterModel& model, const StateSnapshot& state)
     {
         nlohmann::json out;
         out["model"] = model.name;
         // Filled in by a host that ran detection; null says "not asked", not
         // "no match", so a caller never reads silence as agreement.
         out["detected_model"] = nullptr;
-        out["printer"] = state.available ? JsonPrinterStatus(state.status) : nlohmann::json(nullptr);
-        out["counters"] = state.available ? JsonCounterValues(state.values) : nlohmann::json::array();
-        out["pads"] = state.available ? JsonPadUsage(model, state.values) : nlohmann::json::array();
+        out["printer"] = state.available ? json::Status(state.status) : nlohmann::json(nullptr);
+        out["counters"] = state.available ? json::CounterValues(state.values) : nlohmann::json::array();
+        out["pads"] = state.available ? json::PadUsage(model, state.values) : nlohmann::json::array();
         // How many pads the model has, so an empty `pads` can be told apart
         // from a model that reports none: a group whose bytes did not all come
         // back is left out of `pads` rather than reported with a wrong total.
@@ -176,11 +177,11 @@ namespace ewr {
         // What a waste-pad reset covers, readable or not. From the database, so
         // it is there whether the read worked or not: `pads` says how full the
         // readable pads are, this says which pads a reset would clear.
-        out["reset_covers"] = JsonResetCoverage(model);
+        out["reset_covers"] = json::ResetCoverage(model);
         return out;
     }
 
-    const char* JsonResetPhaseName(ResetPhase phase)
+    const char* json::Name(ResetPhase phase)
     {
         switch (phase)
         {
@@ -195,7 +196,7 @@ namespace ewr {
         return "not_started";
     }
 
-    nlohmann::json JsonKeySearchData(const std::string& printerReports, const ReadKeySearch& search)
+    nlohmann::json json::KeySearchData(const std::string& printerReports, const keysearch::Result& search)
     {
         nlohmann::json out;
         out["printer"] = printerReports.empty() ? nlohmann::json(nullptr) : nlohmann::json(printerReports);
@@ -211,7 +212,7 @@ namespace ewr {
         };
 
         nlohmann::json keys = nlohmann::json::array();
-        for (const ReadKeyProbe& probe : search.probes)
+        for (const keysearch::Probe& probe : search.probes)
         {
             if (probe.answer != ReadAnswer::Value)
                 continue;
@@ -228,7 +229,7 @@ namespace ewr {
         return out;
     }
 
-    nlohmann::json JsonBackup(const ResetOutcome& outcome)
+    nlohmann::json json::BackupData(const ResetOutcome& outcome)
     {
         if (!outcome.backupTaken)
             return nullptr;
@@ -238,16 +239,16 @@ namespace ewr {
                                                      : nlohmann::json(outcome.backupLocation) },
             { "bytes", outcome.backup.bytes.size() },
             { "complete", outcome.backup.Complete() },
-            { "values", JsonCounterValues(outcome.backup.bytes) },
+            { "values", json::CounterValues(outcome.backup.bytes) },
         };
     }
 
-    nlohmann::json JsonResetData(const DbPrinterModel& model, bool ink, const ResetOutcome& outcome)
+    nlohmann::json json::ResetData(const DbPrinterModel& model, bool ink, const ResetOutcome& outcome)
     {
         nlohmann::json out;
         out["model"] = model.name;
         out["target"] = ink ? "ink" : "waste";
-        out["phase"] = JsonResetPhaseName(outcome.phase);
+        out["phase"] = json::Name(outcome.phase);
         out["writes"] = {
             { "verified", outcome.writesVerified },
             { "total", outcome.writesTotal },
@@ -259,8 +260,8 @@ namespace ewr {
             { "mismatches", outcome.verifyMismatches },
             { "unread", outcome.verifyUnread },
         };
-        out["before"] = JsonCounterValues(outcome.before.values);
-        out["after"] = JsonCounterValues(outcome.after.values);
+        out["before"] = json::CounterValues(outcome.before.values);
+        out["after"] = json::CounterValues(outcome.after.values);
 
         // One shape for every gate, null where a key does not apply.
         nlohmann::json overrides = nlohmann::json::array();
@@ -280,11 +281,11 @@ namespace ewr {
             });
         }
         out["overrides"] = overrides;
-        out["backup"] = JsonBackup(outcome);
+        out["backup"] = json::BackupData(outcome);
         return out;
     }
 
-    nlohmann::json JsonPrinterInfo(const DbPrinterModel* model, const PrinterInfo& info)
+    nlohmann::json json::InfoData(const DbPrinterModel* model, const PrinterInfo& info)
     {
         auto orNull = [](const std::string& text) {
             return text.empty() ? nlohmann::json(nullptr) : nlohmann::json(text);
@@ -302,7 +303,7 @@ namespace ewr {
 
         nlohmann::json out;
         out["model"] = model ? nlohmann::json(model->name) : nlohmann::json(nullptr);
-        out["printer"] = info.available ? JsonPrinterStatus(info.status) : nlohmann::json(nullptr);
+        out["printer"] = info.available ? json::Status(info.status) : nlohmann::json(nullptr);
         out["firmware"] = orNull(info.firmware);
         out["serial"] = orNull(info.serial);
         out["serial_source"] = orNull(info.serialSource);
@@ -312,7 +313,7 @@ namespace ewr {
         return out;
     }
 
-    nlohmann::json JsonMaintenanceData(const DbPrinterModel* model, const MaintenanceRequest& request,
+    nlohmann::json json::MaintenanceData(const DbPrinterModel* model, const MaintenanceRequest& request,
                                        const MaintenanceOutcome& outcome)
     {
         auto orNull = [](const std::string& text) {
@@ -331,27 +332,27 @@ namespace ewr {
 
         nlohmann::json out;
         out["model"] = model ? nlohmann::json(model->name) : nlohmann::json(nullptr);
-        out["action"] = MaintenanceActionName(request.action);
+        out["action"] = ToString(request.action);
         out["level"] = (request.action == MaintenanceAction::HeadClean) ? nlohmann::json(request.level)
                                                                          : nlohmann::json(nullptr);
         out["group"] = clean ? nlohmann::json(group) : nlohmann::json(nullptr);
-        out["phase"] = MaintenancePhaseName(outcome.phase);
+        out["phase"] = ToString(outcome.phase);
         out["route"] = orNull(outcome.route);
         out["sent"] = outcome.sent;
         out["reply"] = orNull(outcome.reply);
         out["started"] = outcome.started;
         out["seconds"] = outcome.seconds;
-        out["printer_before"] = outcome.before.available ? JsonPrinterStatus(outcome.before.status) : nlohmann::json(nullptr);
-        out["printer_after"] = outcome.last.valid ? JsonPrinterStatus(outcome.last) : nlohmann::json(nullptr);
-        out["pads_before"] = (model && outcome.before.available) ? JsonPadUsage(*model, outcome.before.values)
+        out["printer_before"] = outcome.before.available ? json::Status(outcome.before.status) : nlohmann::json(nullptr);
+        out["printer_after"] = outcome.last.valid ? json::Status(outcome.last) : nlohmann::json(nullptr);
+        out["pads_before"] = (model && outcome.before.available) ? json::PadUsage(*model, outcome.before.values)
                                                                  : nlohmann::json::array();
-        out["pads_after"] = (model && outcome.after.available) ? JsonPadUsage(*model, outcome.after.values)
+        out["pads_after"] = (model && outcome.after.available) ? json::PadUsage(*model, outcome.after.values)
                                                                : nlohmann::json::array();
         out["overrides"] = std::move(overrides);
         return out;
     }
 
-    nlohmann::json JsonRestorePlan(const Backup& source, const RestorePlan& plan, const std::string& file)
+    nlohmann::json json::RestorePlanData(const Backup& source, const RestorePlan& plan, const std::string& file)
     {
         auto orNull = [](const std::string& text) {
             return text.empty() ? nlohmann::json(nullptr) : nlohmann::json(text);
@@ -381,17 +382,17 @@ namespace ewr {
         return out;
     }
 
-    nlohmann::json JsonRestoreData(const DbPrinterModel& model, const Backup& source, const RestorePlan& plan,
+    nlohmann::json json::RestoreData(const DbPrinterModel& model, const Backup& source, const RestorePlan& plan,
                                    const std::string& file, const ResetOutcome& outcome)
     {
-        nlohmann::json out = JsonResetData(model, plan.touchesInk && !plan.touchesWaste, outcome);
-        for (const auto& item : JsonRestorePlan(source, plan, file).items())
+        nlohmann::json out = json::ResetData(model, plan.touchesInk && !plan.touchesWaste, outcome);
+        for (const auto& item : json::RestorePlanData(source, plan, file).items())
             out[item.key()] = item.value();
         out["unchanged"] = outcome.unchanged;
         return out;
     }
 
-    void JsonEmitter::Write(const char* type, nlohmann::json line)
+    void json::Emitter::Write(const char* type, nlohmann::json line)
     {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - m_start).count();
@@ -413,7 +414,7 @@ namespace ewr {
         m_out << envelope.dump() << "\n" << std::flush;
     }
 
-    void JsonEmitter::Hello(const std::string& ewrVersion,
+    void json::Emitter::Hello(const std::string& ewrVersion,
                             const std::string& platform,
                             const std::string& command,
                             const nlohmann::json& model,
@@ -428,15 +429,15 @@ namespace ewr {
         Write("hello", std::move(line));
     }
 
-    void JsonEmitter::Event(const log::Event& event)
+    void json::Emitter::Event(const log::Event& event)
     {
         if (event.level == log::Level::Trace)
             return;
 
         nlohmann::json line;
         line["code"] = event.code;
-        line["level"] = JsonLevelName(event.level);
-        line["stage"] = JsonStageName(event.stage);
+        line["level"] = json::Name(event.level);
+        line["stage"] = json::Name(event.stage);
         line["message"] = event.message;
         line["index"] = event.HasProgress() ? nlohmann::json(event.index) : nlohmann::json(nullptr);
         line["total"] = event.HasProgress() ? nlohmann::json(event.total) : nlohmann::json(nullptr);
@@ -444,7 +445,7 @@ namespace ewr {
         Write("event", std::move(line));
     }
 
-    void JsonEmitter::Result(const std::string& command,
+    void json::Emitter::Result(const std::string& command,
                              bool ok,
                              int exitCode,
                              const nlohmann::json& errorCode,

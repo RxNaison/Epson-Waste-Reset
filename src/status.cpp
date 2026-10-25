@@ -430,7 +430,7 @@ namespace ewr {
         return ReadAnswer::Other;
     }
 
-    std::string DescribePrinterCondition(const PrinterStatus& status)
+    std::string status::Describe(const PrinterStatus& status)
     {
         if (!status.valid)
             return "status unavailable";

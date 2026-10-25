@@ -17,7 +17,7 @@
 // entirely, and what a counter must be *set to* is not observable here at all
 // (a platen group resets some bytes to 0x5E, not 0). The reader decides.
 
-namespace ewr {
+namespace ewr::discovery {
 
     // One EEPROM read pass: address -> value, -1 where the printer did not answer.
     using EepromSnapshot = std::vector<std::pair<uint16_t, int>>;
@@ -45,8 +45,8 @@ namespace ewr {
 
     // The readings as JSON, next to the model's known write path. No pad group
     // is invented: the addresses are observations, not a reset plan.
-    std::string FormatDiscoveryJson(const std::string& modelName,
-                                    const std::string& modelBodyJson,
-                                    const std::vector<ByteTrend>& trends);
+    std::string ToJson(const std::string& modelName,
+                       const std::string& modelBodyJson,
+                       const std::vector<ByteTrend>& trends);
 
-} // namespace ewr
+} // namespace ewr::discovery

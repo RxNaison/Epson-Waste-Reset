@@ -4,7 +4,7 @@
 
 namespace ewr {
 
-    RestorePlan PlanRestore(const DbPrinterModel& model, const Backup& source)
+    RestorePlan restore::Plan(const DbPrinterModel& model, const Backup& source)
     {
         RestorePlan plan;
         plan.model = model.name;
@@ -64,7 +64,7 @@ namespace ewr {
         return plan;
     }
 
-    RestorePlan PlanRestoreAll(const DbPrinterModel& model, const Backup& dump)
+    RestorePlan restore::PlanAll(const DbPrinterModel& model, const Backup& dump)
     {
         RestorePlan plan;
         plan.model = model.name;
@@ -112,7 +112,7 @@ namespace ewr {
         return plan;
     }
 
-    std::vector<uint16_t> DumpAddresses(const DbPrinterModel& model, bool full)
+    std::vector<uint16_t> restore::DumpAddresses(const DbPrinterModel& model, bool full)
     {
         const uint32_t reachable = (model.ReadAddressLength() == 1)
             ? std::min<uint32_t>(model.mem_high, 0xFF) : model.mem_high;

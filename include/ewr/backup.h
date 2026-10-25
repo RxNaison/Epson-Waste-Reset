@@ -32,23 +32,25 @@ namespace ewr {
         bool Complete() const { return !bytes.empty() && Answered() == bytes.size(); }
     };
 
-    // Now, as Backup::created spells it.
-    std::string UtcTimestamp();
+} // namespace ewr
 
-    std::string BackupToJson(const Backup& backup);
+// Backup files: written before every write, read back for a restore.
+namespace ewr::backup {
+
+    std::string ToJson(const Backup& backup);
 
     // An EWR backup file (JSON) or an EWR --dump file (text, either format).
     // False with `error` set when it is neither, or names no model.
-    bool ParseBackupText(const std::string& text, Backup& out, std::string& error);
+    bool Parse(const std::string& text, Backup& out, std::string& error);
 
     // "<model>_<serial or unknown>_<YYYYMMDDTHHMMSSZ>.json", every character
     // outside [A-Za-z0-9-] turned into '_'.
-    std::string BackupFileName(const Backup& backup);
+    std::string FileName(const Backup& backup);
 
     // Writes into `dir` (created if missing) through a temporary file and a
     // rename, so a run killed mid-write leaves no half backup that looks
     // whole. Never overwrites: a name already taken gets a numeric suffix.
-    bool WriteBackupFile(const Backup& backup, const std::string& dir,
-                         std::string& pathOut, std::string& error);
+    bool WriteFile(const Backup& backup, const std::string& dir,
+                   std::string& pathOut, std::string& error);
 
-} // namespace ewr
+} // namespace ewr::backup

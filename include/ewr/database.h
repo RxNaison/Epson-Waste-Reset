@@ -3,10 +3,12 @@
 #include <vector>
 #include <map>
 #include <unordered_map>
+#include <utility>
 #include <cstdint>
 #include <mutex>
 
-namespace ewr {
+// Helpers for reading database.json's own spellings.
+namespace ewr::db {
 
     inline std::string PadKindFromDescription(const std::string& d)
     {
@@ -20,6 +22,19 @@ namespace ewr {
 
         return "";
     }
+
+    // database.json spells a write keyword as one code point per byte
+    // ("\u0097&\u0086..."), but the JSON parser hands back UTF-8, which sent
+    // 0x97 as c2 97 and made the SC-P600's 8-byte keyword 12 (#59). False on a
+    // code point above U+00FF or malformed UTF-8.
+    bool WriteKeyFromJson(const std::string& utf8, std::string& bytes);
+
+    // The inverse: a quoted JSON string literal, in database.json's spelling.
+    std::string WriteKeyToJson(const std::string& bytes);
+
+} // namespace ewr::db
+
+namespace ewr {
 
     // One EEPROM byte that contributes to a counter value. Several models pack
     // two counters into a single byte (recent L-series keep one nibble per pad
@@ -54,6 +69,8 @@ namespace ewr {
         }
     };
 
+    struct CounterReading;
+
     struct CounterSpec
     {
         std::string description;
@@ -65,6 +82,9 @@ namespace ewr {
         uint32_t max_value{0}; // 0 = unknown, no percentage can be shown
 
         bool HasLimit() const { return max_value > 0; }
+
+        // `values` maps EEPROM address -> byte value, with -1 for "no reply".
+        CounterReading Evaluate(const std::vector<std::pair<uint16_t, int>>& values) const;
 
         std::vector<uint16_t> ReadAddresses() const
         {
@@ -109,7 +129,7 @@ namespace ewr {
 
         std::string EffectiveKind() const
         {
-            return kind.empty() ? PadKindFromDescription(description) : kind;
+            return kind.empty() ? db::PadKindFromDescription(description) : kind;
         }
     };
 
@@ -168,15 +188,6 @@ namespace ewr {
         int slot = 1;     // 1 = the most recent
         std::vector<uint16_t> addresses;
     };
-
-    // database.json spells a write keyword as one code point per byte
-    // ("\u0097&\u0086..."), but the JSON parser hands back UTF-8, which sent
-    // 0x97 as c2 97 and made the SC-P600's 8-byte keyword 12 (#59). False on a
-    // code point above U+00FF or malformed UTF-8.
-    bool WriteKeyFromJson(const std::string& utf8, std::string& bytes);
-
-    // The inverse: a quoted JSON string literal, in database.json's spelling.
-    std::string WriteKeyToJson(const std::string& bytes);
 
     struct DbPrinterModel
     {
@@ -333,7 +344,7 @@ namespace ewr {
                     // and the database build refuses to guess it (#35), so the
                     // group's kind would be a guess here too.
                     if (spec.kind.empty())
-                        spec.kind = PadKindFromDescription(spec.description);
+                        spec.kind = db::PadKindFromDescription(spec.description);
 
                     specs.push_back(std::move(spec));
                 }
@@ -414,7 +425,7 @@ namespace ewr {
                         continue;
 
                     const std::string kind = counter.kind.empty()
-                        ? PadKindFromDescription(counter.description) : counter.kind;
+                        ? db::PadKindFromDescription(counter.description) : counter.kind;
                     add(kind, counter.description, true);
                 }
 
@@ -484,16 +495,14 @@ namespace ewr {
         }
     };
 
-    // `values` maps EEPROM address -> byte value, with -1 for "no reply".
-    inline CounterReading EvaluateCounter(const CounterSpec& spec,
-                                          const std::vector<std::pair<uint16_t, int>>& values)
+    inline CounterReading CounterSpec::Evaluate(const std::vector<std::pair<uint16_t, int>>& values) const
     {
         CounterReading reading;
-        reading.description = spec.description;
-        reading.max_value = spec.max_value;
-        reading.complete = !spec.bytes.empty();
+        reading.description = description;
+        reading.max_value = max_value;
+        reading.complete = !bytes.empty();
 
-        for (const auto& part : spec.bytes)
+        for (const auto& part : bytes)
         {
             int raw = -1;
             for (const auto& entry : values)

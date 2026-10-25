@@ -67,7 +67,7 @@ namespace ewr {
 
     } // namespace
 
-    std::string ExtractDeviceIdString(const unsigned char* data, size_t length)
+    std::string deviceid::ExtractString(const unsigned char* data, size_t length)
     {
         if (!data || length == 0)
             return "";
@@ -94,9 +94,9 @@ namespace ewr {
         return Trim(out);
     }
 
-    DeviceIdInfo ParseIeee1284DeviceId(const std::string& deviceId)
+    deviceid::Info deviceid::Parse(const std::string& deviceId)
     {
-        DeviceIdInfo info;
+        deviceid::Info info;
         info.raw = Trim(deviceId);
 
         size_t pos = 0;
@@ -129,8 +129,8 @@ namespace ewr {
         return info;
     }
 
-    std::vector<std::string> MatchModelEntries(const std::string& mdlField,
-                                               const std::vector<ModelNameEntry>& entries)
+    std::vector<std::string> deviceid::MatchEntries(const std::string& mdlField,
+                                               const std::vector<deviceid::ModelNameEntry>& entries)
     {
         const std::string mdlNorm = NormalizeModelName(mdlField);
         if (mdlNorm.empty())
@@ -200,15 +200,15 @@ namespace ewr {
         return out;
     }
 
-    std::vector<std::string> MatchModelNames(const std::string& mdlField,
+    std::vector<std::string> deviceid::MatchNames(const std::string& mdlField,
                                              const std::vector<std::string>& knownModels)
     {
-        std::vector<ModelNameEntry> entries;
+        std::vector<deviceid::ModelNameEntry> entries;
         entries.reserve(knownModels.size());
         for (const std::string& name : knownModels)
             entries.push_back({ name, {} });
 
-        return MatchModelEntries(mdlField, entries);
+        return deviceid::MatchEntries(mdlField, entries);
     }
 
 } // namespace ewr

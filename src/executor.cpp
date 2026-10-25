@@ -637,7 +637,7 @@ namespace ewr {
     std::vector<std::vector<unsigned char>> ctrl::ExtractWriteCommands(
         const std::vector<std::vector<unsigned char>>& sequence)
     {
-        // WrapD4DataPacket prepends 02 02, big-endian length, 00 00 - so the
+        // d4::DataPacket prepends 02 02, big-endian length, 00 00 - so the
         // raw '||' command starts at offset 6.
         constexpr size_t kD4DataHeaderSize = 6;
 

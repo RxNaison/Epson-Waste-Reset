@@ -31,7 +31,7 @@ namespace cli {
     {
         for (const std::string& folder : BackupFolders())
         {
-            if (WriteBackupFile(backup, folder, location, error))
+            if (backup::WriteFile(backup, folder, location, error))
                 return true;
         }
 

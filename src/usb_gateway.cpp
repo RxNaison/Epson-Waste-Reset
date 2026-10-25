@@ -89,7 +89,7 @@ namespace ewr {
 
     void UsbDeviceGateway::RememberPrinterName(const std::string& deviceId)
     {
-        const std::string name = ParseIeee1284DeviceId(deviceId).model;
+        const std::string name = deviceid::Parse(deviceId).model;
         if (!name.empty())
             m_printerName = name;
     }

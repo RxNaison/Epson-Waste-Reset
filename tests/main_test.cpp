@@ -23,7 +23,9 @@
 #include <iterator>
 #include <map>
 #include <thread>
-#include "ewr/parser.h"
+#include "ewr/replay.h"
+#include "ewr/gates.h"
+#include "ewr/keysearch.h"
 #include "ewr/ctrl.h"
 #include "ewr/format.h"
 #include "ewr/database.h"
@@ -44,10 +46,10 @@
 #include "ewr/usb_backend.h"
 #include "ewr/usb_driver.h"
 #include "ewr/run_lock.h"
-#include "ewr/json_out.h"
+#include "ewr/json.h"
 #include "ewr/ewr_c.h"
 #include "ewr/version.h"
-#include "ewr/discover.h"
+#include "ewr/discovery.h"
 #include "ewr/snmp.h"
 #include "ewr/network.h"
 #include "../cli/color.h"
@@ -237,7 +239,7 @@ static std::ofstream NullLog()
 void test_scan_models()
 {
     std::cout << "[TEST] test_scan_models" << std::endl;
-    auto models = ewr::ScanModelsFolder("models");
+    auto models = ewr::replay::ScanFolder("models");
     std::cout << "  Found " << models.size() << " replay model files in 'models/'." << std::endl;
 }
 
@@ -250,7 +252,7 @@ void test_parser_dummy_dump()
         out << "static const char payload1[] = { 0x1b, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0xaa, 0xbb };\n";
     }
 
-    auto packets = ewr::ParseWiresharkDump(test_filename);
+    auto packets = ewr::replay::ParseWiresharkDump(test_filename);
     fs::remove(test_filename);
 
     CHECK(packets.size() == 1);
@@ -598,7 +600,7 @@ void test_stale_temp_file_cleanup()
         out << "precious";
     }
 
-    ewr::CleanupStaleTempFiles();
+    ewr::update::CleanupStaleTempFiles();
 
     for (const std::string& name : ours)
         CHECK(!fs::exists(name));
@@ -609,8 +611,8 @@ void test_stale_temp_file_cleanup()
         fs::remove(name);
     }
 
-    CHECK(!ewr::IsEwrTempArtifact("notes.tmp"));
-    CHECK(!ewr::IsEwrTempArtifact("database.json"));
+    CHECK(!ewr::update::IsTempArtifact("notes.tmp"));
+    CHECK(!ewr::update::IsTempArtifact("database.json"));
 
     fs::current_path(previousCwd);
     fs::remove_all(scratch);
@@ -657,22 +659,22 @@ void test_updater_release_response_parsing()
     ])";
 
     // Drafts and pre-releases are skipped on the stable channel.
-    const ewr::UpdateMetadata stable = ewr::ParseReleaseResponse(releases, "1.2.3", false);
+    const ewr::UpdateMetadata stable = ewr::update::ParseReleaseResponse(releases, "1.2.3", false);
     CHECK(stable.updateAvailable);
     CHECK(stable.latestVersion == "v1.3.0");
     CHECK(stable.releaseNotes == "Notes");
 
     // Opting in reaches the release candidate, but never the draft.
-    const ewr::UpdateMetadata preview = ewr::ParseReleaseResponse(releases, "1.2.3", true);
+    const ewr::UpdateMetadata preview = ewr::update::ParseReleaseResponse(releases, "1.2.3", true);
     CHECK(preview.updateAvailable);
     CHECK(preview.latestVersion == "v2.0.0-rc.1");
 
     // Already up to date.
-    CHECK(!ewr::ParseReleaseResponse(releases, "1.3.0", false).updateAvailable);
+    CHECK(!ewr::update::ParseReleaseResponse(releases, "1.3.0", false).updateAvailable);
 
     // Malformed responses are non-events, not crashes.
-    CHECK(!ewr::ParseReleaseResponse("<html>404</html>", "1.2.3", false).updateAvailable);
-    CHECK(!ewr::ParseReleaseResponse("", "1.2.3", false).updateAvailable);
+    CHECK(!ewr::update::ParseReleaseResponse("<html>404</html>", "1.2.3", false).updateAvailable);
+    CHECK(!ewr::update::ParseReleaseResponse("", "1.2.3", false).updateAvailable);
 }
 
 void test_updater_database_payload_validation()
@@ -680,7 +682,7 @@ void test_updater_database_payload_validation()
     std::cout << "[TEST] test_updater_database_payload_validation" << std::endl;
 
     // The shipped database must pass the check the OTA sync applies.
-    CHECK(ewr::ValidateDatabasePayload("database.json", ewr::kMaxSupportedDatabaseSchema));
+    CHECK(ewr::update::ValidateDatabase("database.json", ewr::kMaxSupportedDatabaseSchema));
 
     const std::string path = "test_ota_payload.json";
     auto write = [&](const std::string& body) {
@@ -689,35 +691,35 @@ void test_updater_database_payload_validation()
     };
 
     write(R"({"L222": {"rkey": 8, "wkey": "Yj4", "addresses": [24], "reset": [0]}})");
-    CHECK(ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
+    CHECK(ewr::update::ValidateDatabase(path, ewr::kMaxSupportedDatabaseSchema));
 
     // Never install a database this build cannot read.
     write(R"({"schema_version": 99, "models": {"L222": {"wkey": "Yj4"}}})");
-    CHECK(!ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
+    CHECK(!ewr::update::ValidateDatabase(path, ewr::kMaxSupportedDatabaseSchema));
 
     // ...including the flat form, which is what database.json actually ships
     // as. Nesting the version check under "models" meant the refusal never ran
     // for the only shape in use, and a too-new database went straight over the
     // live file on exit.
     write(R"({"schema_version": 99, "L222": {"rkey": 8, "wkey": "Yj4", "addresses": [24], "reset": [0]}})");
-    CHECK(!ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
+    CHECK(!ewr::update::ValidateDatabase(path, ewr::kMaxSupportedDatabaseSchema));
 
     // A schema this build does support still installs, in either shape.
     write(R"({"schema_version": 4, "L222": {"rkey": 8, "wkey": "Yj4", "addresses": [24], "reset": [0]}})");
-    CHECK(ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
+    CHECK(ewr::update::ValidateDatabase(path, ewr::kMaxSupportedDatabaseSchema));
     write(R"({"schema_version": 4, "models": {"L222": {"wkey": "Yj4"}}})");
-    CHECK(ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
+    CHECK(ewr::update::ValidateDatabase(path, ewr::kMaxSupportedDatabaseSchema));
 
     // A 404 page, an empty model map, or entries without a write key are rejected.
     write("<html>Not Found</html>");
-    CHECK(!ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
+    CHECK(!ewr::update::ValidateDatabase(path, ewr::kMaxSupportedDatabaseSchema));
     write(R"({"models": {}})");
-    CHECK(!ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
+    CHECK(!ewr::update::ValidateDatabase(path, ewr::kMaxSupportedDatabaseSchema));
     write(R"({"L222": {"rkey": 8}})");
-    CHECK(!ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema));
+    CHECK(!ewr::update::ValidateDatabase(path, ewr::kMaxSupportedDatabaseSchema));
 
     fs::remove(path);
-    CHECK(!ewr::ValidateDatabasePayload("no_such_file.json", ewr::kMaxSupportedDatabaseSchema));
+    CHECK(!ewr::update::ValidateDatabase("no_such_file.json", ewr::kMaxSupportedDatabaseSchema));
 }
 
 // v1.3.0-v1.4.0 read database.json from main and, for any model carrying a
@@ -1503,22 +1505,22 @@ void test_write_key_json_round_trip()
     std::cout << "[TEST] test_write_key_json_round_trip" << std::endl;
 
     std::string bytes;
-    CHECK(ewr::WriteKeyFromJson("\xC2\x97&", bytes) && bytes == "\x97&");
-    CHECK(!ewr::WriteKeyFromJson("\xC4\x80", bytes)); // U+0100 has no single byte
-    CHECK(!ewr::WriteKeyFromJson("ab\xC2", bytes));   // truncated sequence
-    CHECK(!ewr::WriteKeyFromJson("\x97", bytes));     // a raw byte is not UTF-8
+    CHECK(ewr::db::WriteKeyFromJson("\xC2\x97&", bytes) && bytes == "\x97&");
+    CHECK(!ewr::db::WriteKeyFromJson("\xC4\x80", bytes)); // U+0100 has no single byte
+    CHECK(!ewr::db::WriteKeyFromJson("ab\xC2", bytes));   // truncated sequence
+    CHECK(!ewr::db::WriteKeyFromJson("\x97", bytes));     // a raw byte is not UTF-8
 
     const std::string p600("\x97\x26\x86\x97\x36\x16\x16\xB6", 8);
     const std::string r220("McLaren\0", 8);
 
     // database.json's own spelling, so a --find-addresses file pastes back in.
-    CHECK(ewr::WriteKeyToJson(p600) == "\"\\u0097&\\u0086\\u00976\\u0016\\u0016\\u00b6\"");
-    CHECK(ewr::WriteKeyToJson(r220) == "\"McLaren\\u0000\"");
+    CHECK(ewr::db::WriteKeyToJson(p600) == "\"\\u0097&\\u0086\\u00976\\u0016\\u0016\\u00b6\"");
+    CHECK(ewr::db::WriteKeyToJson(r220) == "\"McLaren\\u0000\"");
 
     for (const std::string& key : { p600, r220, std::string("Ar\"ka\\noid") })
     {
         std::string back;
-        CHECK(ewr::WriteKeyFromJson(nlohmann::json::parse(ewr::WriteKeyToJson(key)).get<std::string>(), back));
+        CHECK(ewr::db::WriteKeyFromJson(nlohmann::json::parse(ewr::db::WriteKeyToJson(key)).get<std::string>(), back));
         CHECK(back == key);
     }
 
@@ -1754,7 +1756,7 @@ void test_status_reply_parsing()
     }
 
     CHECK(st.serial == "X7A9000123");
-    CHECK(ewr::DescribePrinterCondition(st).find("INK OUT") != std::string::npos);
+    CHECK(ewr::status::Describe(st).find("INK OUT") != std::string::npos);
 
     CHECK(!st.truncated);
 
@@ -1775,7 +1777,7 @@ void test_status_reply_without_fields_is_invalid()
     CHECK(!empty.valid);
     CHECK(!empty.hasError);
     CHECK(empty.stateCode == -1);
-    CHECK(ewr::DescribePrinterCondition(empty) == "status unavailable");
+    CHECK(ewr::status::Describe(empty) == "status unavailable");
 
     // A body of headers this build does not decode is no evidence either.
     const std::vector<unsigned char> unknownOnly = { 0x71, 0x01, 0x00, 0x72, 0x01, 0x00 };
@@ -1989,26 +1991,26 @@ void test_evaluate_blocker()
     ewr::PrinterStatus status;
 
     // Unparseable or error-free statuses never block.
-    CHECK(!ewr::EvaluateBlocker(status).has_value());
+    CHECK(!ewr::gates::Evaluate(status).has_value());
     status.valid = true;
-    CHECK(!ewr::EvaluateBlocker(status).has_value());
+    CHECK(!ewr::gates::Evaluate(status).has_value());
 
     // The waste-pad errors EWR exists to clear must never block.
     status.hasError = true;
     status.errorCode = 0x10; // SERVICE REQUEST
     status.errorName = "SERVICE REQUEST";
-    CHECK(ewr::IsExpectedWastePadError(0x10));
-    CHECK(!ewr::EvaluateBlocker(status).has_value());
+    CHECK(ewr::gates::IsExpectedWastePadError(0x10));
+    CHECK(!ewr::gates::Evaluate(status).has_value());
 
     status.errorCode = 0x2C; // CARTRIDGE OVERFLOW
-    CHECK(ewr::IsExpectedWastePadError(0x2C));
-    CHECK(!ewr::EvaluateBlocker(status).has_value());
+    CHECK(ewr::gates::IsExpectedWastePadError(0x2C));
+    CHECK(!ewr::gates::Evaluate(status).has_value());
 
     // A foreign lock (ink out, jam, open cover) blocks and carries the error.
     status.errorCode = 0x05;
     status.errorName = "INK OUT";
-    CHECK(!ewr::IsExpectedWastePadError(0x05));
-    const std::optional<ewr::Blocker> blocker = ewr::EvaluateBlocker(status);
+    CHECK(!ewr::gates::IsExpectedWastePadError(0x05));
+    const std::optional<ewr::Blocker> blocker = ewr::gates::Evaluate(status);
     CHECK(blocker.has_value());
     if (blocker.has_value())
     {
@@ -3609,13 +3611,13 @@ void test_schema4_counter_specs_loading()
         { 48, 0x10 }, { 49, 0x01 }, { 50, 0x00 }, { 51, 0x00 }, { 47, 0x35 }
     };
 
-    const auto main = ewr::EvaluateCounter(counters[0], values);
+    const auto main = counters[0].Evaluate(values);
     CHECK(main.complete);
     CHECK(main.value == 16 + 256 + (5 * 254)); // 1542
     CHECK(main.Percent() == 24);
 
     // The high nibble of the shared byte belongs to the second pad.
-    const auto second = ewr::EvaluateCounter(counters[1], values);
+    const auto second = counters[1].Evaluate(values);
     CHECK(second.complete);
     CHECK(second.value == 3 * 379); // 1137
     CHECK(second.Percent() == 33);
@@ -3625,7 +3627,7 @@ void test_schema4_counter_specs_loading()
     const std::vector<std::pair<uint16_t, int>> partial = {
         { 48, 0x10 }, { 49, 0x01 }, { 47, -1 }
     };
-    const auto incomplete = ewr::EvaluateCounter(counters[0], partial);
+    const auto incomplete = counters[0].Evaluate(partial);
     CHECK(!incomplete.complete);
     CHECK(incomplete.Percent() == -1);
 
@@ -3635,14 +3637,14 @@ void test_schema4_counter_specs_loading()
     ewr::CounterByte only;
     only.address = 48;
     small.bytes.push_back(only);
-    const auto over = ewr::EvaluateCounter(small, { { 48, 200 } });
+    const auto over = small.Evaluate({ { 48, 200 } });
     CHECK(over.Percent() == 200);
 
     // Without a limit there is nothing to turn into a percentage.
     ewr::CounterSpec unlimited;
     unlimited.bytes.push_back(only);
     CHECK(!unlimited.HasLimit());
-    CHECK(ewr::EvaluateCounter(unlimited, { { 48, 200 } }).Percent() == -1);
+    CHECK(unlimited.Evaluate({ { 48, 200 } }).Percent() == -1);
 }
 
 void test_schema4_close_ops()
@@ -3892,24 +3894,24 @@ void test_device_id_extraction_and_parsing()
     prefixed.push_back(0x00);
     prefixed.push_back(static_cast<unsigned char>(id.size() + 2));
     prefixed.insert(prefixed.end(), id.begin(), id.end());
-    CHECK(ewr::ExtractDeviceIdString(prefixed.data(), prefixed.size()) == id);
+    CHECK(ewr::deviceid::ExtractString(prefixed.data(), prefixed.size()) == id);
 
     // Without the prefix (driver already stripped it) and with a trailing NUL;
     // garbage after the NUL must be ignored.
     std::vector<unsigned char> bare(id.begin(), id.end());
     bare.push_back('\0');
     bare.push_back('X');
-    CHECK(ewr::ExtractDeviceIdString(bare.data(), bare.size()) == id);
+    CHECK(ewr::deviceid::ExtractString(bare.data(), bare.size()) == id);
 
-    CHECK(ewr::ExtractDeviceIdString(nullptr, 0).empty());
+    CHECK(ewr::deviceid::ExtractString(nullptr, 0).empty());
 
-    const ewr::DeviceIdInfo info = ewr::ParseIeee1284DeviceId(id);
+    const ewr::deviceid::Info info = ewr::deviceid::Parse(id);
     CHECK(info.manufacturer == "EPSON");
     CHECK(info.model == "ET-2800 Series");
     CHECK(info.commandSet == "ESCPL2,BDC,D4");
 
     // Long-form keys and stray whitespace.
-    const ewr::DeviceIdInfo longForm = ewr::ParseIeee1284DeviceId(
+    const ewr::deviceid::Info longForm = ewr::deviceid::Parse(
         "MANUFACTURER: Seiko Epson ; MODEL: Stylus Photo R220 ;");
     CHECK(longForm.manufacturer == "Seiko Epson");
     CHECK(longForm.model == "Stylus Photo R220");
@@ -3922,52 +3924,52 @@ void test_device_id_model_matching()
     const std::vector<std::string> known = { "ET-2800", "ET-2850", "L3150", "R220", "XP-2200" };
 
     // Exact family match: the "Series" suffix and punctuation are ignored.
-    auto m = ewr::MatchModelNames("ET-2800 Series", known);
+    auto m = ewr::deviceid::MatchNames("ET-2800 Series", known);
     CHECK(!m.empty());
     if (!m.empty())
         CHECK(m[0] == "ET-2800");
 
     // An "EPSON" prefix is ignored too.
-    m = ewr::MatchModelNames("EPSON ET-2850 Series", known);
+    m = ewr::deviceid::MatchNames("EPSON ET-2850 Series", known);
     CHECK(!m.empty());
     if (!m.empty())
         CHECK(m[0] == "ET-2850");
 
     // Whole-word partial match inside a marketing name.
-    m = ewr::MatchModelNames("Stylus Photo R220", known);
+    m = ewr::deviceid::MatchNames("Stylus Photo R220", known);
     CHECK(!m.empty());
     if (!m.empty())
         CHECK(m[0] == "R220");
 
     // No cross-family bleed: ET-2850 must never suggest ET-2800.
-    m = ewr::MatchModelNames("ET-2850 Series", known);
+    m = ewr::deviceid::MatchNames("ET-2850 Series", known);
     for (const auto& name : m)
         CHECK(name != "ET-2800");
 
     // No match at all.
-    CHECK(ewr::MatchModelNames("WF-7840 Series", known).empty());
-    CHECK(ewr::MatchModelNames("", known).empty());
+    CHECK(ewr::deviceid::MatchNames("WF-7840 Series", known).empty());
+    CHECK(ewr::deviceid::MatchNames("", known).empty());
 
     // ---- Alias-aware matching: the database owns the name table now.
-    std::vector<ewr::ModelNameEntry> entries;
+    std::vector<ewr::deviceid::ModelNameEntry> entries;
     entries.push_back({ "ET-2800", { "ET-2800 Series", "ET-2803", "L3260 Series", "L3260" } });
     entries.push_back({ "ET-2850", { "ET-2850 Series" } });
     entries.push_back({ "R220", { "Stylus Photo R220" } });
 
     // The issue-#16 device: an alias hit resolves to the owning entry.
-    auto e = ewr::MatchModelEntries("ET-2803", entries);
+    auto e = ewr::deviceid::MatchEntries("ET-2803", entries);
     CHECK(!e.empty());
     if (!e.empty())
         CHECK(e[0] == "ET-2800");
 
     // Marketing decoration still normalizes away on aliases.
-    e = ewr::MatchModelEntries("EPSON L3260 Series", entries);
+    e = ewr::deviceid::MatchEntries("EPSON L3260 Series", entries);
     CHECK(!e.empty());
     if (!e.empty())
         CHECK(e[0] == "ET-2800");
 
     // Several aliases of one entry hitting at once yield the entry once.
-    e = ewr::MatchModelEntries("ET-2800 Series", entries);
+    e = ewr::deviceid::MatchEntries("ET-2800 Series", entries);
     size_t owners = 0;
     for (const auto& name : e)
     {
@@ -3978,16 +3980,16 @@ void test_device_id_model_matching()
 
     // An entry whose own name matches outranks an alias-only match, so an
     // alias never shadows a real model.
-    std::vector<ewr::ModelNameEntry> shadow;
+    std::vector<ewr::deviceid::ModelNameEntry> shadow;
     shadow.push_back({ "ET-2800", { "L3260" } });
     shadow.push_back({ "L3260", {} });
-    e = ewr::MatchModelEntries("L3260", shadow);
+    e = ewr::deviceid::MatchEntries("L3260", shadow);
     CHECK(!e.empty());
     if (!e.empty())
         CHECK(e[0] == "L3260");
 
     // Aliases join the no-match rule, not replace it.
-    CHECK(ewr::MatchModelEntries("WF-7840 Series", entries).empty());
+    CHECK(ewr::deviceid::MatchEntries("WF-7840 Series", entries).empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -4001,12 +4003,12 @@ void test_interface_pin_option_threading()
 
     // Automatic selection is the default everywhere.
     CHECK(ewr::ExecutorOptions{}.interfaceCandidate == 0);
-    CHECK(ewr::DefaultQueryOptions().interfaceCandidate == 0);
+    CHECK(ewr::ExecutorOptions::ForQueries().interfaceCandidate == 0);
 
     const ewr::DbPrinterModel model = MakeSessionModel();
     FakeGateway gw = MakeSessionGateway();
 
-    ewr::ExecutorOptions pinnedOptions = ewr::DefaultQueryOptions();
+    ewr::ExecutorOptions pinnedOptions = ewr::ExecutorOptions::ForQueries();
     pinnedOptions.interfaceCandidate = 2;
 
     ewr::Session session(model, gw, ewr::log::Default(), pinnedOptions);
@@ -4087,14 +4089,14 @@ void test_session_names_its_model_in_the_trace_context()
     handlers.onBlocker = [](const ewr::Blocker&) { return true; }; // past INK OUT
 
     FakeGateway quiet = MakeSessionGateway();
-    ewr::Session unnamed(model, quiet, ewr::log::Default(), ewr::DefaultQueryOptions());
+    ewr::Session unnamed(model, quiet, ewr::log::Default(), ewr::ExecutorOptions::ForQueries());
     CHECK(unnamed.Reset(handlers).phase == ewr::ResetPhase::Done);
     CHECK(quiet.queryCalls > 0);
     CHECK(quiet.lastQueryOptions.trace.selectedEntry == model.name);
     CHECK(quiet.lastResetOptions.trace.selectedEntry == model.name);
 
     // What a host says is kept, not overwritten.
-    ewr::ExecutorOptions named = ewr::DefaultQueryOptions();
+    ewr::ExecutorOptions named = ewr::ExecutorOptions::ForQueries();
     named.trace.printerReports = "TestJet 100 Series";
     named.trace.detectedEntry = "TestJet 100";
     named.trace.selectedEntry = "TestJet 100";
@@ -4182,7 +4184,7 @@ void test_session_reads_a_jig_model()
 
     const ewr::DbPrinterModel model = MakeJigModel();
     JigGateway gw;
-    ewr::Session session(model, gw, ewr::log::Default(), ewr::DefaultQueryOptions());
+    ewr::Session session(model, gw, ewr::log::Default(), ewr::ExecutorOptions::ForQueries());
 
     const ewr::StateSnapshot state = session.ReadState();
     CHECK(state.available);
@@ -4205,7 +4207,7 @@ void test_session_reads_a_jig_model()
         { 0x214, 0xe0 }, { 0x215, 0x01 }, { 0x216, 0x00 }, { 0x217, 0x94 }, { 0x218, 0x00 }, { 0x219, 0x00 } };
     CHECK(state.values == expected);
 
-    const nlohmann::json data = ewr::JsonStateData(model, state);
+    const nlohmann::json data = ewr::json::StateData(model, state);
     CHECK(data["pads"].size() == 2);
     if (data["pads"].size() == 2)
     {
@@ -4229,7 +4231,7 @@ void test_session_refuses_to_reset_a_jig_model()
     CHECK(!model.CanReset());
 
     JigGateway gw;
-    ewr::Session session(model, gw, ewr::log::Default(), ewr::DefaultQueryOptions());
+    ewr::Session session(model, gw, ewr::log::Default(), ewr::ExecutorOptions::ForQueries());
 
     ewr::ResetHandlers handlers;
     handlers.onBlocker = [](const ewr::Blocker&) { return true; };
@@ -4286,7 +4288,7 @@ void test_jig_models_load_and_stay_out_of_the_key_search()
     }
     CHECK(sawJig && sawKeyed);
 
-    const auto candidates = ewr::CollectReadKeyCandidates(models);
+    const auto candidates = ewr::keysearch::CollectCandidates(models);
     CHECK(candidates.size() == 1);
     for (const auto& candidate : candidates)
         for (const auto& name : candidate.models)
@@ -4296,7 +4298,7 @@ void test_jig_models_load_and_stay_out_of_the_key_search()
     // device ID, and that has to land on the JIG entry, read-only.
     ewr::Database real;
     CHECK(real.Load("database.json"));
-    std::vector<ewr::ModelNameEntry> entries;
+    std::vector<ewr::deviceid::ModelNameEntry> entries;
     for (const auto& model : real.Models())
     {
         entries.push_back({ model.name, model.aliases });
@@ -4307,7 +4309,7 @@ void test_jig_models_load_and_stay_out_of_the_key_search()
             CHECK(model.GetReadAddresses().size() == 6);
         }
     }
-    const std::vector<std::string> matches = ewr::MatchModelEntries("Epson Stylus SX110", entries);
+    const std::vector<std::string> matches = ewr::deviceid::MatchEntries("Epson Stylus SX110", entries);
     CHECK(!matches.empty() && matches[0] == "SX110");
 }
 
@@ -4352,7 +4354,7 @@ void test_collect_read_key_candidates()
 
     // The same key at another address width is another candidate: the width
     // changes the packet.
-    const std::vector<ewr::ReadKeyCandidate> got = ewr::CollectReadKeyCandidates(
+    const std::vector<ewr::keysearch::Candidate> got = ewr::keysearch::CollectCandidates(
         { model("A", 1, 2), model("D", 9, 2), model("B", 1, 2), model("C", 1, 1), model("E", 1, 2) });
 
     CHECK(got.size() == 3);
@@ -4370,7 +4372,7 @@ void test_collect_read_key_candidates()
     ewr::Database gen;
     CHECK(gen.Load("database.json"));
     const auto models = gen.Models();
-    const auto real = ewr::CollectReadKeyCandidates(models);
+    const auto real = ewr::keysearch::CollectCandidates(models);
 
     const size_t keyed = static_cast<size_t>(std::count_if(models.begin(), models.end(),
         [](const ewr::DbPrinterModel& m) { return !m.jig; }));
@@ -4466,7 +4468,7 @@ void test_search_read_key()
     const std::vector<unsigned char> empty = text("||:;\f");
 
     // 40 keys: three batches when nothing goes wrong.
-    std::vector<ewr::ReadKeyCandidate> candidates;
+    std::vector<ewr::keysearch::Candidate> candidates;
     for (uint16_t rkey = 100; rkey < 140; ++rkey)
         candidates.push_back({ rkey, 2, { "Model " + std::to_string(rkey) } });
 
@@ -4476,11 +4478,11 @@ void test_search_read_key()
         gw.answer = [&](uint16_t rkey, int) { return rkey == 123 ? MakeEepromReadReplyEE16(0, 0x5E) : refused; };
 
         size_t lastTried = 0, lastTotal = 0;
-        ewr::ExecutorOptions options = ewr::DefaultQueryOptions();
+        ewr::ExecutorOptions options = ewr::ExecutorOptions::ForQueries();
         options.interfaceCandidate = 2;
         options.trace.selectedBy = "--find-key";
 
-        const ewr::ReadKeySearch search = ewr::SearchReadKey(gw, candidates, options,
+        const ewr::keysearch::Result search = ewr::keysearch::Search(gw, candidates, options,
             [&](size_t tried, size_t total) { lastTried = tried; lastTotal = total; });
 
         CHECK(search.deviceFound);
@@ -4511,7 +4513,7 @@ void test_search_read_key()
         KeyGateway gw;
         gw.answer = [&](uint16_t, int) { return empty; };
 
-        const ewr::ReadKeySearch search = ewr::SearchReadKey(gw, candidates);
+        const ewr::keysearch::Result search = ewr::keysearch::Search(gw, candidates);
         CHECK(search.completed);
         CHECK(search.Count(ewr::ReadAnswer::Empty) == 40);
         CHECK(search.Count(ewr::ReadAnswer::Value) == 0);
@@ -4526,7 +4528,7 @@ void test_search_read_key()
             return (rkey == 105 || rkey == 120) ? std::vector<unsigned char>{} : refused;
         };
 
-        const ewr::ReadKeySearch search = ewr::SearchReadKey(gw, candidates);
+        const ewr::keysearch::Result search = ewr::keysearch::Search(gw, candidates);
         CHECK(search.completed);
         CHECK(search.probes.size() == 40);
         CHECK(search.Count(ewr::ReadAnswer::Silent) == 2);
@@ -4569,7 +4571,7 @@ void test_search_read_key()
         };
 
         size_t lastTried = 0, lastTotal = 0;
-        const ewr::ReadKeySearch search = ewr::SearchReadKey(gw, candidates, ewr::DefaultQueryOptions(),
+        const ewr::keysearch::Result search = ewr::keysearch::Search(gw, candidates, ewr::ExecutorOptions::ForQueries(),
             [&](size_t tried, size_t total) { lastTried = tried; lastTotal = total; });
 
         CHECK(search.completed);
@@ -4589,7 +4591,7 @@ void test_search_read_key()
     {
         KeyGateway gw;
         gw.deviceFound = false;
-        const ewr::ReadKeySearch search = ewr::SearchReadKey(gw, candidates);
+        const ewr::keysearch::Result search = ewr::keysearch::Search(gw, candidates);
         CHECK(!search.deviceFound);
         CHECK(!search.completed);
         CHECK(search.probes.empty());
@@ -4598,7 +4600,7 @@ void test_search_read_key()
     {
         KeyGateway gw;
         gw.handshakeFailed = true;
-        const ewr::ReadKeySearch search = ewr::SearchReadKey(gw, candidates);
+        const ewr::keysearch::Result search = ewr::keysearch::Search(gw, candidates);
         CHECK(search.deviceFound);
         CHECK(!search.completed);
         CHECK(search.probes.empty());
@@ -4609,7 +4611,7 @@ void test_search_read_key()
     // Nothing to try is a finished search, with no device session opened.
     {
         KeyGateway gw;
-        const ewr::ReadKeySearch search = ewr::SearchReadKey(gw, {});
+        const ewr::keysearch::Result search = ewr::keysearch::Search(gw, {});
         CHECK(search.completed);
         CHECK(gw.sessions == 0);
     }
@@ -4619,14 +4621,14 @@ void test_json_key_search_data()
 {
     std::cout << "[TEST] test_json_key_search_data" << std::endl;
 
-    ewr::ReadKeySearch search;
+    ewr::keysearch::Result search;
     search.deviceFound = true;
     search.completed = true;
     search.probes.push_back({ { 15120, 1, { "R200", "R220" } }, ewr::ReadAnswer::Value, 0x07 });
     search.probes.push_back({ { 373, 2, { "SX210" } }, ewr::ReadAnswer::Empty, 0 });
     search.probes.push_back({ { 1609, 2, { "SX200" } }, ewr::ReadAnswer::Refused, 0 });
 
-    const nlohmann::json data = ewr::JsonKeySearchData("Stylus Photo R220", search);
+    const nlohmann::json data = ewr::json::KeySearchData("Stylus Photo R220", search);
     CHECK(data["printer"] == "Stylus Photo R220");
     CHECK(data["completed"] == true);
     CHECK(data["tried"] == 3);
@@ -4644,7 +4646,7 @@ void test_json_key_search_data()
     CHECK(data["keys"][0]["models"] == nlohmann::json({ "R200", "R220" }));
 
     // A printer that named nothing is null, never an empty string.
-    const nlohmann::json unnamed = ewr::JsonKeySearchData("", ewr::ReadKeySearch{});
+    const nlohmann::json unnamed = ewr::json::KeySearchData("", ewr::keysearch::Result{});
     CHECK(unnamed["printer"].is_null());
     CHECK(unnamed["keys"].is_array() && unnamed["keys"].empty());
     CHECK(unnamed["completed"] == false);
@@ -4657,28 +4659,28 @@ void test_evaluate_ink_blocker()
     ewr::PrinterStatus status;
 
     // No parse / no error: never a blocker, exactly like the waste policy.
-    CHECK(!ewr::EvaluateInkBlocker(status).has_value());
+    CHECK(!ewr::gates::EvaluateInk(status).has_value());
     status.valid = true;
-    CHECK(!ewr::EvaluateInkBlocker(status).has_value());
+    CHECK(!ewr::gates::EvaluateInk(status).has_value());
 
     // INK OUT gates the waste reset but must never gate the ink reset:
     // an empty cartridge is the state the ink reset exists to clear.
     status.hasError = true;
     status.errorCode = 0x05;
     status.errorName = "INK OUT";
-    CHECK(ewr::EvaluateBlocker(status).has_value());
-    CHECK(!ewr::EvaluateInkBlocker(status).has_value());
+    CHECK(ewr::gates::Evaluate(status).has_value());
+    CHECK(!ewr::gates::EvaluateInk(status).has_value());
 
     // The waste-pad errors stay expected for both flavors.
     status.errorCode = 0x10; // SERVICE REQUEST
-    CHECK(!ewr::EvaluateInkBlocker(status).has_value());
+    CHECK(!ewr::gates::EvaluateInk(status).has_value());
     status.errorCode = 0x2C; // CARTRIDGE OVERFLOW
-    CHECK(!ewr::EvaluateInkBlocker(status).has_value());
+    CHECK(!ewr::gates::EvaluateInk(status).has_value());
 
     // A genuinely foreign lock still blocks the ink reset too.
     status.errorCode = 0x06;
     status.errorName = "PAPER JAM";
-    const std::optional<ewr::Blocker> blocker = ewr::EvaluateInkBlocker(status);
+    const std::optional<ewr::Blocker> blocker = ewr::gates::EvaluateInk(status);
     CHECK(blocker.has_value());
     if (blocker.has_value())
         CHECK(blocker->errorName == "PAPER JAM");
@@ -4895,7 +4897,7 @@ void test_session_read_addresses()
     const ewr::DbPrinterModel model = MakeSessionModel();
     FakeGateway gw = MakeSessionGateway(); // status + EEPROM reads at 0x0C, 0x0D
 
-    ewr::Session session(model, gw, ewr::log::Default(), ewr::DefaultQueryOptions());
+    ewr::Session session(model, gw, ewr::log::Default(), ewr::ExecutorOptions::ForQueries());
 
     // An explicit address list is read read-only, in order, with no writes -
     // exactly what --dump leans on.
@@ -4927,20 +4929,20 @@ void test_snapshot_requires_a_reply()
         reply.clear();
     silent.queryResult.query.success = false;
 
-    ewr::Session session(model, silent, ewr::log::Default(), ewr::DefaultQueryOptions());
+    ewr::Session session(model, silent, ewr::log::Default(), ewr::ExecutorOptions::ForQueries());
     const ewr::StateSnapshot snap = session.ReadState();
     CHECK(!snap.available);
     CHECK(!snap.status.valid);
 
     // The model-free read is gated the same way.
     FakeGateway silentStatus = silent;
-    CHECK(!ewr::ReadPrinterStatus(silentStatus, ewr::DefaultQueryOptions()).available);
+    CHECK(!ewr::status::Read(silentStatus, ewr::ExecutorOptions::ForQueries()).available);
 
     // One answered query is enough: a printer that answers the counter reads
     // but not the status query is still readable.
     FakeGateway partial = MakeSessionGateway();
     partial.queryResult.query.replies[0].clear();
-    ewr::Session partialSession(model, partial, ewr::log::Default(), ewr::DefaultQueryOptions());
+    ewr::Session partialSession(model, partial, ewr::log::Default(), ewr::ExecutorOptions::ForQueries());
     const ewr::StateSnapshot partialSnap = partialSession.ReadState();
     CHECK(partialSnap.available);
     CHECK(!partialSnap.status.valid);
@@ -4975,7 +4977,7 @@ void test_busy_status_blocker()
     busy.stateCode = 0x02;
     busy.stateName = "BUSY";
 
-    const std::optional<ewr::Blocker> waste = ewr::EvaluateBlocker(busy);
+    const std::optional<ewr::Blocker> waste = ewr::gates::Evaluate(busy);
     CHECK(waste.has_value());
     if (waste.has_value())
     {
@@ -4983,14 +4985,14 @@ void test_busy_status_blocker()
         CHECK(waste->errorName == "PRINTER BUSY");
         CHECK(!waste->explanation.empty());
     }
-    CHECK(ewr::EvaluateInkBlocker(busy).has_value());
+    CHECK(ewr::gates::EvaluateInk(busy).has_value());
 
     // Idle with no error stays clean - the gate is BUSY-specific.
     ewr::PrinterStatus idle = busy;
     idle.stateCode = 0x04;
     idle.stateName = "IDLE";
-    CHECK(!ewr::EvaluateBlocker(idle).has_value());
-    CHECK(!ewr::EvaluateInkBlocker(idle).has_value());
+    CHECK(!ewr::gates::Evaluate(idle).has_value());
+    CHECK(!ewr::gates::EvaluateInk(idle).has_value());
 
     // A BUSY report that DOES carry an error keeps the specific policy:
     // expected states pass, and INK OUT still splits the two paths.
@@ -4998,14 +5000,14 @@ void test_busy_status_blocker()
     busyService.hasError = true;
     busyService.errorCode = 0x10; // SERVICE REQUEST
     busyService.errorName = "SERVICE REQUEST";
-    CHECK(!ewr::EvaluateBlocker(busyService).has_value());
+    CHECK(!ewr::gates::Evaluate(busyService).has_value());
 
     ewr::PrinterStatus busyInkOut = busy;
     busyInkOut.hasError = true;
     busyInkOut.errorCode = 0x05; // INK OUT
     busyInkOut.errorName = "INK OUT";
-    CHECK(ewr::EvaluateBlocker(busyInkOut).has_value());
-    CHECK(!ewr::EvaluateInkBlocker(busyInkOut).has_value());
+    CHECK(ewr::gates::Evaluate(busyInkOut).has_value());
+    CHECK(!ewr::gates::EvaluateInk(busyInkOut).has_value());
 }
 
 // Same reasoning as BUSY: a report that ran out mid-field may have been cut off
@@ -5021,7 +5023,7 @@ void test_truncated_status_blocker()
     partial.stateCode = 0x04; // IDLE - the reassuring case
     partial.stateName = "IDLE";
 
-    const std::optional<ewr::Blocker> waste = ewr::EvaluateBlocker(partial);
+    const std::optional<ewr::Blocker> waste = ewr::gates::Evaluate(partial);
     CHECK(waste.has_value());
     if (waste.has_value())
     {
@@ -5029,7 +5031,7 @@ void test_truncated_status_blocker()
         CHECK(waste->errorName == "INCOMPLETE STATUS REPORT");
         CHECK(!waste->explanation.empty());
     }
-    CHECK(ewr::EvaluateInkBlocker(partial).has_value());
+    CHECK(ewr::gates::EvaluateInk(partial).has_value());
 
     // A truncated report that still carried its error entry is classified on
     // the error, not on the truncation: the waste-pad errors stay expected.
@@ -5037,13 +5039,13 @@ void test_truncated_status_blocker()
     partialService.hasError = true;
     partialService.errorCode = 0x10; // SERVICE REQUEST
     partialService.errorName = "SERVICE REQUEST";
-    CHECK(!ewr::EvaluateBlocker(partialService).has_value());
+    CHECK(!ewr::gates::Evaluate(partialService).has_value());
 
     ewr::PrinterStatus partialJam = partial;
     partialJam.hasError = true;
     partialJam.errorCode = 0x04; // PAPER JAM
     partialJam.errorName = "PAPER JAM";
-    const std::optional<ewr::Blocker> jam = ewr::EvaluateBlocker(partialJam);
+    const std::optional<ewr::Blocker> jam = ewr::gates::Evaluate(partialJam);
     CHECK(jam.has_value());
     if (jam.has_value())
         CHECK(jam->errorName == "PAPER JAM");
@@ -5051,8 +5053,8 @@ void test_truncated_status_blocker()
     // A complete report is untouched by the new gate.
     ewr::PrinterStatus complete = partial;
     complete.truncated = false;
-    CHECK(!ewr::EvaluateBlocker(complete).has_value());
-    CHECK(!ewr::EvaluateInkBlocker(complete).has_value());
+    CHECK(!ewr::gates::Evaluate(complete).has_value());
+    CHECK(!ewr::gates::EvaluateInk(complete).has_value());
 }
 
 // The unconditional ask-once gate: fires after every conditional gate, right
@@ -5710,7 +5712,7 @@ void test_json_pads_carry_a_kind_not_just_a_label()
     model.pad_groups.push_back(platen);
 
     const std::vector<std::pair<uint16_t, int>> values = { { 0x10, 37 }, { 0x11, 25 } };
-    const nlohmann::json pads = ewr::JsonPadUsage(model, values);
+    const nlohmann::json pads = ewr::json::PadUsage(model, values);
 
     CHECK(pads.size() == 2);
     CHECK(pads[0]["kind"] == "main");
@@ -5735,7 +5737,7 @@ void test_json_pads_carry_a_kind_not_just_a_label()
     group.counters.push_back(spec);
     vague.pad_groups.push_back(group);
 
-    const nlohmann::json vaguePads = ewr::JsonPadUsage(vague, { { 0x20, 5 } });
+    const nlohmann::json vaguePads = ewr::json::PadUsage(vague, { { 0x20, 5 } });
     CHECK(vaguePads.size() == 1);
     CHECK(vaguePads[0]["kind"].is_null());
 }
@@ -5760,7 +5762,7 @@ void test_json_status_separates_unknown_from_zero()
         ewr::InkReading{ 2, "Magenta", 0, "EMPTY" },
     };
 
-    const nlohmann::json out = ewr::JsonPrinterStatus(status);
+    const nlohmann::json out = ewr::json::Status(status);
 
     CHECK(out["state"] == "IDLE");
     CHECK(out["state_code"] == 4);
@@ -5779,7 +5781,7 @@ void test_json_status_separates_unknown_from_zero()
 
     // Nothing parseable at all is null, not an object of empty strings.
     ewr::PrinterStatus silent;
-    CHECK(ewr::JsonPrinterStatus(silent).is_null());
+    CHECK(ewr::json::Status(silent).is_null());
 }
 
 // A host that ran detection fills detected_model; the library cannot invent
@@ -5794,7 +5796,7 @@ void test_json_state_data_reports_detection_as_unknown()
     state.status.stateName = "IDLE";
     state.values = { { 0x18, 255 }, { 0x19, -1 } };
 
-    const nlohmann::json data = ewr::JsonStateData(MakeTestModel(), state);
+    const nlohmann::json data = ewr::json::StateData(MakeTestModel(), state);
 
     CHECK(data["model"] == "TestPrinter");
     CHECK(data.contains("detected_model"));
@@ -5828,7 +5830,7 @@ void test_every_counter_kind_matches_its_own_description()
     {
         for (const auto& counter : model.GetAllCounters())
         {
-            const std::string own = ewr::PadKindFromDescription(counter.description);
+            const std::string own = ewr::db::PadKindFromDescription(counter.description);
 
             if (counter.kind != own)
             {
@@ -5883,7 +5885,7 @@ void test_unnamed_counter_reports_no_kind()
                        counter("Waste Counter 3", 0x26, 600) };
     shared.pad_groups.push_back(group);
 
-    const nlohmann::json pads = ewr::JsonPadUsage(shared, { { 0x10, 1 }, { 0x28, 2 }, { 0x26, 3 } });
+    const nlohmann::json pads = ewr::json::PadUsage(shared, { { 0x10, 1 }, { 0x28, 2 }, { 0x26, 3 } });
     CHECK(pads.size() == 3);
     CHECK(pads[0]["kind"] == "main");
     CHECK(pads[1]["kind"] == "platen");
@@ -5901,7 +5903,7 @@ void test_unnamed_counter_reports_no_kind()
     single.counters = { counter("Waste Counter 3", 0x30, 3260) };
     lone.pad_groups.push_back(single);
 
-    const nlohmann::json lonePads = ewr::JsonPadUsage(lone, { { 0x30, 7 } });
+    const nlohmann::json lonePads = ewr::json::PadUsage(lone, { { 0x30, 7 } });
     CHECK(lonePads.size() == 1);
     CHECK(lonePads[0]["kind"].is_null());
 }
@@ -6103,7 +6105,7 @@ void test_reset_coverage_shapes()
         m.pad_groups.push_back(group("Platen Pad Counter", "platen", { 28 }));
 
         ewr::StateSnapshot silent;
-        const nlohmann::json data = ewr::JsonStateData(m, silent);
+        const nlohmann::json data = ewr::json::StateData(m, silent);
         CHECK(data["pads_total"] == 0);
         CHECK(data["pads"].empty());
         CHECK(data["reset_covers"].size() == 1);
@@ -6176,14 +6178,14 @@ void test_json_state_data_counts_pads_it_could_not_read()
     half.status.valid = true;
     half.values = { { 0x30, 12 }, { 0x31, -1 } };
 
-    const nlohmann::json partial = ewr::JsonStateData(model, half);
+    const nlohmann::json partial = ewr::json::StateData(model, half);
     CHECK(partial["pads_total"] == 2);
     CHECK(partial["pads"].size() == 1);
     CHECK(partial["pads"][0]["kind"] == "main");
 
     // Nothing answered at all: still two pads on this model.
     ewr::StateSnapshot silent;
-    const nlohmann::json none = ewr::JsonStateData(model, silent);
+    const nlohmann::json none = ewr::json::StateData(model, silent);
     CHECK(none["pads_total"] == 2);
     CHECK(none["pads"].empty());
     CHECK(none["counters"].empty());
@@ -6192,7 +6194,7 @@ void test_json_state_data_counts_pads_it_could_not_read()
     // A model with no pad groups reports zero, which is the other meaning.
     ewr::DbPrinterModel bare;
     bare.name = "NoPads";
-    const nlohmann::json empty = ewr::JsonStateData(bare, half);
+    const nlohmann::json empty = ewr::json::StateData(bare, half);
     CHECK(empty["pads_total"] == 0);
     CHECK(empty["pads"].empty());
 }
@@ -6207,7 +6209,7 @@ void test_c_abi_constants_and_status_names()
     // 2 added ewr_session_open_network; 3 the backup callback, ewr_restore
     // and ewr_set_data_dir.
     CHECK(ewr_abi_version() == 3);
-    CHECK(ewr_json_contract_version() == ewr::JsonEmitter::kContractVersion);
+    CHECK(ewr_json_contract_version() == ewr::json::Emitter::kContractVersion);
     CHECK(std::string(ewr_version()) == EWR_VERSION);
 
     // Renumbering these would silently change what a caller's constant means.
@@ -6405,7 +6407,7 @@ void test_json_contract_envelope_and_order()
 
     std::ostringstream out;
     {
-        ewr::JsonEmitter emitter(out);
+        ewr::json::Emitter emitter(out);
         emitter.Hello("1.2.3", "linux", "status", nullptr, nlohmann::json::object());
 
         ewr::log::Event event;
@@ -6441,7 +6443,7 @@ void test_json_contract_envelope_and_order()
 
     for (std::size_t i = 0; i < lines.size(); ++i)
     {
-        CHECK(lines[i]["v"] == ewr::JsonEmitter::kContractVersion);
+        CHECK(lines[i]["v"] == ewr::json::Emitter::kContractVersion);
         CHECK(lines[i]["seq"] == static_cast<int>(i));
         CHECK(lines[i].contains("t"));
     }
@@ -6474,7 +6476,7 @@ void test_json_contract_reports_absent_progress_as_null()
     std::cout << "[TEST] test_json_contract_reports_absent_progress_as_null" << std::endl;
 
     std::ostringstream out;
-    ewr::JsonEmitter emitter(out);
+    ewr::json::Emitter emitter(out);
 
     ewr::log::Event event;
     event.level = ewr::log::Level::Warning;
@@ -6995,9 +6997,9 @@ void test_d4_session_reports_the_http_personality()
 // Address discovery (discover.cpp)
 // ---------------------------------------------------------------------------
 
-static ewr::EepromSnapshot Snap(std::initializer_list<std::pair<uint16_t, int>> v)
+static ewr::discovery::EepromSnapshot Snap(std::initializer_list<std::pair<uint16_t, int>> v)
 {
-    return ewr::EepromSnapshot(v);
+    return ewr::discovery::EepromSnapshot(v);
 }
 
 void test_discovery_needs_three_passes()
@@ -7006,25 +7008,25 @@ void test_discovery_needs_three_passes()
 
     // Two passes give one interval, and one interval cannot tell a counter
     // from a byte that happened to move once.
-    const std::vector<ewr::EepromSnapshot> two = {
+    const std::vector<ewr::discovery::EepromSnapshot> two = {
         Snap({ {0x30, 10} }),
         Snap({ {0x30, 11} }),
     };
-    CHECK(ewr::FindTrendingBytes(two).empty());
-    CHECK(ewr::FindTrendingBytes({}).empty());
+    CHECK(ewr::discovery::FindTrendingBytes(two).empty());
+    CHECK(ewr::discovery::FindTrendingBytes({}).empty());
 }
 
 void test_discovery_keeps_only_what_moves_one_way_every_time()
 {
     std::cout << "[TEST] test_discovery_keeps_only_what_moves_one_way_every_time" << std::endl;
 
-    const std::vector<ewr::EepromSnapshot> passes = {
+    const std::vector<ewr::discovery::EepromSnapshot> passes = {
         Snap({ {0x30, 10}, {0x40, 5}, {0x50, 7}, {0x60, 9}, {0x70, 90} }),
         Snap({ {0x30, 14}, {0x40, 9}, {0x50, 7}, {0x60, 3}, {0x70, 80} }),
         Snap({ {0x30, 21}, {0x40, 9}, {0x50, 7}, {0x60, 8}, {0x70, 55} }),
     };
 
-    const std::vector<ewr::ByteTrend> found = ewr::FindTrendingBytes(passes);
+    const std::vector<ewr::discovery::ByteTrend> found = ewr::discovery::FindTrendingBytes(passes);
 
     // 0x30 rises twice and 0x70 falls twice: both are trends. 0x40 rises then
     // stalls, 0x50 never moves, 0x60 falls then rises - the noise to reject.
@@ -7050,13 +7052,13 @@ void test_discovery_reads_a_wrapping_low_byte_as_a_pair()
     // 0x0130 -> 0x0202 -> 0x02FE. The low byte goes 0x30, 0x02, 0xFE: it breaks
     // its own run at the first interval. Judged alone it is discarded; judged
     // as the pair it belongs to, it is a counter climbing through a rollover.
-    const std::vector<ewr::EepromSnapshot> passes = {
+    const std::vector<ewr::discovery::EepromSnapshot> passes = {
         Snap({ {0x30, 0x30}, {0x31, 0x01} }),
         Snap({ {0x30, 0x02}, {0x31, 0x02} }),
         Snap({ {0x30, 0xFE}, {0x31, 0x02} }),
     };
 
-    const std::vector<ewr::ByteTrend> found = ewr::FindTrendingBytes(passes);
+    const std::vector<ewr::discovery::ByteTrend> found = ewr::discovery::FindTrendingBytes(passes);
 
     CHECK(found.size() == 1);
     CHECK(found[0].IsPair());
@@ -7075,13 +7077,13 @@ void test_discovery_ignores_addresses_that_went_unanswered()
 
     // A -1 is "the printer did not answer", not a low reading. Treating it as
     // one would manufacture a trend out of a failed read.
-    const std::vector<ewr::EepromSnapshot> passes = {
+    const std::vector<ewr::discovery::EepromSnapshot> passes = {
         Snap({ {0x30, -1}, {0x44, 1} }),
         Snap({ {0x30, 50}, {0x44, 2} }),
         Snap({ {0x30, 90}, {0x44, 3} }),
     };
 
-    const std::vector<ewr::ByteTrend> found = ewr::FindTrendingBytes(passes);
+    const std::vector<ewr::discovery::ByteTrend> found = ewr::discovery::FindTrendingBytes(passes);
 
     CHECK(found.size() == 1);
     CHECK(found[0].addresses == std::vector<uint16_t>{ 0x44 });
@@ -7091,17 +7093,17 @@ void test_discovery_json_records_readings_not_a_reset_plan()
 {
     std::cout << "[TEST] test_discovery_json_records_readings_not_a_reset_plan" << std::endl;
 
-    const std::vector<ewr::EepromSnapshot> passes = {
+    const std::vector<ewr::discovery::EepromSnapshot> passes = {
         Snap({ {0x30, 1}, {0x31, 0}, {0x70, 9} }),
         Snap({ {0x30, 2}, {0x31, 0}, {0x70, 6} }),
         Snap({ {0x30, 3}, {0x31, 0}, {0x70, 2} }),
     };
 
-    const std::vector<ewr::ByteTrend> found = ewr::FindTrendingBytes(passes);
+    const std::vector<ewr::discovery::ByteTrend> found = ewr::discovery::FindTrendingBytes(passes);
     CHECK(found.size() == 2);
 
     const std::string body = "            \"rkey\": 1304,\n";
-    const std::string doc = ewr::FormatDiscoveryJson("ET-M1180", body, found);
+    const std::string doc = ewr::discovery::ToJson("ET-M1180", body, found);
 
     CHECK(doc.find("\"schema_version\": 4") != std::string::npos);
     CHECK(doc.find("\"ET-M1180\"") != std::string::npos);
@@ -7153,7 +7155,7 @@ void test_l3110_shows_both_counters_sharing_a_byte()
     bool sawLoaded = false, sawEmpty = false;
     for (const auto& spec : specs)
     {
-        const ewr::CounterReading r = ewr::EvaluateCounter(spec, dump);
+        const ewr::CounterReading r = spec.Evaluate(dump);
         CHECK(r.complete);
         if (r.max_value == 6346 && r.value == 589)
             sawLoaded = true;      // 0x30/0x31 + low nibble of 0x2F: 77 + 2*256
@@ -7426,15 +7428,15 @@ void test_printer_condition_names_an_error_once()
     st.hasError = true;
     st.errorCode = 0x05;
     st.errorName = "INK OUT";
-    CHECK(ewr::DescribePrinterCondition(st) == "ERROR: INK OUT (0x05)");
+    CHECK(ewr::status::Describe(st) == "ERROR: INK OUT (0x05)");
 
     // A busy printer that also reports an error keeps both.
     st.stateName = "BUSY";
-    CHECK(ewr::DescribePrinterCondition(st) == "BUSY | ERROR: INK OUT (0x05)");
+    CHECK(ewr::status::Describe(st) == "BUSY | ERROR: INK OUT (0x05)");
 
     st.hasError = false;
     st.stateName = "IDLE";
-    CHECK(ewr::DescribePrinterCondition(st) == "IDLE");
+    CHECK(ewr::status::Describe(st) == "IDLE");
 }
 
 // A run that wrote past an objection has to say so in the result a caller
@@ -7447,7 +7449,7 @@ void test_json_reset_data_lists_overrides()
 
     ewr::ResetOutcome clean;
     clean.phase = ewr::ResetPhase::Done;
-    const nlohmann::json none = ewr::JsonResetData(model, false, clean);
+    const nlohmann::json none = ewr::json::ResetData(model, false, clean);
     CHECK(none.contains("overrides") && none["overrides"].is_array() && none["overrides"].empty());
 
     ewr::ResetOutcome forced;
@@ -7458,7 +7460,7 @@ void test_json_reset_data_lists_overrides()
     forced.overrides.push_back({ "db_conflict", "", -1 });
     forced.overrides.push_back({ "backup", "not_saved", -1 });
 
-    const nlohmann::json out = ewr::JsonResetData(model, false, forced);
+    const nlohmann::json out = ewr::json::ResetData(model, false, forced);
     const nlohmann::json& list = out["overrides"];
     CHECK(list.size() == 5);
     if (list.size() != 5)
@@ -7522,21 +7524,21 @@ void test_json_never_leaks_minus_one()
     ink.errorName = "INK OUT";
     ink.errorCode = 5;
     ink.explanation = "Clear it first.";
-    const nlohmann::json inkJson = ewr::JsonBlocker(ink);
+    const nlohmann::json inkJson = ewr::json::BlockerData(ink);
     CHECK(inkJson["error"] == "INK OUT");
     CHECK(inkJson["error_code"] == 5);
     CHECK(inkJson["explanation"] == "Clear it first.");
 
     ewr::Blocker busy;
     busy.errorName = "PRINTER BUSY";
-    const nlohmann::json busyJson = ewr::JsonBlocker(busy);
+    const nlohmann::json busyJson = ewr::json::BlockerData(busy);
     CHECK(busyJson.contains("error_code") && busyJson["error_code"].is_null());
 
     ewr::usb::InterfaceInfo usbprint;
     usbprint.index = 1;
     usbprint.className = "USBPRINT";
     usbprint.path = "\\\\?\\usb#vid_04b8";
-    const nlohmann::json plain = ewr::JsonInterface(usbprint, "");
+    const nlohmann::json plain = ewr::json::InterfaceEntry(usbprint, "");
     CHECK(plain.contains("interface_number") && plain["interface_number"].is_null());
     CHECK(plain["device_id"].is_null());
     CHECK(plain["model_match"].is_null());
@@ -7546,7 +7548,7 @@ void test_json_never_leaks_minus_one()
     vendor.index = 2;
     vendor.interfaceNumber = 2;
     vendor.deviceId = "MFG:EPSON;MDL:ET-2800 Series;";
-    const nlohmann::json composite = ewr::JsonInterface(vendor, "ET-2800");
+    const nlohmann::json composite = ewr::json::InterfaceEntry(vendor, "ET-2800");
     CHECK(composite["interface_number"] == 2);
     CHECK(composite["device_id"] == "MFG:EPSON;MDL:ET-2800 Series;");
     CHECK(composite["model_match"] == "ET-2800");
@@ -7554,7 +7556,7 @@ void test_json_never_leaks_minus_one()
     // Valid as soon as any field decodes, so the state may be missing.
     ewr::PrinterStatus inksOnly;
     inksOnly.valid = true;
-    const nlohmann::json st = ewr::JsonPrinterStatus(inksOnly);
+    const nlohmann::json st = ewr::json::Status(inksOnly);
     CHECK(st["state"].is_null());
     CHECK(st["state_code"].is_null());
     CHECK(st["error_code"].is_null());
@@ -7889,7 +7891,7 @@ void test_snmp_gateway_reads_state_through_the_session()
 
     const ewr::DeviceIdQueryResult id = gateway.QueryDeviceId();
     CHECK(id.found);
-    CHECK(ewr::ParseIeee1284DeviceId(id.deviceId).model == "L3150 Series");
+    CHECK(ewr::deviceid::Parse(id.deviceId).model == "L3150 Series");
     CHECK(gateway.Answered());
 
     ewr::log::Reporter quiet;
@@ -7926,7 +7928,7 @@ void test_snmp_gateway_retries_a_lost_datagram()
     script->dropFirst = 2;
 
     ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
-    const ewr::StateSnapshot state = ewr::ReadPrinterStatus(gateway);
+    const ewr::StateSnapshot state = ewr::status::Read(gateway);
 
     CHECK(state.available);
     CHECK(state.status.valid);
@@ -7957,7 +7959,7 @@ void test_snmp_gateway_reports_silence_without_asking_on()
     CHECK(script->requested.size() == 3);
 
     const ewr::QueryRunResult run = gateway.RunQuery({}, { ewr::ctrl::StatusQueryPacket() },
-                                                     ewr::DefaultQueryOptions());
+                                                     ewr::ExecutorOptions::ForQueries());
     CHECK(!run.deviceFound);
     CHECK(run.query.handshakeFailed);
     CHECK(run.query.replies.size() == 1 && run.query.replies[0].empty());
@@ -8001,7 +8003,7 @@ void test_snmp_query_path_never_sends_a_write()
     CHECK(gateway.OverNetwork());
 
     // Handed to the query path, a write is dropped, not forwarded.
-    const ewr::QueryRunResult query = gateway.RunQuery({}, { write }, ewr::DefaultQueryOptions());
+    const ewr::QueryRunResult query = gateway.RunQuery({}, { write }, ewr::ExecutorOptions::ForQueries());
     CHECK(script->requested.empty());
     CHECK(query.query.replies.size() == 1 && query.query.replies[0].empty());
 
@@ -8286,7 +8288,7 @@ void test_snmp_gateway_waits_for_the_run_lock()
     CHECK(!gateway.QueryDeviceId().found);
 
     const ewr::QueryRunResult query = gateway.RunQuery({}, { ewr::ctrl::StatusQueryPacket() },
-                                                       ewr::DefaultQueryOptions());
+                                                       ewr::ExecutorOptions::ForQueries());
     CHECK(!query.query.success);
     CHECK(query.query.error.find("Another EWR run") != std::string::npos);
 
@@ -8550,7 +8552,7 @@ void test_snmp_locked_eeprom_stops_before_any_write()
     CHECK(outcome.error.find("Nothing was written") != std::string::npos);
     CHECK(script->writesSeen == 0);
     CHECK(!asked && !blockerAsked);
-    CHECK(ewr::JsonResetData(model, false, outcome)["phase"] == "not_supported");
+    CHECK(ewr::json::ResetData(model, false, outcome)["phase"] == "not_supported");
 
     // Said once per run, not again for every read that follows.
     CHECK(refusedEvents == 1);
@@ -8583,7 +8585,7 @@ void test_backup_json_round_trip()
     CHECK(original.Answered() == 2);
     CHECK(!original.Complete());
 
-    const std::string text = ewr::BackupToJson(original);
+    const std::string text = ewr::backup::ToJson(original);
     const nlohmann::json root = nlohmann::json::parse(text);
     CHECK(root["format"] == "ewr-backup");
     CHECK(root["version"] == 1);
@@ -8593,7 +8595,7 @@ void test_backup_json_round_trip()
 
     ewr::Backup parsed;
     std::string error;
-    CHECK(ewr::ParseBackupText(text, parsed, error));
+    CHECK(ewr::backup::Parse(text, parsed, error));
     CHECK(error.empty());
     CHECK(parsed.source == "backup");
     CHECK(parsed.model == original.model);
@@ -8624,7 +8626,7 @@ void test_backup_parses_dumps()
 
     ewr::Backup dump;
     std::string error;
-    CHECK(ewr::ParseBackupText(v1, dump, error));
+    CHECK(ewr::backup::Parse(v1, dump, error));
     CHECK(dump.source == "dump");
     CHECK(dump.dumpFormat == 1);
     CHECK(dump.model == "R220");
@@ -8646,7 +8648,7 @@ void test_backup_parses_dumps()
         "0x2F,0x00,Main Pad Counter\r\n"
         "0x100,0x01,\r\n";
 
-    CHECK(ewr::ParseBackupText(v2, dump, error));
+    CHECK(ewr::backup::Parse(v2, dump, error));
     CHECK(dump.dumpFormat == 2);
     CHECK(dump.model == "ET-2800");
     CHECK(dump.serial == "X5NA012345");
@@ -8662,30 +8664,30 @@ void test_backup_refuses_what_it_cannot_trust()
     ewr::Backup out;
     std::string error;
 
-    CHECK(!ewr::ParseBackupText("", out, error));
-    CHECK(!ewr::ParseBackupText("hello", out, error));
-    CHECK(!ewr::ParseBackupText("{\"format\": \"something-else\", \"version\": 1}", out, error));
+    CHECK(!ewr::backup::Parse("", out, error));
+    CHECK(!ewr::backup::Parse("hello", out, error));
+    CHECK(!ewr::backup::Parse("{\"format\": \"something-else\", \"version\": 1}", out, error));
 
     // Written by a newer format: refused rather than half understood.
-    nlohmann::json future = nlohmann::json::parse(ewr::BackupToJson(MakeTestBackup()));
+    nlohmann::json future = nlohmann::json::parse(ewr::backup::ToJson(MakeTestBackup()));
     future["version"] = 2;
     error.clear();
-    CHECK(!ewr::ParseBackupText(future.dump(), out, error));
+    CHECK(!ewr::backup::Parse(future.dump(), out, error));
     CHECK(!error.empty());
 
     // A value that is not a byte.
-    nlohmann::json wide = nlohmann::json::parse(ewr::BackupToJson(MakeTestBackup()));
+    nlohmann::json wide = nlohmann::json::parse(ewr::backup::ToJson(MakeTestBackup()));
     wide["bytes"][0]["value"] = 300;
-    CHECK(!ewr::ParseBackupText(wide.dump(), out, error));
+    CHECK(!ewr::backup::Parse(wide.dump(), out, error));
 
     // No model: nothing to check the printer against.
-    nlohmann::json anonymous = nlohmann::json::parse(ewr::BackupToJson(MakeTestBackup()));
+    nlohmann::json anonymous = nlohmann::json::parse(ewr::backup::ToJson(MakeTestBackup()));
     anonymous["model"] = "";
-    CHECK(!ewr::ParseBackupText(anonymous.dump(), out, error));
+    CHECK(!ewr::backup::Parse(anonymous.dump(), out, error));
 
-    CHECK(!ewr::ParseBackupText("# EWR EEPROM dump\n0x00,0x01,\n", out, error)); // no model line
-    CHECK(!ewr::ParseBackupText("# EWR EEPROM dump\n# model: R220\n0x00,0x1FF,\n", out, error));
-    CHECK(!ewr::ParseBackupText("# EWR EEPROM dump\n# model: R220\nnot a line\n", out, error));
+    CHECK(!ewr::backup::Parse("# EWR EEPROM dump\n0x00,0x01,\n", out, error)); // no model line
+    CHECK(!ewr::backup::Parse("# EWR EEPROM dump\n# model: R220\n0x00,0x1FF,\n", out, error));
+    CHECK(!ewr::backup::Parse("# EWR EEPROM dump\n# model: R220\nnot a line\n", out, error));
 }
 
 void test_backup_file_is_written_whole_and_never_overwrites()
@@ -8697,11 +8699,11 @@ void test_backup_file_is_written_whole_and_never_overwrites()
     fs::remove_all(dir, ec);
 
     const ewr::Backup backup = MakeTestBackup();
-    CHECK(ewr::BackupFileName(backup) == "TestJet_100_X7A9000123_20261025T093000Z.json");
+    CHECK(ewr::backup::FileName(backup) == "TestJet_100_X7A9000123_20261025T093000Z.json");
 
     std::string first, second, error;
-    CHECK(ewr::WriteBackupFile(backup, (dir / "nested").string(), first, error));
-    CHECK(ewr::WriteBackupFile(backup, (dir / "nested").string(), second, error));
+    CHECK(ewr::backup::WriteFile(backup, (dir / "nested").string(), first, error));
+    CHECK(ewr::backup::WriteFile(backup, (dir / "nested").string(), second, error));
     CHECK(first != second);
     CHECK(fs::exists(first) && fs::exists(second));
 
@@ -8718,7 +8720,7 @@ void test_backup_file_is_written_whole_and_never_overwrites()
         std::ifstream in(first);
         const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         ewr::Backup reread;
-        CHECK(ewr::ParseBackupText(text, reread, error));
+        CHECK(ewr::backup::Parse(text, reread, error));
         CHECK(reread.bytes == backup.bytes);
     }
 
@@ -8773,7 +8775,7 @@ void test_session_backup_comes_before_the_first_write()
     CHECK(out.backupTaken);
     CHECK(out.backupLocation == "backups/test.json");
 
-    const nlohmann::json data = ewr::JsonResetData(model, false, out);
+    const nlohmann::json data = ewr::json::ResetData(model, false, out);
     CHECK(data["backup"]["file"] == "backups/test.json");
     CHECK(data["backup"]["bytes"] == 2);
     CHECK(data["backup"]["complete"] == true);
@@ -8892,7 +8894,7 @@ void test_session_no_backup_without_a_preflight()
     CHECK(saves == 0);
     CHECK(gw.resetCalls == 1);
     CHECK(!out.backupTaken);
-    CHECK(ewr::JsonResetData(model, false, out)["backup"].is_null());
+    CHECK(ewr::json::ResetData(model, false, out)["backup"].is_null());
 }
 
 // ---------------------------------------------------------------------------
@@ -8948,7 +8950,7 @@ void test_restore_plan_keeps_only_mapped_bytes()
         { 0x0C, 0x99 },  // a repeat: the first one counts
     };
 
-    const ewr::RestorePlan plan = ewr::PlanRestore(model, dump);
+    const ewr::RestorePlan plan = ewr::restore::Plan(model, dump);
     CHECK(plan.model == model.name);
     CHECK(plan.writes.size() == 2);
     CHECK((plan.writes[0] == std::pair<uint16_t, uint8_t>(0x0C, 0x12)));
@@ -8974,9 +8976,9 @@ void test_restore_plan_keeps_only_mapped_bytes()
     // Beyond mem_high is not EEPROM at all.
     model.mem_high = 0xFF;
     model.wlen = 2;
-    CHECK(ewr::PlanRestore(model, dump).skipped.size() == 3);
+    CHECK(ewr::restore::Plan(model, dump).skipped.size() == 3);
     bool above = false;
-    for (const auto& skip : ewr::PlanRestore(model, dump).skipped)
+    for (const auto& skip : ewr::restore::Plan(model, dump).skipped)
         above = above || (skip.address == 0x150 && skip.reason == "above_limit");
     CHECK(above);
 
@@ -8986,7 +8988,7 @@ void test_restore_plan_keeps_only_mapped_bytes()
     backup.target = "waste";
     backup.model = model.name;
     backup.bytes = { { 0x0C, 0x12 }, { 0x0D, 0x34 }, { 0x2B, 0x00 }, { 0x150, 0x00 } };
-    const ewr::RestorePlan fromBackup = ewr::PlanRestore(model, backup);
+    const ewr::RestorePlan fromBackup = ewr::restore::Plan(model, backup);
     CHECK(fromBackup.missing.empty());
     CHECK(fromBackup.touchesWaste && !fromBackup.touchesInk);
 }
@@ -9394,21 +9396,21 @@ void test_dump_addresses_reach_the_mapped_bytes()
     wide.pad_groups.push_back(group);
     wide.close_ops.push_back({ 0x100, 0xFE, 0x00 });
 
-    const std::vector<uint16_t> classic = ewr::DumpAddresses(wide);
+    const std::vector<uint16_t> classic = ewr::restore::DumpAddresses(wide);
     CHECK(classic.size() == 256 + 2);
     CHECK(classic[255] == 0xFF && classic[256] == 0x100 && classic[257] == 0x1A0);
-    CHECK(ewr::DumpAddresses(wide, true).size() == 0x800);
+    CHECK(ewr::restore::DumpAddresses(wide, true).size() == 0x800);
 
     // A 1-byte read address cannot name 0x1A0: the read would land on 0xA0.
     ewr::DbPrinterModel narrow = wide;
     narrow.rlen = 1;
-    CHECK(ewr::DumpAddresses(narrow).size() == 256);
-    CHECK(ewr::DumpAddresses(narrow, true).size() == 256);
+    CHECK(ewr::restore::DumpAddresses(narrow).size() == 256);
+    CHECK(ewr::restore::DumpAddresses(narrow, true).size() == 256);
 
     // A small part reads only what it has.
     ewr::DbPrinterModel tiny = wide;
     tiny.mem_high = 0x7F;
-    CHECK(ewr::DumpAddresses(tiny).size() == 0x80);
+    CHECK(ewr::restore::DumpAddresses(tiny).size() == 0x80);
 }
 
 // ewr_restore refuses what it cannot use before it asks the printer anything.
@@ -9435,17 +9437,17 @@ void test_c_abi_restore_refuses_bad_files()
     // An R220 backup handed to another model is refused, not written.
     ewr::Backup backup = MakeTestBackup();
     backup.model = "R220";
-    const std::string text = ewr::BackupToJson(backup);
+    const std::string text = ewr::backup::ToJson(backup);
     CHECK(ewr_restore(session, "L3150", text.c_str(), &json) == EWR_ERR_BAD_BACKUP);
 
     // A file whose bytes are none of the model's.
     backup.bytes = { { 0x00, 0x01 }, { 0x01, 0x02 } };
-    const std::string foreign = ewr::BackupToJson(backup);
+    const std::string foreign = ewr::backup::ToJson(backup);
     CHECK(ewr_restore(session, nullptr, foreign.c_str(), &json) == EWR_ERR_BAD_BACKUP);
 
     // A model the database does not know.
     backup.model = "No Such Printer 9000";
-    const std::string unknown = ewr::BackupToJson(backup);
+    const std::string unknown = ewr::backup::ToJson(backup);
     CHECK(ewr_restore(session, nullptr, unknown.c_str(), &json) == EWR_ERR_MODEL_UNKNOWN);
 
     ewr_session_close(session);
@@ -9556,32 +9558,32 @@ void test_maintenance_blocker_policy()
     idle.valid = true;
     idle.stateCode = 0x04;
     idle.stateName = "IDLE";
-    CHECK(!ewr::EvaluateMaintenanceBlocker(idle, A::HeadClean).has_value());
-    CHECK(!ewr::EvaluateMaintenanceBlocker(idle, A::NozzleCheck).has_value());
+    CHECK(!ewr::gates::EvaluateMaintenance(idle, A::HeadClean).has_value());
+    CHECK(!ewr::gates::EvaluateMaintenance(idle, A::NozzleCheck).has_value());
 
     ewr::PrinterStatus unread;
-    CHECK(ewr::EvaluateMaintenanceBlocker(unread, A::HeadClean).has_value());
+    CHECK(ewr::gates::EvaluateMaintenance(unread, A::HeadClean).has_value());
 
     // The very error a reset clears blocks maintenance: the printer refuses it.
     ewr::PrinterStatus full = idle;
     full.hasError = true;
     full.errorCode = 0x10;
     full.errorName = "SERVICE REQUEST";
-    const auto pads = ewr::EvaluateMaintenanceBlocker(full, A::HeadClean);
+    const auto pads = ewr::gates::EvaluateMaintenance(full, A::HeadClean);
     CHECK(pads.has_value() && pads->errorCode == 0x10);
 
     // An empty cartridge: never a cleaning.
     ewr::PrinterStatus empty = full;
     empty.errorCode = 0x05;
     empty.errorName = "INK OUT";
-    CHECK(ewr::EvaluateMaintenanceBlocker(empty, A::HeadClean).has_value());
-    CHECK(ewr::EvaluateMaintenanceBlocker(empty, A::PowerClean).has_value());
-    CHECK(ewr::EvaluateMaintenanceBlocker(empty, A::NozzleCheck).has_value());
+    CHECK(ewr::gates::EvaluateMaintenance(empty, A::HeadClean).has_value());
+    CHECK(ewr::gates::EvaluateMaintenance(empty, A::PowerClean).has_value());
+    CHECK(ewr::gates::EvaluateMaintenance(empty, A::NozzleCheck).has_value());
 
     ewr::PrinterStatus busy = idle;
     busy.stateCode = 0x07;
     busy.stateName = "CLEANING";
-    const auto working = ewr::EvaluateMaintenanceBlocker(busy, A::HeadClean);
+    const auto working = ewr::gates::EvaluateMaintenance(busy, A::HeadClean);
     CHECK(working.has_value() && working->errorName == "PRINTER BUSY" && working->errorCode == -1);
 }
 
@@ -9908,7 +9910,7 @@ void test_restore_all_plan_never_writes_identity()
     dump.bytes = { { 0x07, 0xE0 }, { 0x0C, 0x12 }, { 0x42, 0x01 }, { 0x43, 0x02 }, { 0x44, 0x03 },
                    { 0x45, 0x04 }, { 0x60, 'X' }, { 0x61, -1 }, { 0x70, -1 }, { 0x150, 0x01 } };
 
-    const ewr::RestorePlan plan = ewr::PlanRestoreAll(model, dump);
+    const ewr::RestorePlan plan = ewr::restore::PlanAll(model, dump);
     CHECK(plan.requireSameUnit);
     CHECK(plan.writes.size() == 2); // 0x07 (unmapped) and 0x0C
     CHECK((plan.writes[0] == std::pair<uint16_t, uint8_t>(0x07, 0xE0)));
@@ -10027,7 +10029,7 @@ void test_c_abi_restore_all_needs_its_consent()
     // A backup is not a dump.
     ewr::Backup backup = MakeTestBackup();
     backup.model = "R220";
-    const std::string text = ewr::BackupToJson(backup);
+    const std::string text = ewr::backup::ToJson(backup);
     const int notDump = ewr_restore_all(session, nullptr, text.c_str(), 1, &json);
     CHECK(notDump == EWR_ERR_BAD_BACKUP || notDump == EWR_ERR_NOT_SUPPORTED);
 
@@ -10107,11 +10109,11 @@ void test_snmp_runs_a_command_once_and_queries_refuse_it()
     ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
 
     // The read-only path refuses it before anything is sent.
-    const ewr::QueryRunResult query = gateway.RunQuery({}, { clean }, ewr::DefaultQueryOptions());
+    const ewr::QueryRunResult query = gateway.RunQuery({}, { clean }, ewr::ExecutorOptions::ForQueries());
     CHECK(script->requested.empty());
     CHECK(query.query.replies.size() == 1 && query.query.replies[0].empty());
 
-    const ewr::CommandRunResult run = gateway.RunCommand(clean, ewr::DefaultQueryOptions());
+    const ewr::CommandRunResult run = gateway.RunCommand(clean, ewr::ExecutorOptions::ForQueries());
     CHECK(run.supported && run.sent && run.deviceFound);
     CHECK(script->requested.size() == 1);
     const std::vector<unsigned char> payload = ewr::d4::ExtractPayload(run.reply);
@@ -10221,8 +10223,8 @@ void test_snmp_backup_then_restore_round_trip()
     // The backup, through a file and back, undoes the reset.
     ewr::Backup reread;
     std::string error;
-    CHECK(ewr::ParseBackupText(ewr::BackupToJson(kept), reread, error));
-    const ewr::RestorePlan plan = ewr::PlanRestore(model, reread);
+    CHECK(ewr::backup::Parse(ewr::backup::ToJson(kept), reread, error));
+    const ewr::RestorePlan plan = ewr::restore::Plan(model, reread);
     CHECK(plan.writes.size() == 2 && plan.skipped.empty() && plan.missing.empty());
 
     ewr::ResetHandlers again;

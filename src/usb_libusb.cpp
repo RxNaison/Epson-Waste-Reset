@@ -380,7 +380,7 @@ namespace ewr {
                 return "";
             }
 
-            return ExtractDeviceIdString(buffer, static_cast<size_t>(received));
+            return deviceid::ExtractString(buffer, static_cast<size_t>(received));
         }
 
         class LibusbBackend final : public usb::Backend

@@ -1,4 +1,4 @@
-#include "ewr/discover.h"
+#include "ewr/discovery.h"
 
 #include <algorithm>
 #include <set>
@@ -10,11 +10,11 @@ namespace ewr {
 
         // -1 (no reply) anywhere in the series disqualifies the address: a
         // missing read is not a value that moved.
-        bool Series(const std::vector<EepromSnapshot>& snapshots, uint16_t addr,
+        bool Series(const std::vector<discovery::EepromSnapshot>& snapshots, uint16_t addr,
                     std::vector<int>& out)
         {
             out.clear();
-            for (const EepromSnapshot& snap : snapshots)
+            for (const discovery::EepromSnapshot& snap : snapshots)
             {
                 int value = -1;
                 for (const auto& entry : snap)
@@ -61,14 +61,14 @@ namespace ewr {
 
     } // namespace
 
-    std::vector<ByteTrend> FindTrendingBytes(const std::vector<EepromSnapshot>& snapshots)
+    std::vector<discovery::ByteTrend> discovery::FindTrendingBytes(const std::vector<discovery::EepromSnapshot>& snapshots)
     {
-        std::vector<ByteTrend> found;
+        std::vector<discovery::ByteTrend> found;
         if (snapshots.size() < 3)
             return found;
 
         std::set<uint16_t> addresses;
-        for (const EepromSnapshot& snap : snapshots)
+        for (const discovery::EepromSnapshot& snap : snapshots)
         {
             for (const auto& entry : snap)
                 addresses.insert(entry.first);
@@ -96,7 +96,7 @@ namespace ewr {
             if (!Trend(values, deltas, rising))
                 continue;
 
-            ByteTrend t;
+            discovery::ByteTrend t;
             t.addresses = { addr, static_cast<uint16_t>(addr + 1) };
             t.values = values;
             t.deltas = deltas;
@@ -116,7 +116,7 @@ namespace ewr {
             if (!Trend(values, deltas, rising))
                 continue;
 
-            ByteTrend t;
+            discovery::ByteTrend t;
             t.addresses = { addr };
             t.values = values;
             t.deltas = deltas;
@@ -125,7 +125,7 @@ namespace ewr {
         }
 
         std::sort(found.begin(), found.end(),
-            [](const ByteTrend& a, const ByteTrend& b)
+            [](const discovery::ByteTrend& a, const discovery::ByteTrend& b)
             {
                 return a.addresses.front() < b.addresses.front();
             });
@@ -133,9 +133,9 @@ namespace ewr {
         return found;
     }
 
-    std::string FormatDiscoveryJson(const std::string& modelName,
+    std::string discovery::ToJson(const std::string& modelName,
                                     const std::string& modelBodyJson,
-                                    const std::vector<ByteTrend>& trends)
+                                    const std::vector<discovery::ByteTrend>& trends)
     {
         std::ostringstream out;
 
@@ -160,7 +160,7 @@ namespace ewr {
 
         for (std::size_t i = 0; i < trends.size(); ++i)
         {
-            const ByteTrend& t = trends[i];
+            const discovery::ByteTrend& t = trends[i];
 
             out << "            { \"addresses\": [";
             for (std::size_t a = 0; a < t.addresses.size(); ++a)

@@ -1,4 +1,5 @@
 #include "ewr/updater.h"
+#include "ewr/update_platform.h"
 
 #include <nlohmann/json.hpp>
 
@@ -184,7 +185,7 @@ namespace ewr {
 
     // ------------------------------------------------------------- Pure helpers
 
-    bool ValidateDatabasePayload(const std::string& path, int maxSupportedSchema)
+    bool update::ValidateDatabase(const std::string& path, int maxSupportedSchema)
     {
         try
         {
@@ -222,7 +223,7 @@ namespace ewr {
         }
     }
 
-    UpdateMetadata ParseReleaseResponse(const std::string& responseBody,
+    UpdateMetadata update::ParseReleaseResponse(const std::string& responseBody,
                                         const std::string& currentVersion,
                                         bool includePreRelease)
     {
@@ -270,7 +271,7 @@ namespace ewr {
         return metadata;
     }
 
-    bool IsEwrTempArtifact(const std::string& filename)
+    bool update::IsTempArtifact(const std::string& filename)
     {
         const std::string name = ToLower(filename);
 
@@ -278,7 +279,7 @@ namespace ewr {
                (EndsWith(name, ".tmp") || EndsWith(name, ".staged"));
     }
 
-    void CleanupStaleTempFiles()
+    void update::CleanupStaleTempFiles()
     {
         std::error_code ec;
 
@@ -289,21 +290,21 @@ namespace ewr {
         for (fs::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec))
         {
             if (!it->is_regular_file(ec)) continue;
-            if (IsEwrTempArtifact(it->path().filename().string()))
+            if (update::IsTempArtifact(it->path().filename().string()))
                 RemoveQuietly(it->path());
         }
     }
 
-    // ------------------------------------------------------------------ Updater
+    // ------------------------------------------------------------------ Network
 
-    DatabaseUpdate Updater::UpdateDatabaseNow(const std::string& dbPath, int maxSupportedSchema)
+    DatabaseUpdate update::UpdateDatabaseNow(const std::string& dbPath, int maxSupportedSchema)
     {
-        platform::InitNetworking();
+        update::platform::InitNetworking();
 
-        const fs::path staged = fs::path(dbPath + kStagedDatabaseSuffix);
+        const fs::path staged = fs::path(dbPath + update::kStagedDatabaseSuffix);
 
-        if (!platform::HttpDownloadToFile(kDatabaseUrl, staged.string())
-            || !ValidateDatabasePayload(staged.string(), maxSupportedSchema))
+        if (!update::platform::HttpDownloadToFile(kDatabaseUrl, staged.string())
+            || !update::ValidateDatabase(staged.string(), maxSupportedSchema))
         {
             RemoveQuietly(staged);
             ewr::log::Log(ewr::log::Level::Info, ewr::log::Stage::Update, "update.database_failed",
@@ -317,7 +318,7 @@ namespace ewr {
             return DatabaseUpdate::UpToDate;
         }
 
-        if (!platform::ReplaceFileAtomic(staged.string(), dbPath))
+        if (!update::platform::ReplaceFileAtomic(staged.string(), dbPath))
         {
             RemoveQuietly(staged);
             ewr::log::Log(ewr::log::Level::Info, ewr::log::Stage::Update, "update.database_failed",
@@ -330,15 +331,15 @@ namespace ewr {
         return DatabaseUpdate::Updated;
     }
 
-    UpdateMetadata Updater::CheckLatestRelease(const std::string& currentVersion)
+    UpdateMetadata update::CheckLatestRelease(const std::string& currentVersion)
     {
-        platform::InitNetworking();
+        update::platform::InitNetworking();
 
         std::string body;
-        if (!platform::HttpGetString(kLatestReleaseUrl, body))
+        if (!update::platform::HttpGetString(kLatestReleaseUrl, body))
             return UpdateMetadata{};
 
-        return ParseReleaseResponse(body, currentVersion);
+        return update::ParseReleaseResponse(body, currentVersion);
     }
 
 } // namespace ewr

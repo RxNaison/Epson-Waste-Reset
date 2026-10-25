@@ -1,6 +1,9 @@
 #pragma once
+#include "ewr/gateway.h"
+
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ewr {
@@ -45,6 +48,23 @@ namespace ewr {
         Other,    // something else entirely
     };
 
-    std::string DescribePrinterCondition(const PrinterStatus& status);
+    // Parsed '@BDC ST2' status plus raw counter bytes (address -> value).
+    struct StateSnapshot
+    {
+        bool available = false; // a device answered the query session
+        PrinterStatus status;
+        std::vector<std::pair<uint16_t, int>> values;
+    };
 
 } // namespace ewr
+
+namespace ewr::status {
+
+    // Model-free status read: just the '@BDC ST2' report, no counter reads
+    // (those need a model's read key). What the replay path can know about
+    // a printer.
+    StateSnapshot Read(IDeviceGateway& gateway, const ExecutorOptions& options = ExecutorOptions::ForQueries());
+
+    std::string Describe(const PrinterStatus& status);
+
+} // namespace ewr::status

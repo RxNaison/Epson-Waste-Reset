@@ -12,4 +12,7 @@ namespace ewr::format {
 
     std::string HexDumpCapped(const unsigned char* data, size_t size, size_t maxBytes);
 
+    // Now, in UTC, as ISO 8601 (Backup::created).
+    std::string UtcTimestamp();
+
 } // namespace ewr::format

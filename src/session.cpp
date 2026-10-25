@@ -1,4 +1,8 @@
 #include "ewr/session.h"
+#include "ewr/gates.h"
+#include "ewr/format.h"
+#include "ewr/status.h"
+#include "ewr/restore.h"
 #include "ewr/ctrl.h"
 #include "ewr/d4session.h"
 #include "ewr/deviceid.h"
@@ -45,12 +49,12 @@ namespace ewr {
 
     } // namespace
 
-    bool IsExpectedWastePadError(int errorCode)
+    bool gates::IsExpectedWastePadError(int errorCode)
     {
         return errorCode == kServiceRequest || errorCode == kCartridgeOverflow;
     }
 
-    std::optional<Blocker> EvaluateBlocker(const PrinterStatus& status)
+    std::optional<Blocker> gates::Evaluate(const PrinterStatus& status)
     {
         // A clean-looking BUSY report is not proof there is no blocker, so
         // surface it rather than treating it as a green light.
@@ -82,7 +86,7 @@ namespace ewr {
         if (!status.valid || !status.hasError)
             return std::nullopt;
 
-        if (IsExpectedWastePadError(status.errorCode))
+        if (gates::IsExpectedWastePadError(status.errorCode))
             return std::nullopt;
 
         Blocker blocker;
@@ -94,21 +98,21 @@ namespace ewr {
         return blocker;
     }
 
-    std::optional<Blocker> EvaluateInkBlocker(const PrinterStatus& status)
+    std::optional<Blocker> gates::EvaluateInk(const PrinterStatus& status)
     {
         // One more expected state: an empty cartridge cannot gate the very
         // reset that clears it.
         if (status.valid && status.hasError && status.errorCode == kInkOut)
             return std::nullopt;
 
-        return EvaluateBlocker(status);
+        return gates::Evaluate(status);
     }
 
     // ------------------------------------------------------------------
     //  Model-free status read
     // ------------------------------------------------------------------
 
-    StateSnapshot ReadPrinterStatus(IDeviceGateway& gateway, const ExecutorOptions& options)
+    StateSnapshot status::Read(IDeviceGateway& gateway, const ExecutorOptions& options)
     {
         StateSnapshot out;
 
@@ -124,172 +128,6 @@ namespace ewr {
         out.available = true;
         out.status = ctrl::ParseStatusReply(run.query.replies[0]);
         return out;
-    }
-
-    // ------------------------------------------------------------------
-    //  Read-key search
-    // ------------------------------------------------------------------
-
-    size_t ReadKeySearch::Count(ReadAnswer answer) const
-    {
-        size_t count = 0;
-        for (const ReadKeyProbe& probe : probes)
-            count += (probe.answer == answer) ? 1 : 0;
-        return count;
-    }
-
-    std::vector<ReadKeyCandidate> CollectReadKeyCandidates(const std::vector<DbPrinterModel>& models)
-    {
-        std::map<std::pair<uint16_t, uint8_t>, ReadKeyCandidate> byKey;
-        for (const DbPrinterModel& model : models)
-        {
-            // A JIG model has no read key; its 0 would only be noise.
-            if (model.jig)
-                continue;
-
-            ReadKeyCandidate& candidate = byKey[{ model.rkey, model.ReadAddressLength() }];
-            candidate.rkey = model.rkey;
-            candidate.addressLength = model.ReadAddressLength();
-            candidate.models.push_back(model.name);
-        }
-
-        std::vector<ReadKeyCandidate> out;
-        for (auto& entry : byKey)
-            out.push_back(std::move(entry.second));
-
-        // Ties keep the map's (key, width) order, so the list is stable.
-        std::stable_sort(out.begin(), out.end(), [](const ReadKeyCandidate& a, const ReadKeyCandidate& b) {
-            return a.models.size() > b.models.size();
-        });
-
-        return out;
-    }
-
-    ReadKeySearch SearchReadKey(IDeviceGateway& gateway,
-                                const std::vector<ReadKeyCandidate>& candidates,
-                                const ExecutorOptions& options,
-                                const std::function<void(size_t, size_t)>& progress)
-    {
-        // One session per batch. A query session stops at the first exchange
-        // that draws no reply, and the candidates after it are never sent.
-        constexpr size_t kBatch = 16;
-
-        // An unanswered exchange is not yet "the printer ignored this key":
-        // on an SX110 the printer refused the D4 credit four times in one
-        // search, so those reads never left - and one of the four keys was
-        // the closest sibling's. Such a candidate is asked again in a later
-        // pass, and is called silent only after this many tries.
-        constexpr int kPasses = 3;
-
-        ReadKeySearch search;
-
-        // Asking again inside one session buys nothing, and every retry
-        // there costs a fresh session; the passes above do the retrying.
-        ExecutorOptions sweep = options;
-        sweep.maxWriteAttempts = 1;
-
-        std::vector<ReadKeyProbe> probes(candidates.size());
-        std::vector<bool> answered(candidates.size(), false);
-        size_t resolved = 0;
-
-        std::vector<size_t> pending(candidates.size());
-        for (size_t i = 0; i < pending.size(); ++i)
-            pending[i] = i;
-
-        for (int pass = 1; pass <= kPasses && !pending.empty(); ++pass)
-        {
-            std::vector<size_t> unanswered;
-
-            size_t next = 0;
-            while (next < pending.size())
-            {
-                const size_t end = std::min(pending.size(), next + kBatch);
-
-                std::vector<std::vector<unsigned char>> queries;
-                for (size_t slot = next; slot < end; ++slot)
-                {
-                    const ReadKeyCandidate& candidate = candidates[pending[slot]];
-                    queries.push_back(ctrl::ReadPacket(candidate.rkey, 0, candidate.addressLength));
-                }
-
-                const QueryRunResult run = gateway.RunQuery(d4::Handshake(), queries, sweep);
-
-                if (!run.deviceFound)
-                {
-                    search.error = run.query.error.empty() ? "No Epson printer answered." : run.query.error;
-                    break;
-                }
-
-                search.deviceFound = true;
-
-                if (run.query.handshakeFailed)
-                {
-                    search.error = run.query.error;
-                    break;
-                }
-
-                // Replies are positional. The first empty one is the exchange
-                // the session stopped at; everything after it was never sent
-                // and stays in this pass.
-                size_t consumed = 0;
-                for (size_t slot = next; slot < end; ++slot)
-                {
-                    const size_t index = pending[slot];
-                    const size_t position = slot - next;
-                    const std::vector<unsigned char> reply =
-                        position < run.query.replies.size() ? run.query.replies[position]
-                                                            : std::vector<unsigned char>{};
-                    consumed++;
-
-                    if (reply.empty())
-                    {
-                        unanswered.push_back(index);
-                        break;
-                    }
-
-                    probes[index].candidate = candidates[index];
-                    probes[index].answer = ctrl::ClassifyReadReply(reply, probes[index].value, 0);
-                    answered[index] = true;
-                    resolved++;
-                }
-
-                next += consumed;
-
-                if (progress)
-                    progress(resolved, candidates.size());
-            }
-
-            if (!search.error.empty())
-                break;
-
-            pending = std::move(unanswered);
-        }
-
-        // Stopped early: report what was answered, in candidate order.
-        if (!search.error.empty())
-        {
-            for (size_t i = 0; i < candidates.size(); ++i)
-            {
-                if (answered[i])
-                    search.probes.push_back(std::move(probes[i]));
-            }
-            return search;
-        }
-
-        // Still unanswered after every pass.
-        for (size_t index : pending)
-        {
-            probes[index].candidate = candidates[index];
-            probes[index].answer = ReadAnswer::Silent;
-        }
-
-        search.probes = std::move(probes);
-        search.completed = true;
-
-        if (progress)
-            progress(candidates.size(), candidates.size());
-
-        return search;
     }
 
     // ------------------------------------------------------------------
@@ -518,7 +356,7 @@ namespace ewr {
 
     StateSnapshot Session::ReadJigStateFor(const std::vector<uint16_t>* addressOverride) const
     {
-        StateSnapshot out = ReadPrinterStatus(m_gateway, m_queryOptions);
+        StateSnapshot out = status::Read(m_gateway, m_queryOptions);
         if (!out.available)
             return out;
 
@@ -675,7 +513,7 @@ namespace ewr {
         flow.sequence = ctrl::ResetSequence(m_model);
         flow.target = "waste";
 
-        // What GenerateSequence writes: the same two guards, the same order.
+        // What ctrl::ResetSequence writes: the same two guards, the same order.
         for (uint16_t addr : m_model.GetAllAddresses())
         {
             if (addr <= m_model.mem_high && m_model.CanEncodeWriteAddress(addr))
@@ -684,7 +522,7 @@ namespace ewr {
 
         flow.verifyAddresses = m_model.GetAllAddresses();
         flow.verifyValues = m_model.GetAllResetValues();
-        flow.classify = [](const PrinterStatus& status) { return EvaluateBlocker(status); };
+        flow.classify = [](const PrinterStatus& status) { return gates::Evaluate(status); };
         flow.expectedErrorNote = " - that is the waste-pad error EWR resets. Proceeding.";
         flow.commit = m_model.HasCloseOps();
 
@@ -746,7 +584,7 @@ namespace ewr {
         flow.readAddresses = writeAddresses;
         flow.verifyAddresses = writeAddresses;
         flow.verifyValues = writeValues;
-        flow.classify = [](const PrinterStatus& status) { return EvaluateInkBlocker(status); };
+        flow.classify = [](const PrinterStatus& status) { return gates::EvaluateInk(status); };
         flow.expectedErrorNote = " - an empty cartridge is exactly the state this reset clears. Proceeding.";
         flow.counterNoun = "ink counter";
         flow.recheckCommand = "'ewr --dump'";
@@ -822,7 +660,7 @@ namespace ewr {
 
         const bool wasteBytes = plan.touchesWaste;
         flow.classify = [wasteBytes](const PrinterStatus& status) {
-            return wasteBytes ? EvaluateBlocker(status) : EvaluateInkBlocker(status);
+            return wasteBytes ? gates::Evaluate(status) : gates::EvaluateInk(status);
         };
         flow.expectedErrorNote = " - the restore does not need it cleared. Proceeding.";
         flow.counterNoun = "byte";
@@ -848,7 +686,7 @@ namespace ewr {
                     if (plan.serial != printerSerial)
                         unproven = "the dump names serial " + plan.serial + " and this printer reports " + printerSerial;
                 }
-                else if (plan.unitProof.size() < kMinimumUnitProof)
+                else if (plan.unitProof.size() < restore::kMinimumUnitProof)
                 {
                     unproven = "neither a serial number nor enough of the printer's own identity bytes are on"
                                " record to show it is the unit the dump came from";
@@ -975,7 +813,7 @@ namespace ewr {
         Backup& backup = out.backup;
         backup.model = m_model.name;
         backup.target = flow.target;
-        backup.created = UtcTimestamp();
+        backup.created = format::UtcTimestamp();
         backup.ewrVersion = EWR_VERSION;
         backup.transport = m_gateway.OverNetwork() ? "network" : "usb";
         backup.serial = out.before.status.serial;
@@ -1108,7 +946,7 @@ namespace ewr {
 
             const std::optional<Blocker> blocker = flow.classify
                 ? flow.classify(out.before.status)
-                : EvaluateBlocker(out.before.status);
+                : gates::Evaluate(out.before.status);
             if (blocker.has_value())
             {
                 const bool proceed = handlers.onBlocker && handlers.onBlocker(*blocker);

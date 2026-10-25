@@ -1,7 +1,10 @@
 #pragma once
+#include "ewr/info.h"
+#include "ewr/keysearch.h"
 #include "ewr/log.h"
-#include "ewr/session.h"
+#include "ewr/maintenance.h"
 #include "ewr/network.h"
+#include "ewr/session.h"
 #include "ewr/usb.h"
 
 #include <chrono>
@@ -10,12 +13,10 @@
 #include <utility>
 #include <vector>
 
-#include "ewr/info.h"
-#include "ewr/maintenance.h"
-
 #include <nlohmann/json.hpp>
 
-namespace ewr {
+// The `--json` contract and the `data` objects it carries.
+namespace ewr::json {
 
     // The `--json` contract, written to a caller-owned stream: one JSON object
     // per line, a `hello` first and a `result` last, whatever happened in
@@ -25,14 +26,14 @@ namespace ewr {
     // In the library rather than the CLI because the stream is the caller's:
     // a GUI can point it at a pipe, the tests at a stringstream. Nothing here
     // knows about stdout.
-    class JsonEmitter
+    class Emitter
     {
     public:
         // Bumped only for a breaking change, and never quietly: see the
         // versioning promise in docs/json-output.md.
         static constexpr int kContractVersion = 1;
 
-        explicit JsonEmitter(std::ostream& out) : m_out(out), m_start(std::chrono::steady_clock::now()) {}
+        explicit Emitter(std::ostream& out) : m_out(out), m_start(std::chrono::steady_clock::now()) {}
 
         void Hello(const std::string& ewrVersion,
                    const std::string& platform,
@@ -64,10 +65,11 @@ namespace ewr {
         bool m_resultEmitted = false;
     };
 
-    // The contract's spellings, which are not the enum's and must not drift
-    // with it.
-    const char* JsonLevelName(log::Level level);
-    const char* JsonStageName(log::Stage stage);
+    // The contract's spellings, which are not the enums' and must not drift
+    // with them.
+    const char* Name(log::Level level);
+    const char* Name(log::Stage stage);
+    const char* Name(ResetPhase phase);
 
     // ------------------------------------------------------------------
     //  The `data` objects of docs/json-output.md
@@ -78,66 +80,63 @@ namespace ewr {
     // linking against it reads the same JSON.
 
     // [{"address": 12, "value": 0}, ...]; an unread byte has a null value.
-    nlohmann::json JsonCounterValues(const std::vector<std::pair<uint16_t, int>>& values);
+    nlohmann::json CounterValues(const std::vector<std::pair<uint16_t, int>>& values);
 
     // [{"name": ..., "used": ..., "max": ..., "percent": ...}, ...]. A pad
     // group that could not be read whole is left out.
-    nlohmann::json JsonPadUsage(const DbPrinterModel& model,
-                                const std::vector<std::pair<uint16_t, int>>& values);
+    nlohmann::json PadUsage(const DbPrinterModel& model,
+                            const std::vector<std::pair<uint16_t, int>>& values);
 
     // [{"kind": ..., "name": ..., "readable": ...}, ...] - every pad a waste-pad
     // reset covers, including the ones EWR cannot read. See
     // DbPrinterModel::GetResetCoverage for how it is worked out.
-    nlohmann::json JsonResetCoverage(const DbPrinterModel& model);
+    nlohmann::json ResetCoverage(const DbPrinterModel& model);
 
     // The '@BDC ST2' report, or null when nothing parsed.
-    nlohmann::json JsonPrinterStatus(const PrinterStatus& status);
+    nlohmann::json Status(const PrinterStatus& status);
 
     // One --list / ewr_list_interfaces entry. `modelMatch` is the database
     // entry the device ID names, empty when none does.
-    nlohmann::json JsonInterface(const usb::InterfaceInfo& info, const std::string& modelMatch);
+    nlohmann::json InterfaceEntry(const usb::InterfaceInfo& info, const std::string& modelMatch);
 
     // One --list `network_printers` / ewr_discover_network entry:
     // {"address", "device_id", "reported_model", "model_match"}.
-    nlohmann::json JsonNetworkPrinter(const NetworkPrinter& printer, const std::string& modelMatch);
+    nlohmann::json NetworkEntry(const NetworkPrinter& printer, const std::string& modelMatch);
 
     // What a blocker callback is asked: {"error", "error_code", "explanation"}.
-    nlohmann::json JsonBlocker(const Blocker& blocker);
+    nlohmann::json BlockerData(const Blocker& blocker);
 
     // model / printer / counters / pads, as `status` and `dry-run` carry them.
-    nlohmann::json JsonStateData(const DbPrinterModel& model, const StateSnapshot& state);
+    nlohmann::json StateData(const DbPrinterModel& model, const StateSnapshot& state);
 
     // {file, bytes, complete, values}: what the backup step kept, null when
     // there was no preflight to take it from.
-    nlohmann::json JsonBackup(const ResetOutcome& outcome);
+    nlohmann::json BackupData(const ResetOutcome& outcome);
 
     // What a reset ended up doing: phase, writes, verification, before/after.
-    nlohmann::json JsonResetData(const DbPrinterModel& model, bool ink, const ResetOutcome& outcome);
+    nlohmann::json ResetData(const DbPrinterModel& model, bool ink, const ResetOutcome& outcome);
 
     // `info`: firmware, serial, the printer's own counters and its last fatal
     // error codes. `model` may be null.
-    nlohmann::json JsonPrinterInfo(const DbPrinterModel* model, const PrinterInfo& info);
+    nlohmann::json InfoData(const DbPrinterModel* model, const PrinterInfo& info);
 
     // `nozzle-check`, `head-clean`, `power-clean`: what was asked, which way it
     // went, and what the printer's status said about it.
-    nlohmann::json JsonMaintenanceData(const DbPrinterModel* model, const MaintenanceRequest& request,
-                                       const MaintenanceOutcome& outcome);
+    nlohmann::json MaintenanceData(const DbPrinterModel* model, const MaintenanceRequest& request,
+                                   const MaintenanceOutcome& outcome);
 
     // What a restore was asked to do before it touched the printer: the file
     // it came from, the bytes it would write, the ones it left alone and why,
     // and the model's bytes the file did not hold.
-    nlohmann::json JsonRestorePlan(const Backup& source, const RestorePlan& plan, const std::string& file);
+    nlohmann::json RestorePlanData(const Backup& source, const RestorePlan& plan, const std::string& file);
 
-    // JsonResetData of the restore's outcome, with the plan's keys, target
+    // ResetData of the restore's outcome, with the plan's keys, target
     // "restore", and the bytes left alone because they already matched.
-    nlohmann::json JsonRestoreData(const DbPrinterModel& model, const Backup& source, const RestorePlan& plan,
-                                   const std::string& file, const ResetOutcome& outcome);
-
-    // The contract's spelling for a reset phase.
-    const char* JsonResetPhaseName(ResetPhase phase);
+    nlohmann::json RestoreData(const DbPrinterModel& model, const Backup& source, const RestorePlan& plan,
+                               const std::string& file, const ResetOutcome& outcome);
 
     // What `find-key` found: how every key was answered, and the ones that
     // work. `printerReports` empty becomes null - the printer named nothing.
-    nlohmann::json JsonKeySearchData(const std::string& printerReports, const ReadKeySearch& search);
+    nlohmann::json KeySearchData(const std::string& printerReports, const keysearch::Result& search);
 
-} // namespace ewr
+} // namespace ewr::json

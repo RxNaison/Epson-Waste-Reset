@@ -78,6 +78,15 @@ namespace ewr {
             std::string selectedBy;     // how it was chosen, e.g. "--model \"L565\""
         };
         TraceContext trace;
+
+        // Read-only session defaults: the IEEE 1284.4 session core is the
+        // default transport.
+        static ExecutorOptions ForQueries()
+        {
+            ExecutorOptions options;
+            options.useSessionLayer = true;
+            return options;
+        }
     };
 
     struct ExecutionResult

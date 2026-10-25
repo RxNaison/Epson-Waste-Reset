@@ -1,4 +1,5 @@
-#include "ewr/parser.h"
+#include "ewr/replay.h"
+#include "ewr/ctrl.h"
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -8,9 +9,9 @@ namespace fs = std::filesystem;
 
 namespace ewr {
 
-    std::vector<PrinterModel> ScanModelsFolder(const std::string& folderPath)
+    std::vector<replay::Capture> replay::ScanFolder(const std::string& folderPath)
     {
-        std::vector<PrinterModel> availableModels;
+        std::vector<replay::Capture> availableModels;
         std::regex filenameRegex(R"((.+)\.(txt|c)$)");
 
         // Deliberately does not create the folder: replay dumps are an opt-in
@@ -28,7 +29,7 @@ namespace ewr {
 
                 if (std::regex_match(filename, match, filenameRegex))
                 {
-                    PrinterModel model;
+                    replay::Capture model;
                     model.name = match[1].str();
                     model.filepath = entry.path().string();
                     availableModels.push_back(model);
@@ -38,7 +39,7 @@ namespace ewr {
         return availableModels;
     }
 
-    std::vector<std::vector<unsigned char>> ParseWiresharkDump(const std::string& filepath)
+    std::vector<std::vector<unsigned char>> replay::ParseWiresharkDump(const std::string& filepath)
     {
         std::vector<std::vector<unsigned char>> sequence;
         std::ifstream file(filepath);
@@ -90,4 +91,16 @@ namespace ewr {
 
         return all_packets;
     }
+
+    size_t replay::CountWrites(const std::vector<std::vector<unsigned char>>& packets)
+    {
+        size_t writes = 0;
+        for (const auto& packet : packets)
+        {
+            if (ctrl::IsWrite(packet))
+                writes++;
+        }
+        return writes;
+    }
+
 }

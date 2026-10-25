@@ -12,10 +12,6 @@ namespace ewr {
     // Newer files still load: unknown keys are ignored and a warning is shown.
     constexpr int kMaxSupportedDatabaseSchema = 4;
 
-    // Staging file suffix owned by EWR. Only files matching IsEwrTempArtifact()
-    // are ever deleted by CleanupStaleTempFiles().
-    inline const char* kStagedDatabaseSuffix = ".staged";
-
     struct Version
     {
         std::vector<int> components;
@@ -37,38 +33,6 @@ namespace ewr {
         std::string releaseNotes;
     };
 
-    // ---- Pure helpers (no I/O beyond reading the given path; unit-tested) ----
-
-    // Requires at least one plausible model, and refuses a schema_version
-    // newer than this build supports.
-    bool ValidateDatabasePayload(const std::string& path, int maxSupportedSchema);
-
-    // Interprets a GitHub releases API response (object or array).
-    UpdateMetadata ParseReleaseResponse(const std::string& responseBody,
-                                        const std::string& currentVersion,
-                                        bool includePreRelease = false);
-
-    // True only for EWR's own database staging files.
-    bool IsEwrTempArtifact(const std::string& filename);
-
-    // Never touches unrelated *.tmp / *.old files in the working directory.
-    void CleanupStaleTempFiles();
-
-    // ---- Platform layer (the only per-OS code) ----
-    namespace platform {
-
-        bool HttpDownloadToFile(const std::string& url, const std::string& destPath);
-        bool HttpGetString(const std::string& url, std::string& outBody);
-
-        // As close to atomic as the OS allows. Not named ReplaceFile because
-        // windows.h defines that as a macro (ReplaceFileA).
-        bool ReplaceFileAtomic(const std::string& from, const std::string& to);
-
-        // Called once before any worker thread performs network I/O.
-        void InitNetworking();
-
-    } // namespace platform
-
     enum class DatabaseUpdate
     {
         Updated,    // a newer database replaced the file
@@ -76,18 +40,40 @@ namespace ewr {
         Failed,     // unreachable, invalid or not replaceable; the file is untouched
     };
 
-    class Updater
-    {
-    public:
-        // Blocking. Call it before loading the database: the run then uses
-        // what was fetched, and the in-memory copy cannot change under a
-        // reset. Swapping on exit instead meant a database fix reached a
-        // printer only on the run after the one that downloaded it.
-        static DatabaseUpdate UpdateDatabaseNow(const std::string& dbPath = "database.json",
-                                                int maxSupportedSchema = kMaxSupportedDatabaseSchema);
-
-        // Asks GitHub for the latest release and compares it to currentVersion.
-        static UpdateMetadata CheckLatestRelease(const std::string& currentVersion);
-    };
-
 } // namespace ewr
+
+// The OTA database update and the release check.
+namespace ewr::update {
+
+    // Staging file suffix owned by EWR. Only files matching IsTempArtifact()
+    // are ever deleted by CleanupStaleTempFiles().
+    inline const char* kStagedDatabaseSuffix = ".staged";
+
+    // ---- Pure helpers (no I/O beyond reading the given path; unit-tested) ----
+
+    // Requires at least one plausible model, and refuses a schema_version
+    // newer than this build supports.
+    bool ValidateDatabase(const std::string& path, int maxSupportedSchema);
+
+    // Interprets a GitHub releases API response (object or array).
+    UpdateMetadata ParseReleaseResponse(const std::string& responseBody,
+                                        const std::string& currentVersion,
+                                        bool includePreRelease = false);
+
+    // True only for EWR's own database staging files.
+    bool IsTempArtifact(const std::string& filename);
+
+    // Never touches unrelated *.tmp / *.old files in the working directory.
+    void CleanupStaleTempFiles();
+
+    // Blocking. Call it before loading the database: the run then uses
+    // what was fetched, and the in-memory copy cannot change under a
+    // reset. Swapping on exit instead meant a database fix reached a
+    // printer only on the run after the one that downloaded it.
+    DatabaseUpdate UpdateDatabaseNow(const std::string& dbPath = "database.json",
+                                     int maxSupportedSchema = kMaxSupportedDatabaseSchema);
+
+    // Asks GitHub for the latest release and compares it to currentVersion.
+    UpdateMetadata CheckLatestRelease(const std::string& currentVersion);
+
+} // namespace ewr::update

@@ -3,6 +3,7 @@
 // ewr_database_check before it swaps it in. Every transfer says "unreachable",
 // which the updater already treats as "keep the database on disk".
 #include "ewr/updater.h"
+#include "ewr/update_platform.h"
 
 #include <filesystem>
 #include <string>
@@ -10,7 +11,7 @@
 namespace fs = std::filesystem;
 
 namespace ewr {
-    namespace platform {
+    namespace update::platform {
 
         void InitNetworking()
         {
@@ -33,5 +34,5 @@ namespace ewr {
             return !ec;
         }
 
-    } // namespace platform
+    } // namespace update::platform
 } // namespace ewr

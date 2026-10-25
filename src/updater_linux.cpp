@@ -4,6 +4,7 @@
 #ifndef _WIN32
 
 #include "ewr/updater.h"
+#include "ewr/update_platform.h"
 
 #include <curl/curl.h>
 
@@ -15,7 +16,7 @@
 namespace fs = std::filesystem;
 
 namespace ewr {
-    namespace platform {
+    namespace update::platform {
 
         namespace {
 
@@ -127,7 +128,7 @@ namespace ewr {
             return CopyThenRemove(fs::path(from), fs::path(to));
         }
 
-    } // namespace platform
+    } // namespace update::platform
 } // namespace ewr
 
 #endif // !_WIN32

@@ -140,7 +140,7 @@ namespace ewr {
 
     } // namespace
 
-    bool WriteKeyFromJson(const std::string& utf8, std::string& bytes)
+    bool db::WriteKeyFromJson(const std::string& utf8, std::string& bytes)
     {
         std::string out;
         for (std::size_t i = 0; i < utf8.size(); ++i)
@@ -167,7 +167,7 @@ namespace ewr {
         return true;
     }
 
-    std::string WriteKeyToJson(const std::string& bytes)
+    std::string db::WriteKeyToJson(const std::string& bytes)
     {
         std::string out = "\"";
         for (const char ch : bytes)
@@ -277,8 +277,8 @@ namespace ewr {
                     DbPrinterModel model;
                     model.name = key;
                     model.rkey = val.value("rkey", 0);
-                    if (!WriteKeyFromJson(val.value("wkey", ""), model.wkey)
-                        || !WriteKeyFromJson(val.value("wkey1", ""), model.wkey1))
+                    if (!db::WriteKeyFromJson(val.value("wkey", ""), model.wkey)
+                        || !db::WriteKeyFromJson(val.value("wkey1", ""), model.wkey1))
                     {
                         skipEntry(key, "write keyword is not one byte per character");
                         continue;

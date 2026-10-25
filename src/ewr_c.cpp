@@ -1,9 +1,11 @@
 #include "ewr/ewr_c.h"
+#include "ewr/backup.h"
+#include "ewr/restore.h"
 #include "ewr/usb_driver.h"
 
 #include "ewr/deviceid.h"
 #include "ewr/database.h"
-#include "ewr/json_out.h"
+#include "ewr/json.h"
 #include "ewr/info.h"
 #include "ewr/log.h"
 #include "ewr/maintenance.h"
@@ -74,7 +76,7 @@ struct ewr_session
     // it was opened with ewr_session_open_network, USB otherwise.
     ewr::UsbDeviceGateway usb;
     std::unique_ptr<ewr::SnmpDeviceGateway> net;
-    ewr::ExecutorOptions options = ewr::DefaultQueryOptions();
+    ewr::ExecutorOptions options = ewr::ExecutorOptions::ForQueries();
 
     ewr_event_cb eventCallback = nullptr;
     void* eventUser = nullptr;
@@ -270,15 +272,15 @@ namespace {
 
         deviceId = query.deviceId;
 
-        const ewr::DeviceIdInfo reported = ewr::ParseIeee1284DeviceId(query.deviceId);
+        const ewr::deviceid::Info reported = ewr::deviceid::Parse(query.deviceId);
         if (reported.model.empty())
             return EWR_OK;
 
-        std::vector<ewr::ModelNameEntry> entries;
+        std::vector<ewr::deviceid::ModelNameEntry> entries;
         for (const auto& known : session->database.Models())
             entries.push_back({ known.name, known.aliases });
 
-        const std::vector<std::string> matches = ewr::MatchModelEntries(reported.model, entries);
+        const std::vector<std::string> matches = ewr::deviceid::MatchEntries(reported.model, entries);
         if (matches.empty() || matches[0] == target.name)
             return EWR_OK;
 
@@ -305,7 +307,7 @@ namespace {
             if (!session->blockerCallback)
                 return false; // no host to ask: never assume consent
 
-            return session->blockerCallback(ewr::JsonBlocker(blocker).dump().c_str(), session->blockerUser) != 0;
+            return session->blockerCallback(ewr::json::BlockerData(blocker).dump().c_str(), session->blockerUser) != 0;
         };
 
         handlers.confirmWrite = [session, target, what](const ewr::StateSnapshot& state) -> bool
@@ -313,7 +315,7 @@ namespace {
             if (!session->confirmCallback)
                 return false;
 
-            nlohmann::json ask = ewr::JsonStateData(target, state);
+            nlohmann::json ask = ewr::json::StateData(target, state);
             ask["target"] = what;
             return session->confirmCallback(ask.dump().c_str(), session->confirmUser) != 0;
         };
@@ -327,7 +329,7 @@ namespace {
                 backup.deviceId = deviceId;
                 if (session->net)
                     backup.host = session->net->Host();
-                return session->backupCallback(ewr::BackupToJson(backup).c_str(), session->backupUser) != 0;
+                return session->backupCallback(ewr::backup::ToJson(backup).c_str(), session->backupUser) != 0;
             };
         }
 
@@ -431,7 +433,7 @@ namespace {
         {
             if (!session->blockerCallback)
                 return false;
-            return session->blockerCallback(ewr::JsonBlocker(blocker).dump().c_str(), session->blockerUser) != 0;
+            return session->blockerCallback(ewr::json::BlockerData(blocker).dump().c_str(), session->blockerUser) != 0;
         };
         handlers.confirm = [session, &target, named, &request](const ewr::StateSnapshot& state,
                                                               const std::string& route) -> bool
@@ -439,10 +441,10 @@ namespace {
             if (!session->confirmCallback)
                 return false;
 
-            nlohmann::json ask = named ? ewr::JsonStateData(target, state) : nlohmann::json::object();
+            nlohmann::json ask = named ? ewr::json::StateData(target, state) : nlohmann::json::object();
             if (!named)
-                ask["printer"] = ewr::JsonPrinterStatus(state.status);
-            ask["target"] = ewr::MaintenanceActionName(request.action);
+                ask["printer"] = ewr::json::Status(state.status);
+            ask["target"] = ewr::ToString(request.action);
             ask["route"] = route;
             return session->confirmCallback(ask.dump().c_str(), session->confirmUser) != 0;
         };
@@ -454,7 +456,7 @@ namespace {
         if (!mismatchPassed.empty())
             outcome.overrides.insert(outcome.overrides.begin(), { "model_mismatch", mismatchPassed, -1 });
 
-        const int delivered = Deliver(session, ewr::JsonMaintenanceData(named ? &target : nullptr, request, outcome),
+        const int delivered = Deliver(session, ewr::json::MaintenanceData(named ? &target : nullptr, request, outcome),
                                       out_json);
         if (delivered != EWR_OK)
             return delivered;
@@ -488,7 +490,7 @@ namespace {
 
         ewr::Backup source;
         std::string error;
-        if (!ewr::ParseBackupText(file_contents, source, error))
+        if (!ewr::backup::Parse(file_contents, source, error))
         {
             session->Fail(error);
             return EWR_ERR_BAD_BACKUP;
@@ -511,7 +513,7 @@ namespace {
             return EWR_ERR_BAD_BACKUP;
         }
 
-        const ewr::RestorePlan plan = all ? ewr::PlanRestoreAll(target, source) : ewr::PlanRestore(target, source);
+        const ewr::RestorePlan plan = all ? ewr::restore::PlanAll(target, source) : ewr::restore::Plan(target, source);
         if (plan.writes.empty())
         {
             session->Fail("The file holds none of the bytes EWR writes on " + target.name + ".");
@@ -535,7 +537,7 @@ namespace {
         if (!mismatchPassed.empty())
             outcome.overrides.insert(outcome.overrides.begin(), { "model_mismatch", mismatchPassed, -1 });
 
-        const int delivered = Deliver(session, ewr::JsonRestoreData(target, source, plan, "", outcome), out_json);
+        const int delivered = Deliver(session, ewr::json::RestoreData(target, source, plan, "", outcome), out_json);
         if (delivered != EWR_OK)
             return delivered;
 
@@ -562,7 +564,7 @@ int ewr_abi_version(void)
 
 int ewr_json_contract_version(void)
 {
-    return ewr::JsonEmitter::kContractVersion;
+    return ewr::json::Emitter::kContractVersion;
 }
 
 const char* ewr_status_name(int status)
@@ -674,7 +676,7 @@ int ewr_database_check(const char* path, char** out_json)
 
     try
     {
-        if (!ewr::ValidateDatabasePayload(path, ewr::kMaxSupportedDatabaseSchema))
+        if (!ewr::update::ValidateDatabase(path, ewr::kMaxSupportedDatabaseSchema))
             return EWR_ERR_DATABASE;
 
         ewr::Database db;
@@ -744,16 +746,16 @@ int ewr_list_interfaces(ewr_session* session, char** out_json)
 
         nlohmann::json interfaces = nlohmann::json::array();
 
-        std::vector<ewr::ModelNameEntry> entries;
+        std::vector<ewr::deviceid::ModelNameEntry> entries;
         for (const auto& model : session->database.Models())
             entries.push_back({ model.name, model.aliases });
 
         for (const ewr::usb::InterfaceInfo& info : session->usb.ListInterfaces())
         {
-            const ewr::DeviceIdInfo reported = ewr::ParseIeee1284DeviceId(info.deviceId);
+            const ewr::deviceid::Info reported = ewr::deviceid::Parse(info.deviceId);
             const std::vector<std::string> matches = reported.model.empty()
-                ? std::vector<std::string>{} : ewr::MatchModelEntries(reported.model, entries);
-            interfaces.push_back(ewr::JsonInterface(info, matches.empty() ? std::string() : matches[0]));
+                ? std::vector<std::string>{} : ewr::deviceid::MatchEntries(reported.model, entries);
+            interfaces.push_back(ewr::json::InterfaceEntry(info, matches.empty() ? std::string() : matches[0]));
         }
 
         if (interfaces.empty())
@@ -777,14 +779,14 @@ int ewr_detect_model(ewr_session* session, char** out_json)
             return EWR_ERR_DEVICE_NOT_FOUND;
         }
 
-        const ewr::DeviceIdInfo info = ewr::ParseIeee1284DeviceId(query.deviceId);
+        const ewr::deviceid::Info info = ewr::deviceid::Parse(query.deviceId);
 
-        std::vector<ewr::ModelNameEntry> entries;
+        std::vector<ewr::deviceid::ModelNameEntry> entries;
         for (const auto& model : session->database.Models())
             entries.push_back({ model.name, model.aliases });
 
         const std::vector<std::string> matches = info.model.empty()
-            ? std::vector<std::string>{} : ewr::MatchModelEntries(info.model, entries);
+            ? std::vector<std::string>{} : ewr::deviceid::MatchEntries(info.model, entries);
 
         nlohmann::json payload;
         payload["device_id"] = query.deviceId;
@@ -818,7 +820,7 @@ int ewr_discover_network(ewr_session* session, char** out_json)
             return EWR_ERR_IO;
         }
 
-        std::vector<ewr::ModelNameEntry> entries;
+        std::vector<ewr::deviceid::ModelNameEntry> entries;
         for (const auto& model : session->database.Models())
             entries.push_back({ model.name, model.aliases });
 
@@ -826,8 +828,8 @@ int ewr_discover_network(ewr_session* session, char** out_json)
         for (const ewr::NetworkPrinter& printer : found)
         {
             const std::vector<std::string> matches = printer.model.empty()
-                ? std::vector<std::string>{} : ewr::MatchModelEntries(printer.model, entries);
-            printers.push_back(ewr::JsonNetworkPrinter(printer, matches.empty() ? std::string() : matches[0]));
+                ? std::vector<std::string>{} : ewr::deviceid::MatchEntries(printer.model, entries);
+            printers.push_back(ewr::json::NetworkEntry(printer, matches.empty() ? std::string() : matches[0]));
         }
 
         return Deliver(session, { { "printers", std::move(printers) } }, out_json);
@@ -897,7 +899,7 @@ int ewr_plan(ewr_session* session, const char* model, int ink, char** out_json)
         payload["target"] = ink ? "ink" : "waste";
         payload["planned_writes"] = std::move(planned);
         // Which pads those writes clear; an ink reset clears none.
-        payload["reset_covers"] = ink ? nlohmann::json::array() : ewr::JsonResetCoverage(target);
+        payload["reset_covers"] = ink ? nlohmann::json::array() : ewr::json::ResetCoverage(target);
         return Deliver(session, payload, out_json);
     });
 }
@@ -920,7 +922,7 @@ int ewr_read_status(ewr_session* session, const char* model, char** out_json)
             return EWR_ERR_READ_FAILED;
         }
 
-        return Deliver(session, ewr::JsonStateData(target, state), out_json);
+        return Deliver(session, ewr::json::StateData(target, state), out_json);
     });
 }
 
@@ -936,7 +938,7 @@ int ewr_dump(ewr_session* session, const char* model, char** out_json)
         if (session->RefuseOverNetwork("An EEPROM dump"))
             return EWR_ERR_NOT_SUPPORTED;
 
-        const std::vector<uint16_t> addresses = ewr::DumpAddresses(target);
+        const std::vector<uint16_t> addresses = ewr::restore::DumpAddresses(target);
 
         ewr::Session reader(target, session->Gateway(), ewr::log::Default(), session->options);
         const ewr::StateSnapshot state = reader.ReadAddresses(addresses);
@@ -955,7 +957,7 @@ int ewr_dump(ewr_session* session, const char* model, char** out_json)
         payload["model"] = target.name;
         payload["answered"] = answered;
         payload["total"] = state.values.size();
-        payload["values"] = ewr::JsonCounterValues(state.values);
+        payload["values"] = ewr::json::CounterValues(state.values);
 
         const int delivered = Deliver(session, payload, out_json);
         if (delivered != EWR_OK)
@@ -1006,7 +1008,7 @@ int ewr_reset(ewr_session* session, const char* model, int ink, char** out_json)
         if (!mismatchPassed.empty())
             outcome.overrides.insert(outcome.overrides.begin(), { "model_mismatch", mismatchPassed, -1 });
 
-        const int delivered = Deliver(session, ewr::JsonResetData(target, ink != 0, outcome), out_json);
+        const int delivered = Deliver(session, ewr::json::ResetData(target, ink != 0, outcome), out_json);
         if (delivered != EWR_OK)
             return delivered;
 
@@ -1060,7 +1062,7 @@ int ewr_read_info(ewr_session* session, const char* model, char** out_json)
                 return found;
         }
 
-        const ewr::PrinterInfo info = ewr::ReadPrinterInfo(session->Gateway(), named ? &target : nullptr,
+        const ewr::PrinterInfo info = ewr::info::Read(session->Gateway(), named ? &target : nullptr,
                                                            ewr::log::Default(), session->options);
         if (!info.available)
         {
@@ -1068,7 +1070,7 @@ int ewr_read_info(ewr_session* session, const char* model, char** out_json)
             return EWR_ERR_READ_FAILED;
         }
 
-        return Deliver(session, ewr::JsonPrinterInfo(named ? &target : nullptr, info), out_json);
+        return Deliver(session, ewr::json::InfoData(named ? &target : nullptr, info), out_json);
     });
 }
 

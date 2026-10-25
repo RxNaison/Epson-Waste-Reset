@@ -2,6 +2,7 @@
 #include "ewr/backup.h"
 #include "ewr/gateway.h"
 #include "ewr/database.h"
+#include "ewr/gates.h"
 #include "ewr/log.h"
 #include "ewr/restore.h"
 #include "ewr/run_lock.h"
@@ -18,47 +19,8 @@
 namespace ewr {
 
     // ------------------------------------------------------------------
-    //  Blockers: conditions the host must decide about
-    // ------------------------------------------------------------------
-
-    // A foreign printer error (empty cartridge, paper jam, open cover, ...).
-    // Firmware locked by one usually refuses factory writes with ':42:NA;'.
-    struct Blocker
-    {
-        std::string errorName;   // ST2 error name, e.g. "INK OUT"
-        int errorCode = -1;      // raw ST2 error code
-        std::string explanation; // human-readable risk explanation
-    };
-
-    // True pushes past the blocker, false aborts before any EEPROM write.
-    // The CLI wires this to a y/N prompt, a GUI to a dialog, an unattended
-    // runner to a fixed answer.
-    using DecisionCallback = std::function<bool(const Blocker&)>;
-
-    // SERVICE REQUEST / CARTRIDGE OVERFLOW - the errors EWR exists to clear.
-    // Printers in those states still accept writes, so they must never gate.
-    bool IsExpectedWastePadError(int errorCode);
-
-    // nullopt when it is safe to proceed. A BUSY state with no error entry
-    // blocks too: busy firmware can suppress the very error that would have
-    // gated the write.
-    std::optional<Blocker> EvaluateBlocker(const PrinterStatus& status);
-
-    // INK OUT joins the expected list - an empty cartridge is the state this
-    // reset clears. Foreign locks still block.
-    std::optional<Blocker> EvaluateInkBlocker(const PrinterStatus& status);
-
-    // ------------------------------------------------------------------
     //  Snapshots and outcomes (structured data for any host to render)
     // ------------------------------------------------------------------
-
-    // Parsed '@BDC ST2' status plus raw counter bytes (address -> value).
-    struct StateSnapshot
-    {
-        bool available = false; // a device answered the query session
-        PrinterStatus status;
-        std::vector<std::pair<uint16_t, int>> values;
-    };
 
     enum class ResetPhase
     {
@@ -119,66 +81,6 @@ namespace ewr {
         std::string error; // failure detail when the run did not complete
     };
 
-    // Read-only session defaults: the IEEE 1284.4 session core is the
-    // default transport.
-    inline ExecutorOptions DefaultQueryOptions()
-    {
-        ExecutorOptions options;
-        options.useSessionLayer = true;
-        return options;
-    }
-
-    // Model-free status read: just the '@BDC ST2' report, no counter reads
-    // (those need a model's read key). What the replay path can know about
-    // a printer.
-    StateSnapshot ReadPrinterStatus(IDeviceGateway& gateway,
-                                    const ExecutorOptions& options = DefaultQueryOptions());
-
-    // ------------------------------------------------------------------
-    //  Read-key search: for a printer the database has no entry for
-    // ------------------------------------------------------------------
-
-    // One read key to try, with the address width its models use. The same
-    // key at the other width is a different candidate: the width changes the
-    // packet, so a printer can refuse one and answer the other.
-    struct ReadKeyCandidate
-    {
-        uint16_t rkey = 0;
-        uint8_t addressLength = 2;
-        std::vector<std::string> models; // database entries that use it
-    };
-
-    struct ReadKeyProbe
-    {
-        ReadKeyCandidate candidate;
-        ReadAnswer answer = ReadAnswer::Silent;
-        uint8_t value = 0; // the byte at address 0, when answer is Value
-    };
-
-    struct ReadKeySearch
-    {
-        bool deviceFound = false;
-        // False when the search stopped before every candidate was tried;
-        // `error` says why. `probes` holds the ones that were.
-        bool completed = false;
-        std::vector<ReadKeyProbe> probes;
-        std::string error;
-
-        size_t Count(ReadAnswer answer) const;
-    };
-
-    // Every distinct (read key, address width) in `models`, the most widely
-    // shared first: a key many entries use is the likeliest to fit a sibling.
-    std::vector<ReadKeyCandidate> CollectReadKeyCandidates(const std::vector<DbPrinterModel>& models);
-
-    // Reads address 0 once with each candidate's key. Read commands only: a
-    // key gates access, it cannot turn a read into a write. `progress` is
-    // called with (tried, total) as the search advances.
-    ReadKeySearch SearchReadKey(IDeviceGateway& gateway,
-                                const std::vector<ReadKeyCandidate>& candidates,
-                                const ExecutorOptions& options = DefaultQueryOptions(),
-                                const std::function<void(size_t, size_t)>& progress = {});
-
     // ------------------------------------------------------------------
     //  Session: the whole reset lifecycle behind one API
     // ------------------------------------------------------------------
@@ -212,7 +114,7 @@ namespace ewr {
         Session(const DbPrinterModel& model,
                 IDeviceGateway& gateway,
                 log::Reporter& reporter = log::Default(),
-                ExecutorOptions queryOptions = DefaultQueryOptions());
+                ExecutorOptions queryOptions = ExecutorOptions::ForQueries());
 
         StateSnapshot ReadState() const;
 
@@ -237,7 +139,7 @@ namespace ewr {
         // chip is authoritative, so the reset will not hold.
         ResetOutcome ResetInk(const ResetHandlers& handlers = {});
 
-        // Writes back what PlanRestore kept of a backup or a dump, through the
+        // Writes back what restore::Plan kept of a backup or a dump, through the
         // same lifecycle: preflight (required), gates, backup of what it
         // overwrites, writes, commit, read-back against the file's values.
         // Only bytes that differ are written, and a file that names another

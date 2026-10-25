@@ -1,4 +1,6 @@
 #include "ewr/maintenance.h"
+#include "ewr/gates.h"
+#include "ewr/status.h"
 #include "ewr/ctrl.h"
 #include "ewr/d4session.h"
 #include "ewr/remote_mode.h"
@@ -53,7 +55,7 @@ namespace ewr {
 
     } // namespace
 
-    const char* MaintenanceActionName(MaintenanceAction action)
+    const char* ToString(MaintenanceAction action)
     {
         switch (action)
         {
@@ -63,7 +65,7 @@ namespace ewr {
         }
     }
 
-    const char* MaintenancePhaseName(MaintenancePhase phase)
+    const char* ToString(MaintenancePhase phase)
     {
         switch (phase)
         {
@@ -79,7 +81,7 @@ namespace ewr {
         }
     }
 
-    std::optional<Blocker> EvaluateMaintenanceBlocker(const PrinterStatus& status, MaintenanceAction action)
+    std::optional<Blocker> gates::EvaluateMaintenance(const PrinterStatus& status, MaintenanceAction action)
     {
         const bool printing = action == MaintenanceAction::NozzleCheck;
 
@@ -207,7 +209,7 @@ namespace ewr {
         }
         else
         {
-            out.before = ReadPrinterStatus(m_gateway, m_options);
+            out.before = status::Read(m_gateway, m_options);
         }
 
         if (!out.before.available)
@@ -223,7 +225,7 @@ namespace ewr {
             handlers.onPreflight(out.before);
 
         // ---- Gate: the same policy as a reset's - nobody to ask is a no.
-        if (const std::optional<Blocker> blocker = EvaluateMaintenanceBlocker(out.before.status, request.action))
+        if (const std::optional<Blocker> blocker = gates::EvaluateMaintenance(out.before.status, request.action))
         {
             if (!(handlers.onBlocker && handlers.onBlocker(*blocker)))
             {
@@ -253,7 +255,7 @@ namespace ewr {
                 m_model->rkey, ctrl::CMD_CLEAN, FactoryPayload(request));
 
             m_reporter.Log(log::Level::Info, log::Stage::Write, "maintenance.sending",
-                           std::string("[*] Sending the ") + MaintenanceActionName(request.action) +
+                           std::string("[*] Sending the ") + ToString(request.action) +
                                " to the printer (its own maintenance command, level " +
                                (request.action == MaintenanceAction::PowerClean ? "charge" : request.level) + ")...",
                            { { "route", "factory" }, { "group", GroupName(request.group) } });
@@ -295,7 +297,7 @@ namespace ewr {
             }
 
             m_reporter.Log(log::Level::Info, log::Stage::Write, "maintenance.sending",
-                           std::string("[*] Sending the ") + MaintenanceActionName(request.action) +
+                           std::string("[*] Sending the ") + ToString(request.action) +
                                " to the printer as print data...",
                            { { "route", "remote" }, { "group", GroupName(request.group) } });
 
@@ -328,8 +330,8 @@ namespace ewr {
 
             for (const auto& spec : m_model->GetAllCounters())
             {
-                const CounterReading was = EvaluateCounter(spec, out.before.values);
-                const CounterReading now = EvaluateCounter(spec, out.after.values);
+                const CounterReading was = spec.Evaluate(out.before.values);
+                const CounterReading now = spec.Evaluate(out.after.values);
                 if (!was.complete || !now.complete || !now.max_value)
                     continue;
 
@@ -366,7 +368,7 @@ namespace ewr {
             if (pollIntervalMs > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(pollIntervalMs));
 
-            const StateSnapshot now = ReadPrinterStatus(m_gateway, m_options);
+            const StateSnapshot now = status::Read(m_gateway, m_options);
             out.seconds = elapsed();
 
             if (!now.available || !now.status.valid)
@@ -388,7 +390,7 @@ namespace ewr {
                 handlers.onProgress(now.status, out.seconds);
 
             m_reporter.Log(log::Level::Trace, log::Stage::Verify, "maintenance.poll",
-                           "[i] " + std::to_string(out.seconds) + " s: " + DescribePrinterCondition(now.status),
+                           "[i] " + std::to_string(out.seconds) + " s: " + status::Describe(now.status),
                            { { "state", now.status.stateName }, { "seconds", std::to_string(out.seconds) } });
 
             if (now.status.hasError)

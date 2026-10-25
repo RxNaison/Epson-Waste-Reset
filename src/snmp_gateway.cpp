@@ -64,7 +64,7 @@ namespace ewr {
         // is an answer.
         constexpr int32_t kDiscoveryRequestId = 0x0E57;
 
-        bool MadeByEpson(const DeviceIdInfo& info)
+        bool MadeByEpson(const deviceid::Info& info)
         {
             std::string maker = info.manufacturer;
             std::transform(maker.begin(), maker.end(), maker.begin(),
@@ -172,8 +172,8 @@ namespace ewr {
                 continue;
             }
 
-            const std::string deviceId = ExtractDeviceIdString(response.value.data(), response.value.size());
-            const DeviceIdInfo info = ParseIeee1284DeviceId(deviceId);
+            const std::string deviceId = deviceid::ExtractString(response.value.data(), response.value.size());
+            const deviceid::Info info = deviceid::Parse(deviceId);
             if (!MadeByEpson(info))
             {
                 log << "not an Epson (MFG \"" << info.manufacturer << "\") - skipped\n";
@@ -436,7 +436,7 @@ namespace ewr {
         if (!Get(snmp::DeviceIdOid(), value) || value.empty())
             return out;
 
-        out.deviceId = ExtractDeviceIdString(value.data(), value.size());
+        out.deviceId = deviceid::ExtractString(value.data(), value.size());
         out.found = !out.deviceId.empty();
         return out;
     }

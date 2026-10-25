@@ -109,8 +109,11 @@ jobs:
     - name: Build project
       run: cmake --build build --config Release --parallel
 
+    # Bullseye's CMake 3.18 has no --test-dir; it ran from the repo root and
+    # passed on finding no tests.
     - name: Run CTest
-      run: ctest --test-dir build --output-on-failure -C Release
+      working-directory: build
+      run: ctest --output-on-failure -C Release --no-tests=error
 
     # A 16 KB-page kernel refuses a binary with any segment aligned for 4 KB.
     - name: Check 16 KB page alignment (Linux)

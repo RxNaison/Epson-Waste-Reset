@@ -73,7 +73,7 @@ namespace ewr {
 
     namespace {
 
-        using namespace usb_timing;
+        using namespace usb::timing;
 
         struct DeviceCandidate
         {
@@ -206,7 +206,7 @@ namespace ewr {
                 if (c.port.empty())
                     continue;
 
-                c.queues = QueuesOnPort(queues, c.port);
+                c.queues = usb::QueuesOnPort(queues, c.port);
                 if (c.queues.empty())
                     trace << "[i] " << c.port << ": no print queue.\n";
 
@@ -756,7 +756,7 @@ namespace ewr {
             return ok != FALSE;
         }
 
-        class WindowsUsbBackend final : public UsbBackend
+        class WindowsUsbBackend final : public usb::Backend
         {
         public:
             explicit WindowsUsbBackend(std::ostream& trace) : trace_(trace) {}
@@ -767,14 +767,14 @@ namespace ewr {
 
             const std::string& InitError() const override { return initError_; }
 
-            std::vector<UsbCandidate> Enumerate() override
+            std::vector<usb::Candidate> Enumerate() override
             {
                 candidates_ = EnumerateEpsonCandidates(trace_);
 
-                std::vector<UsbCandidate> out;
+                std::vector<usb::Candidate> out;
                 for (std::size_t i = 0; i < candidates_.size(); ++i)
                 {
-                    UsbCandidate c;
+                    usb::Candidate c;
                     c.ordinal = i;
                     c.className = candidates_[i].className;
                     c.interfaceNumber = candidates_[i].interfaceIndex;
@@ -897,7 +897,7 @@ namespace ewr {
 
     } // namespace
 
-    std::unique_ptr<UsbBackend> CreateWindowsUsbBackend(std::ostream& trace)
+    std::unique_ptr<usb::Backend> usb::CreateWindowsBackend(std::ostream& trace)
     {
         return std::make_unique<WindowsUsbBackend>(trace);
     }

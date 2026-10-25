@@ -1,4 +1,5 @@
 #include "ewr/ewr_c.h"
+#include "ewr/usb_driver.h"
 
 #include "ewr/deviceid.h"
 #include "ewr/database.h"
@@ -8,7 +9,7 @@
 #include "ewr/maintenance.h"
 #include "ewr/paths.h"
 #include "ewr/session.h"
-#include "ewr/snmp_gateway.h"
+#include "ewr/network.h"
 #include "ewr/updater.h"
 #include "ewr/usb.h"
 #include "ewr/version.h"
@@ -707,7 +708,7 @@ void ewr_android_set_usb_fds(const int* fds, size_t count)
     std::vector<int> list;
     for (size_t i = 0; fds && i < count; ++i)
         list.push_back(fds[i]);
-    ewr::SetAndroidUsbFds(list);
+    ewr::usb::SetAndroidFds(list);
 }
 #endif
 
@@ -747,7 +748,7 @@ int ewr_list_interfaces(ewr_session* session, char** out_json)
         for (const auto& model : session->database.Models())
             entries.push_back({ model.name, model.aliases });
 
-        for (const ewr::InterfaceInfo& info : session->usb.ListInterfaces())
+        for (const ewr::usb::InterfaceInfo& info : session->usb.ListInterfaces())
         {
             const ewr::DeviceIdInfo reported = ewr::ParseIeee1284DeviceId(info.deviceId);
             const std::vector<std::string> matches = reported.model.empty()
@@ -804,7 +805,7 @@ int ewr_discover_network(ewr_session* session, char** out_json)
         std::string error;
         std::ostringstream searchTrace;
         const std::vector<ewr::NetworkPrinter> found =
-            ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, error, &searchTrace);
+            ewr::snmp::DiscoverPrinters(ewr::snmp::kDiscoveryWaitMs, error, &searchTrace);
 
         if (session->net)
             session->net->AppendTrace(searchTrace.str());

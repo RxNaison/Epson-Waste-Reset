@@ -28,17 +28,17 @@ namespace ewr {
             std::size_t local = 0;
         };
 
-        class CompositeUsbBackend final : public UsbBackend
+        class CompositeUsbBackend final : public usb::Backend
         {
         public:
-            CompositeUsbBackend(std::vector<UsbBackendMember> members, std::ostream& trace)
+            CompositeUsbBackend(std::vector<usb::BackendMember> members, std::ostream& trace)
                 : members_(std::move(members)), trace_(trace)
             {
                 // Only a total failure is fatal: libusb missing must not stop
                 // a run usbprint alone can finish.
                 bool anyUsable = false;
 
-                for (const UsbBackendMember& member : members_)
+                for (const usb::BackendMember& member : members_)
                 {
                     if (member.backend->InitError().empty())
                     {
@@ -68,10 +68,10 @@ namespace ewr {
 
             const std::string& InitError() const override { return initError_; }
 
-            std::vector<UsbCandidate> Enumerate() override
+            std::vector<usb::Candidate> Enumerate() override
             {
                 slots_.clear();
-                std::vector<UsbCandidate> merged;
+                std::vector<usb::Candidate> merged;
 
                 for (std::size_t m = 0; m < members_.size(); ++m)
                 {
@@ -84,7 +84,7 @@ namespace ewr {
                     // number, so a member is never matched against itself.
                     const std::size_t earlierCount = merged.size();
 
-                    for (const UsbCandidate& cand : members_[m].backend->Enumerate())
+                    for (const usb::Candidate& cand : members_[m].backend->Enumerate())
                     {
                         // The earlier transport holds the handle once it
                         // opens, so a duplicate could only fail to claim.
@@ -95,7 +95,7 @@ namespace ewr {
                             continue;
                         }
 
-                        UsbCandidate out = cand;
+                        usb::Candidate out = cand;
                         out.ordinal = slots_.size();
                         if (!members_[m].tag.empty())
                             out.className = members_[m].tag + ":" + cand.className;
@@ -169,9 +169,9 @@ namespace ewr {
         private:
             // On PID and interface number, not path: the two transports
             // describe one interface with completely different strings.
-            static bool AlreadyListed(const std::vector<UsbCandidate>& listed,
+            static bool AlreadyListed(const std::vector<usb::Candidate>& listed,
                                       std::size_t count,
-                                      const UsbCandidate& cand)
+                                      const usb::Candidate& cand)
             {
                 for (std::size_t i = 0; i < count && i < listed.size(); ++i)
                 {
@@ -187,7 +187,7 @@ namespace ewr {
                 return false;
             }
 
-            std::vector<UsbBackendMember> members_;
+            std::vector<usb::BackendMember> members_;
             std::ostream& trace_;
             std::string platformName_;
             std::string initError_;
@@ -197,20 +197,20 @@ namespace ewr {
 
     } // namespace
 
-    std::unique_ptr<UsbBackend> CreateCompositeUsbBackend(std::vector<UsbBackendMember> members,
+    std::unique_ptr<usb::Backend> usb::CreateCompositeBackend(std::vector<usb::BackendMember> members,
                                                           std::ostream& trace)
     {
         return std::make_unique<CompositeUsbBackend>(std::move(members), trace);
     }
 
 #ifdef _WIN32
-    std::unique_ptr<UsbBackend> CreateUsbBackend(std::ostream& trace)
+    std::unique_ptr<usb::Backend> usb::CreateBackend(std::ostream& trace)
     {
-        std::vector<UsbBackendMember> members;
-        members.push_back(UsbBackendMember{ CreateWindowsUsbBackend(trace), "" });
-        members.push_back(UsbBackendMember{ CreateLibusbBackend(trace), "libusb" });
+        std::vector<usb::BackendMember> members;
+        members.push_back(usb::BackendMember{ usb::CreateWindowsBackend(trace), "" });
+        members.push_back(usb::BackendMember{ usb::CreateLibusbBackend(trace), "libusb" });
 
-        return CreateCompositeUsbBackend(std::move(members), trace);
+        return usb::CreateCompositeBackend(std::move(members), trace);
     }
 #endif
 

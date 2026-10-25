@@ -42,13 +42,14 @@
 #include "ewr/restore.h"
 #include "ewr/backup.h"
 #include "ewr/usb_backend.h"
+#include "ewr/usb_driver.h"
 #include "ewr/run_lock.h"
 #include "ewr/json_out.h"
 #include "ewr/ewr_c.h"
 #include "ewr/version.h"
 #include "ewr/discover.h"
 #include "ewr/snmp.h"
-#include "ewr/snmp_gateway.h"
+#include "ewr/network.h"
 #include "../cli/color.h"
 #include "../cli/console.h"
 
@@ -6518,10 +6519,10 @@ void test_run_lock_admits_one_run_at_a_time()
 // Describe(), QueryDeviceId() and AttemptsPerCandidate() all echo the ordinal
 // they were handed, so a mistranslated ordinal fails loudly instead of
 // looking like a pass.
-class FakeBackend final : public ewr::UsbBackend
+class FakeBackend final : public ewr::usb::Backend
 {
 public:
-    FakeBackend(std::string name, std::vector<ewr::UsbCandidate> candidates, std::string initError = "")
+    FakeBackend(std::string name, std::vector<ewr::usb::Candidate> candidates, std::string initError = "")
         : name_(std::move(name)), candidates_(std::move(candidates)), initError_(std::move(initError))
     {
         for (std::size_t i = 0; i < candidates_.size(); ++i)
@@ -6531,7 +6532,7 @@ public:
     const char* PlatformName() const override { return name_.c_str(); }
     const std::string& InitError() const override { return initError_; }
 
-    std::vector<ewr::UsbCandidate> Enumerate() override
+    std::vector<ewr::usb::Candidate> Enumerate() override
     {
         ++enumerations;
         return candidates_;
@@ -6579,14 +6580,14 @@ public:
 
 private:
     std::string name_;
-    std::vector<ewr::UsbCandidate> candidates_;
+    std::vector<ewr::usb::Candidate> candidates_;
     std::string initError_;
 };
 
-static ewr::UsbCandidate MakeCandidate(const std::string& className, int interfaceNumber,
+static ewr::usb::Candidate MakeCandidate(const std::string& className, int interfaceNumber,
                                        const std::string& pid = "1187")
 {
-    ewr::UsbCandidate cand;
+    ewr::usb::Candidate cand;
     cand.className = className;
     cand.interfaceNumber = interfaceNumber;
     cand.path = className + "#if_" + std::to_string(interfaceNumber);
@@ -6594,9 +6595,9 @@ static ewr::UsbCandidate MakeCandidate(const std::string& className, int interfa
     return cand;
 }
 
-static ewr::UsbBackendMember Member(std::unique_ptr<ewr::UsbBackend> backend, std::string tag)
+static ewr::usb::BackendMember Member(std::unique_ptr<ewr::usb::Backend> backend, std::string tag)
 {
-    ewr::UsbBackendMember member;
+    ewr::usb::BackendMember member;
     member.backend = std::move(backend);
     member.tag = std::move(tag);
     return member;
@@ -6606,26 +6607,26 @@ void test_composite_merges_candidates_in_member_order()
 {
     std::cout << "[TEST] test_composite_merges_candidates_in_member_order" << std::endl;
 
-    ewr::UsbCandidate printer = MakeCandidate("USBPRINT", 1);
+    ewr::usb::Candidate printer = MakeCandidate("USBPRINT", 1);
     printer.port = "USB001";
     printer.queues = { { "EPSON XP-332 335 Series", "USB001", "Microsoft IPP Class Driver", 1 } };
 
     auto primary = std::make_unique<FakeBackend>("usbprint",
-        std::vector<ewr::UsbCandidate>{ printer, MakeCandidate("IMAGE", 0) });
+        std::vector<ewr::usb::Candidate>{ printer, MakeCandidate("IMAGE", 0) });
     auto secondary = std::make_unique<FakeBackend>("libusb",
-        std::vector<ewr::UsbCandidate>{ MakeCandidate("VENDOR", 2), MakeCandidate("VENDOR", 3) });
+        std::vector<ewr::usb::Candidate>{ MakeCandidate("VENDOR", 2), MakeCandidate("VENDOR", 3) });
 
-    std::vector<ewr::UsbBackendMember> members;
+    std::vector<ewr::usb::BackendMember> members;
     members.push_back(Member(std::move(primary), ""));
     members.push_back(Member(std::move(secondary), "libusb"));
 
     std::ostringstream trace;
-    std::unique_ptr<ewr::UsbBackend> composite = ewr::CreateCompositeUsbBackend(std::move(members), trace);
+    std::unique_ptr<ewr::usb::Backend> composite = ewr::usb::CreateCompositeBackend(std::move(members), trace);
 
     CHECK(std::string(composite->PlatformName()) == "usbprint + libusb");
     CHECK(composite->InitError().empty());
 
-    const std::vector<ewr::UsbCandidate> merged = composite->Enumerate();
+    const std::vector<ewr::usb::Candidate> merged = composite->Enumerate();
     CHECK(merged.size() == 4);
 
     // Order is the guarantee: a printer that already worked never reaches
@@ -6660,24 +6661,24 @@ void test_print_queues_are_matched_by_port()
         { "Pooled", "USB003, usb004", "MICROSOFT IPP CLASS DRIVER", 0 },
     };
 
-    const std::vector<ewr::PrintQueue> onUsb001 = ewr::QueuesOnPort(queues, "USB001");
+    const std::vector<ewr::PrintQueue> onUsb001 = ewr::usb::QueuesOnPort(queues, "USB001");
     CHECK(onUsb001.size() == 1 && onUsb001[0].name == "EPSON XP-332 335 Series");
 
-    const std::vector<ewr::PrintQueue> onUsb002 = ewr::QueuesOnPort(queues, "usb002");
+    const std::vector<ewr::PrintQueue> onUsb002 = ewr::usb::QueuesOnPort(queues, "usb002");
     CHECK(onUsb002.size() == 1 && onUsb002[0].name == "EPSON R220");
 
     // A pooled queue names each of its ports, in any case.
-    CHECK(ewr::QueuesOnPort(queues, "USB004").size() == 1);
-    CHECK(ewr::QueuesOnPort(queues, "USB003").size() == 1);
+    CHECK(ewr::usb::QueuesOnPort(queues, "USB004").size() == 1);
+    CHECK(ewr::usb::QueuesOnPort(queues, "USB003").size() == 1);
 
     // A prefix of a port is not that port, and no port is no queue.
-    CHECK(ewr::QueuesOnPort(queues, "USB00").empty());
-    CHECK(ewr::QueuesOnPort(queues, "").empty());
+    CHECK(ewr::usb::QueuesOnPort(queues, "USB00").empty());
+    CHECK(ewr::usb::QueuesOnPort(queues, "").empty());
 
-    CHECK(ewr::IsReadyPrintDriver("Microsoft IPP Class Driver"));
-    CHECK(ewr::IsReadyPrintDriver(" MICROSOFT IPP CLASS DRIVER "));
-    CHECK(!ewr::IsReadyPrintDriver("Epson ESC/P Standard 2 V4 Class Driver"));
-    CHECK(!ewr::IsReadyPrintDriver(""));
+    CHECK(ewr::usb::IsReadyPrintDriver("Microsoft IPP Class Driver"));
+    CHECK(ewr::usb::IsReadyPrintDriver(" MICROSOFT IPP CLASS DRIVER "));
+    CHECK(!ewr::usb::IsReadyPrintDriver("Epson ESC/P Standard 2 V4 Class Driver"));
+    CHECK(!ewr::usb::IsReadyPrintDriver(""));
 }
 
 // #55: an XP-332 never answered D4 Init under a Ready Print queue, and on an
@@ -6692,8 +6693,8 @@ void test_silent_port_warns_about_waiting_jobs_and_ready_print()
     ewr::SilentPortQueues quiet;
     quiet.port = "USB001";
     quiet.queues = { { "EPSON R220", "USB001", "Epson ESC/P Standard 2 V4 Class Driver", 0 } };
-    CHECK(!ewr::ReportSilentPortQueues(quiet));
-    CHECK(!ewr::ReportSilentPortQueues(ewr::SilentPortQueues{}));
+    CHECK(!ewr::usb::ReportSilentPortQueues(quiet));
+    CHECK(!ewr::usb::ReportSilentPortQueues(ewr::SilentPortQueues{}));
     CHECK(events.empty());
 
     ewr::SilentPortQueues note;
@@ -6702,7 +6703,7 @@ void test_silent_port_warns_about_waiting_jobs_and_ready_print()
         { "EPSON XP-332 335 Series", "USB001", "Microsoft IPP Class Driver", 1 },
         { "EPSON XP-332 (copy 1)", "USB001", "EPSON XP-332 335 Series", 3 },
     };
-    CHECK(ewr::ReportSilentPortQueues(note));
+    CHECK(ewr::usb::ReportSilentPortQueues(note));
 
     ewr::log::Default().RemoveSink(sinkId);
 
@@ -6734,21 +6735,21 @@ void test_composite_identifies_a_shared_interface_by_number()
     // mi_01 is bound to usbprint.sys and still visible to libusb; listing it
     // twice only spends a failed claim on a handle usbprint already holds.
     auto primary = std::make_unique<FakeBackend>("usbprint",
-        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", 1) });
+        std::vector<ewr::usb::Candidate>{ MakeCandidate("USBPRINT", 1) });
     auto secondary = std::make_unique<FakeBackend>("libusb",
-        std::vector<ewr::UsbCandidate>{
+        std::vector<ewr::usb::Candidate>{
             MakeCandidate("PRINTER", 1),              // the same interface
             MakeCandidate("VENDOR", 1, "1234"),       // same number, different device
             MakeCandidate("VENDOR", 2) });
 
-    std::vector<ewr::UsbBackendMember> members;
+    std::vector<ewr::usb::BackendMember> members;
     members.push_back(Member(std::move(primary), ""));
     members.push_back(Member(std::move(secondary), "libusb"));
 
     std::ostringstream trace;
-    std::unique_ptr<ewr::UsbBackend> composite = ewr::CreateCompositeUsbBackend(std::move(members), trace);
+    std::unique_ptr<ewr::usb::Backend> composite = ewr::usb::CreateCompositeBackend(std::move(members), trace);
 
-    const std::vector<ewr::UsbCandidate> merged = composite->Enumerate();
+    const std::vector<ewr::usb::Candidate> merged = composite->Enumerate();
     CHECK(merged.size() == 3);
     CHECK(merged[0].className == "USBPRINT");
     CHECK(merged[1].className == "libusb:VENDOR" && merged[1].pid == "1234");
@@ -6760,27 +6761,27 @@ void test_composite_identifies_a_shared_interface_by_number()
     // No mi_XX means non-composite: one function, so libusb's interface 0 on
     // that PID is the same one.
     auto lonePrimary = std::make_unique<FakeBackend>("usbprint",
-        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", -1) });
+        std::vector<ewr::usb::Candidate>{ MakeCandidate("USBPRINT", -1) });
     auto loneSecondary = std::make_unique<FakeBackend>("libusb",
-        std::vector<ewr::UsbCandidate>{ MakeCandidate("PRINTER", 0) });
+        std::vector<ewr::usb::Candidate>{ MakeCandidate("PRINTER", 0) });
 
-    std::vector<ewr::UsbBackendMember> loneMembers;
+    std::vector<ewr::usb::BackendMember> loneMembers;
     loneMembers.push_back(Member(std::move(lonePrimary), ""));
     loneMembers.push_back(Member(std::move(loneSecondary), "libusb"));
 
-    std::unique_ptr<ewr::UsbBackend> lone = ewr::CreateCompositeUsbBackend(std::move(loneMembers), trace);
+    std::unique_ptr<ewr::usb::Backend> lone = ewr::usb::CreateCompositeBackend(std::move(loneMembers), trace);
     CHECK(lone->Enumerate().size() == 1);
     CHECK(lone->Enumerate()[0].className == "USBPRINT");
 
     // Two of the same printer share a PID and an interface number and are
     // still two printers.
     auto twins = std::make_unique<FakeBackend>("usbprint",
-        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", 1), MakeCandidate("USBPRINT", 1) });
+        std::vector<ewr::usb::Candidate>{ MakeCandidate("USBPRINT", 1), MakeCandidate("USBPRINT", 1) });
 
-    std::vector<ewr::UsbBackendMember> twinMembers;
+    std::vector<ewr::usb::BackendMember> twinMembers;
     twinMembers.push_back(Member(std::move(twins), ""));
 
-    std::unique_ptr<ewr::UsbBackend> pair = ewr::CreateCompositeUsbBackend(std::move(twinMembers), trace);
+    std::unique_ptr<ewr::usb::Backend> pair = ewr::usb::CreateCompositeBackend(std::move(twinMembers), trace);
     CHECK(pair->Enumerate().size() == 2);
 }
 
@@ -6789,9 +6790,9 @@ void test_composite_routes_every_call_to_the_owning_member()
     std::cout << "[TEST] test_composite_routes_every_call_to_the_owning_member" << std::endl;
 
     auto primary = std::make_unique<FakeBackend>("usbprint",
-        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", 1), MakeCandidate("IMAGE", 0) });
+        std::vector<ewr::usb::Candidate>{ MakeCandidate("USBPRINT", 1), MakeCandidate("IMAGE", 0) });
     auto secondary = std::make_unique<FakeBackend>("libusb",
-        std::vector<ewr::UsbCandidate>{ MakeCandidate("VENDOR", 2), MakeCandidate("VENDOR", 3) });
+        std::vector<ewr::usb::Candidate>{ MakeCandidate("VENDOR", 2), MakeCandidate("VENDOR", 3) });
 
     FakeBackend* primaryRaw = primary.get();
     FakeBackend* secondaryRaw = secondary.get();
@@ -6800,12 +6801,12 @@ void test_composite_routes_every_call_to_the_owning_member()
     primaryRaw->attemptsBase = 2;
     secondaryRaw->attemptsBase = 1;
 
-    std::vector<ewr::UsbBackendMember> members;
+    std::vector<ewr::usb::BackendMember> members;
     members.push_back(Member(std::move(primary), ""));
     members.push_back(Member(std::move(secondary), "libusb"));
 
     std::ostringstream trace;
-    std::unique_ptr<ewr::UsbBackend> composite = ewr::CreateCompositeUsbBackend(std::move(members), trace);
+    std::unique_ptr<ewr::usb::Backend> composite = ewr::usb::CreateCompositeBackend(std::move(members), trace);
     composite->Enumerate();
 
     // Composite ordinal 3 is libusb's own ordinal 1.
@@ -6848,18 +6849,18 @@ void test_composite_runs_on_the_transports_that_came_up()
 
     // libusb failing to initialise must not stop a run usbprint can finish.
     auto primary = std::make_unique<FakeBackend>("usbprint",
-        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", 1) });
+        std::vector<ewr::usb::Candidate>{ MakeCandidate("USBPRINT", 1) });
     auto secondary = std::make_unique<FakeBackend>("libusb",
-        std::vector<ewr::UsbCandidate>{ MakeCandidate("VENDOR", 2) }, "Failed to initialize libusb.");
+        std::vector<ewr::usb::Candidate>{ MakeCandidate("VENDOR", 2) }, "Failed to initialize libusb.");
 
     FakeBackend* secondaryRaw = secondary.get();
 
-    std::vector<ewr::UsbBackendMember> members;
+    std::vector<ewr::usb::BackendMember> members;
     members.push_back(Member(std::move(primary), ""));
     members.push_back(Member(std::move(secondary), "libusb"));
 
     std::ostringstream trace;
-    std::unique_ptr<ewr::UsbBackend> composite = ewr::CreateCompositeUsbBackend(std::move(members), trace);
+    std::unique_ptr<ewr::usb::Backend> composite = ewr::usb::CreateCompositeBackend(std::move(members), trace);
 
     CHECK(composite->InitError().empty());
     CHECK(std::string(composite->PlatformName()) == "usbprint");
@@ -6868,13 +6869,13 @@ void test_composite_runs_on_the_transports_that_came_up()
     CHECK(trace.str().find("Failed to initialize libusb.") != std::string::npos);
 
     // Every transport down is the only fatal case, and the reason survives.
-    std::vector<ewr::UsbBackendMember> deadMembers;
+    std::vector<ewr::usb::BackendMember> deadMembers;
     deadMembers.push_back(Member(std::make_unique<FakeBackend>("usbprint",
-        std::vector<ewr::UsbCandidate>{}, "SetupAPI enumeration failed."), ""));
+        std::vector<ewr::usb::Candidate>{}, "SetupAPI enumeration failed."), ""));
     deadMembers.push_back(Member(std::make_unique<FakeBackend>("libusb",
-        std::vector<ewr::UsbCandidate>{}, "Failed to initialize libusb."), "libusb"));
+        std::vector<ewr::usb::Candidate>{}, "Failed to initialize libusb."), "libusb"));
 
-    std::unique_ptr<ewr::UsbBackend> dead = ewr::CreateCompositeUsbBackend(std::move(deadMembers), trace);
+    std::unique_ptr<ewr::usb::Backend> dead = ewr::usb::CreateCompositeBackend(std::move(deadMembers), trace);
     CHECK(dead->InitError() == "SetupAPI enumeration failed.");
     CHECK(dead->Enumerate().empty());
 }
@@ -7531,7 +7532,7 @@ void test_json_never_leaks_minus_one()
     const nlohmann::json busyJson = ewr::JsonBlocker(busy);
     CHECK(busyJson.contains("error_code") && busyJson["error_code"].is_null());
 
-    ewr::InterfaceInfo usbprint;
+    ewr::usb::InterfaceInfo usbprint;
     usbprint.index = 1;
     usbprint.className = "USBPRINT";
     usbprint.path = "\\\\?\\usb#vid_04b8";
@@ -7541,7 +7542,7 @@ void test_json_never_leaks_minus_one()
     CHECK(plain["model_match"].is_null());
     CHECK(plain["index"] == 1 && plain["class"] == "USBPRINT");
 
-    ewr::InterfaceInfo vendor = usbprint;
+    ewr::usb::InterfaceInfo vendor = usbprint;
     vendor.index = 2;
     vendor.interfaceNumber = 2;
     vendor.deviceId = "MFG:EPSON;MDL:ET-2800 Series;";
@@ -7808,7 +7809,7 @@ void test_snmp_get_request_is_byte_exact()
     // answer with their own encoder; both have to agree past one-byte IDs.
     int id = 0;
     ewr::snmp::Oid oid;
-    const ewr::snmp::Oid control = ewr::SnmpControlOid({ 0x7C, 0x7C, 0xBE });
+    const ewr::snmp::Oid control = ewr::snmp::ControlOid({ 0x7C, 0x7C, 0xBE });
     CHECK(snmp_test::ParseRequest(ewr::snmp::EncodeGetRequest("public", 70000, control), id, oid));
     CHECK(id == 70000 && oid == control);
     CHECK(!snmp_test::ParseRequest(ewr::snmp::EncodeGetRequest("private", 1, control), id, oid));
@@ -7862,7 +7863,7 @@ void test_snmp_control_oid_carries_the_read_command()
         snmp_test::CommandOf(ewr::ctrl::ReadPacket(0x0797, 0x01FE));
     const ewr::snmp::Oid expected = { 1, 3, 6, 1, 4, 1, 1248, 1, 2, 2, 44, 1, 1, 2, 1,
                                       124, 124, 7, 0, 151, 7, 65, 190, 160, 254, 1 };
-    CHECK(ewr::SnmpControlOid(command) == expected);
+    CHECK(ewr::snmp::ControlOid(command) == expected);
 }
 
 void test_snmp_gateway_reads_state_through_the_session()
@@ -7874,13 +7875,13 @@ void test_snmp_gateway_reads_state_through_the_session()
     auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
     snmp_test::ScriptedPrinter* script = printer.get();
 
-    script->Serve(ewr::SnmpDeviceIdOid(), snmp_test::Bytes("MFG:EPSON;CMD:ESCPL2,BDC,D4;MDL:L3150 Series;CLS:PRINTER;"));
-    script->Serve(ewr::SnmpStatusOid(), ewr::d4::ExtractPayload(MakeSt2Reply()));
-    script->Serve(ewr::SnmpControlOid(snmp_test::CommandOf(
+    script->Serve(ewr::snmp::DeviceIdOid(), snmp_test::Bytes("MFG:EPSON;CMD:ESCPL2,BDC,D4;MDL:L3150 Series;CLS:PRINTER;"));
+    script->Serve(ewr::snmp::StatusOid(), ewr::d4::ExtractPayload(MakeSt2Reply()));
+    script->Serve(ewr::snmp::ControlOid(snmp_test::CommandOf(
                       ewr::ctrl::ReadPacket(model.rkey, 0x30))),
                   snmp_test::Bytes("@BDC PS\r\nEE:00302A;\f"));
     // 0x1FE is known to the printer but refused, as an unserved OID is.
-    script->Know(ewr::SnmpControlOid(snmp_test::CommandOf(
+    script->Know(ewr::snmp::ControlOid(snmp_test::CommandOf(
         ewr::ctrl::ReadPacket(model.rkey, 0x1FE))));
 
     std::ostringstream trace;
@@ -7921,7 +7922,7 @@ void test_snmp_gateway_retries_a_lost_datagram()
 
     auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
     snmp_test::ScriptedPrinter* script = printer.get();
-    script->Serve(ewr::SnmpStatusOid(), ewr::d4::ExtractPayload(MakeSt2Reply()));
+    script->Serve(ewr::snmp::StatusOid(), ewr::d4::ExtractPayload(MakeSt2Reply()));
     script->dropFirst = 2;
 
     ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
@@ -7940,7 +7941,7 @@ void test_snmp_gateway_reports_silence_without_asking_on()
 
     auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
     snmp_test::ScriptedPrinter* script = printer.get();
-    script->Know(ewr::SnmpStatusOid());
+    script->Know(ewr::snmp::StatusOid());
     script->silent = true;
 
     ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
@@ -7977,7 +7978,7 @@ void test_snmp_gateway_tells_a_blocked_send_from_a_silent_printer()
     CHECK(blockedGateway.SendBlocked());
 
     auto quiet = std::make_unique<snmp_test::ScriptedPrinter>();
-    quiet->Know(ewr::SnmpDeviceIdOid());
+    quiet->Know(ewr::snmp::DeviceIdOid());
     quiet->silent = true;
     ewr::SnmpDeviceGateway quietGateway("192.0.2.1", std::move(quiet));
     CHECK(!quietGateway.QueryDeviceId().found);
@@ -7994,7 +7995,7 @@ void test_snmp_query_path_never_sends_a_write()
 
     auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
     snmp_test::ScriptedPrinter* script = printer.get();
-    script->Serve(ewr::SnmpControlOid(snmp_test::CommandOf(write)), snmp_test::Bytes("@BDC PS\r\n||:42:OK;\f"));
+    script->Serve(ewr::snmp::ControlOid(snmp_test::CommandOf(write)), snmp_test::Bytes("@BDC PS\r\n||:42:OK;\f"));
 
     ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
     CHECK(gateway.OverNetwork());
@@ -8034,7 +8035,7 @@ namespace snmp_test {
             if (!ParseRequest(datagram, id, oid))
                 return true;
 
-            if (oid == ewr::SnmpStatusOid())
+            if (oid == ewr::snmp::StatusOid())
             {
                 pending.push_back(MakeResponse(id, 0, 0x04,
                     Bytes("@BDC ST2\r\n\x03" + std::string(1, '\0') + "\x01\x01\x04")));
@@ -8043,7 +8044,7 @@ namespace snmp_test {
 
             for (auto& cell : eeprom)
             {
-                if (oid == ewr::SnmpControlOid(CommandOf(
+                if (oid == ewr::snmp::ControlOid(CommandOf(
                                ewr::ctrl::ReadPacket(model.rkey, cell.first))))
                 {
                     if (locked)
@@ -8069,7 +8070,7 @@ namespace snmp_test {
                     // Any byte: a restore writes back what a reset cleared.
                     for (int value = 0; value < 256; ++value)
                     {
-                        if (oid != ewr::SnmpControlOid(CommandOf(ewr::ctrl::WritePacket(
+                        if (oid != ewr::snmp::ControlOid(CommandOf(ewr::ctrl::WritePacket(
                                        model.rkey, cell.first, static_cast<uint8_t>(value), key))))
                             continue;
 
@@ -8358,7 +8359,7 @@ namespace snmp_test {
 
             int id = 0;
             ewr::snmp::Oid oid;
-            if (!ParseRequest(datagram, id, oid) || oid != ewr::SnmpDeviceIdOid())
+            if (!ParseRequest(datagram, id, oid) || oid != ewr::snmp::DeviceIdOid())
                 return true;
 
             for (const Agent& agent : agents)
@@ -8408,7 +8409,7 @@ void test_snmp_discovery_keeps_only_epson_answers()
     std::string error;
     std::ostringstream trace;
     const std::vector<ewr::NetworkPrinter> found =
-        ewr::DiscoverNetworkPrinters(network, { "255.255.255.255", "192.168.1.255" }, 300, error, &trace);
+        ewr::snmp::DiscoverPrinters(network, { "255.255.255.255", "192.168.1.255" }, 300, error, &trace);
     CHECK(error.empty());
 
     // When the printer is not found, this is the only record of why: what
@@ -8442,7 +8443,7 @@ void test_snmp_discovery_keeps_only_epson_answers()
 
     // Nothing answering is an empty list, not a failure.
     snmp_test::ScriptedNetwork quiet;
-    CHECK(ewr::DiscoverNetworkPrinters(quiet, { "255.255.255.255" }, 30, error).empty());
+    CHECK(ewr::snmp::DiscoverPrinters(quiet, { "255.255.255.255" }, 30, error).empty());
     CHECK(error.empty());
 
     // A machine that refuses every send is not an empty network: it says so,
@@ -8452,7 +8453,7 @@ void test_snmp_discovery_keeps_only_epson_answers()
     blocked.agents = network.agents;
     const auto before = std::chrono::steady_clock::now();
     std::ostringstream blockedTrace;
-    CHECK(ewr::DiscoverNetworkPrinters(blocked, { "255.255.255.255" }, 2000, error, &blockedTrace).empty());
+    CHECK(ewr::snmp::DiscoverPrinters(blocked, { "255.255.255.255" }, 2000, error, &blockedTrace).empty());
     CHECK(error.find("refused to send") != std::string::npos);
     CHECK(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(1000));
     CHECK(blockedTrace.str().find("refused the send to 255.255.255.255") != std::string::npos);
@@ -10097,7 +10098,7 @@ void test_snmp_runs_a_command_once_and_queries_refuse_it()
     std::cout << "[TEST] test_snmp_runs_a_command_once_and_queries_refuse_it" << std::endl;
 
     const std::vector<unsigned char> clean = ewr::ctrl::FactoryPacket(0x0797, 0x84, { 0x02 });
-    const ewr::snmp::Oid oid = ewr::SnmpControlOid(snmp_test::CommandOf(clean));
+    const ewr::snmp::Oid oid = ewr::snmp::ControlOid(snmp_test::CommandOf(clean));
 
     auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
     snmp_test::ScriptedPrinter* script = printer.get();

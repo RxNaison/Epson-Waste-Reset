@@ -1,6 +1,6 @@
 #pragma once
+#include "ewr/gateway.h"
 #include "ewr/transport.h"
-#include "ewr/usb.h"
 
 #include <cstddef>
 #include <memory>
@@ -8,12 +8,12 @@
 #include <string>
 #include <vector>
 
-namespace ewr {
+namespace ewr::usb {
 
     // Platform-neutral view of one interface, in fallback order. The backend
     // keeps its own state (device paths, endpoint addresses) keyed by
     // `ordinal`; nothing platform-specific crosses this struct.
-    struct UsbCandidate
+    struct Candidate
     {
         std::size_t ordinal = 0;
         // Windows: setup class (USBPRINT, IMAGE, ...); Linux: PRINTER/VENDOR.
@@ -37,10 +37,10 @@ namespace ewr {
     // choreography; a backend owns enumeration, open/close and raw I/O.
     // usb_windows.cpp and usb_libusb.cpp each implement it; a Windows build
     // runs both behind the composite in usb_composite.cpp.
-    class UsbBackend
+    class Backend
     {
     public:
-        virtual ~UsbBackend() = default;
+        virtual ~Backend() = default;
 
         // "Windows" or "libusb"; used in trace-log banners and user messages.
         virtual const char* PlatformName() const = 0;
@@ -49,7 +49,7 @@ namespace ewr {
         virtual const std::string& InitError() const = 0;
 
         // Best first. Writes discovery detail to the trace. Once per run.
-        virtual std::vector<UsbCandidate> Enumerate() = 0;
+        virtual std::vector<Candidate> Enumerate() = 0;
 
         virtual std::string Describe(std::size_t ordinal) const = 0;
 
@@ -83,11 +83,11 @@ namespace ewr {
 
     // `trace` is the run's single open trace stream and must outlive the
     // backend, which must never reopen ewr_trace.log itself.
-    std::unique_ptr<UsbBackend> CreateUsbBackend(std::ostream& trace);
+    std::unique_ptr<Backend> CreateBackend(std::ostream& trace);
 
-    struct UsbBackendMember
+    struct BackendMember
     {
-        std::unique_ptr<UsbBackend> backend;
+        std::unique_ptr<Backend> backend;
         // Prefixed onto this member's class names ("libusb:VENDOR"). Empty
         // leaves them as the member reported them.
         std::string tag;
@@ -96,7 +96,7 @@ namespace ewr {
     // Candidates concatenate in member order, the first member to list an
     // interface keeps it, and every ordinal routes back to its owner. Only
     // Windows composes (usbprint.sys + libusb).
-    std::unique_ptr<UsbBackend> CreateCompositeUsbBackend(std::vector<UsbBackendMember> members,
-                                                          std::ostream& trace);
+    std::unique_ptr<Backend> CreateCompositeBackend(std::vector<BackendMember> members,
+                                                    std::ostream& trace);
 
-} // namespace ewr
+} // namespace ewr::usb

@@ -124,7 +124,7 @@ namespace ewr {
         return out;
     }
 
-    nlohmann::json JsonInterface(const InterfaceInfo& info, const std::string& modelMatch)
+    nlohmann::json JsonInterface(const usb::InterfaceInfo& info, const std::string& modelMatch)
     {
         nlohmann::json out;
         out["index"] = info.index;

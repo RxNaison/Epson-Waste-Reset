@@ -1,4 +1,5 @@
 #include "ewr/usb.h"
+#include "ewr/usb_driver.h"
 #include "ewr/ctrl.h"
 #include "ewr/d4session.h"
 #include "ewr/format.h"
@@ -124,7 +125,7 @@ namespace ewr {
         class ScopedBackendClose
         {
         public:
-            explicit ScopedBackendClose(UsbBackend& backend) : backend_(backend) {}
+            explicit ScopedBackendClose(usb::Backend& backend) : backend_(backend) {}
 
             ~ScopedBackendClose() { Close(); }
 
@@ -141,7 +142,7 @@ namespace ewr {
             ScopedBackendClose& operator=(const ScopedBackendClose&) = delete;
 
         private:
-            UsbBackend& backend_;
+            usb::Backend& backend_;
             bool closed_ = false;
         };
 
@@ -160,10 +161,10 @@ namespace ewr {
 
         // Enumeration plus pin validation, shared by the payload and query
         // runs. `error` carries the user-facing reason on false.
-        bool PrepareCandidates(UsbBackend& backend,
+        bool PrepareCandidates(usb::Backend& backend,
                                std::ostream& trace,
                                const ExecutorOptions& options,
-                               std::vector<UsbCandidate>& candidates,
+                               std::vector<usb::Candidate>& candidates,
                                bool& deviceFound,
                                std::string& error)
         {
@@ -203,8 +204,8 @@ namespace ewr {
             return true;
         }
 
-        void WriteSelectionDecision(std::ostream& trace, const UsbBackend& backend,
-                                    const UsbCandidate& cand, std::size_t idx, std::size_t total)
+        void WriteSelectionDecision(std::ostream& trace, const usb::Backend& backend,
+                                    const usb::Candidate& cand, std::size_t idx, std::size_t total)
         {
             trace << "\n[Selection Decision]\n";
             trace << "  Candidate:     " << (idx + 1) << " of " << total << "\n";
@@ -212,11 +213,11 @@ namespace ewr {
             trace << "  Product ID:    0x" << cand.pid << "\n\n";
         }
 
-        // Shared by ListPrinterInterfaces and QueryPrinterDeviceId so both
+        // Shared by usb::ListInterfaces and usb::QueryDeviceId so both
         // run over one open trace stream.
-        std::vector<InterfaceInfo> SurveyInterfaces(UsbBackend& backend, std::ostream& trace)
+        std::vector<usb::InterfaceInfo> SurveyInterfaces(usb::Backend& backend, std::ostream& trace)
         {
-            std::vector<InterfaceInfo> out;
+            std::vector<usb::InterfaceInfo> out;
 
             if (!backend.InitError().empty())
             {
@@ -224,13 +225,13 @@ namespace ewr {
                 return out;
             }
 
-            const std::vector<UsbCandidate> candidates = backend.Enumerate();
+            const std::vector<usb::Candidate> candidates = backend.Enumerate();
 
             for (std::size_t idx = 0; idx < candidates.size(); ++idx)
             {
-                const UsbCandidate& cand = candidates[idx];
+                const usb::Candidate& cand = candidates[idx];
 
-                InterfaceInfo info;
+                usb::InterfaceInfo info;
                 info.index = static_cast<int>(idx) + 1;
                 info.className = cand.className;
                 info.interfaceNumber = cand.interfaceNumber;
@@ -298,8 +299,8 @@ namespace ewr {
         // Last resort on an interface whose D4 handshake stayed silent: some
         // composite ET-2xxx units answer a non-D4 direct-control path over the
         // same handle even when they never open a D4 channel.
-        FallbackAttempt TryNonD4Fallback(UsbBackend& backend,
-                                         const UsbCandidate& cand,
+        FallbackAttempt TryNonD4Fallback(usb::Backend& backend,
+                                         const usb::Candidate& cand,
                                          const std::vector<std::vector<unsigned char>>& sequence,
                                          const ExecutorOptions& options,
                                          std::ostream& trace,
@@ -380,7 +381,7 @@ namespace ewr {
         // restarting that initialization each time. So: reset once, on a
         // handle of its own, then poll '@BDC ST2' on fresh sessions until the
         // printer reports a resting state.
-        void SoftResetAndSettle(UsbBackend& backend, const UsbCandidate& cand,
+        void SoftResetAndSettle(usb::Backend& backend, const usb::Candidate& cand,
                                 const ExecutorOptions& options, std::ostream& trace)
         {
             if (!backend.Open(cand.ordinal))
@@ -395,7 +396,7 @@ namespace ewr {
             if (!reset)
                 return;
 
-            const int limitMs = usb_timing::kSoftResetSettleTimeoutMs;
+            const int limitMs = usb::timing::kSoftResetSettleTimeoutMs;
             log::Log(log::Level::Info, log::Stage::Detect, "usb.soft_reset_wait",
                      "[i] USB soft reset sent. Waiting for the printer to finish initializing (up to "
                          + std::to_string(limitMs / 1000) + " s)...",
@@ -451,7 +452,7 @@ namespace ewr {
                     return;
                 }
 
-                std::this_thread::sleep_for(std::chrono::milliseconds(usb_timing::kSoftResetPollIntervalMs));
+                std::this_thread::sleep_for(std::chrono::milliseconds(usb::timing::kSoftResetPollIntervalMs));
             }
         }
 
@@ -471,7 +472,7 @@ namespace ewr {
             return text.substr(first, text.find_last_not_of(" \t") - first + 1);
         }
 
-        void NoteSilentPort(SilentPortQueues& note, const UsbCandidate& cand, bool handshakeFailed)
+        void NoteSilentPort(SilentPortQueues& note, const usb::Candidate& cand, bool handshakeFailed)
         {
             if (handshakeFailed && note.port.empty() && !cand.port.empty())
                 note = { cand.port, cand.queues };
@@ -492,7 +493,7 @@ namespace ewr {
                     trace << "[!] Silent on " << note.port << " with " << queue.waitingJobs
                           << " job(s) waiting in print queue \"" << queue.name << "\".\n";
 
-                if (IsReadyPrintDriver(queue.driver))
+                if (usb::IsReadyPrintDriver(queue.driver))
                     trace << "[!] Silent on " << note.port << ", where print queue \"" << queue.name
                           << "\" is a Ready Print one (Microsoft IPP Class Driver).\n";
             }
@@ -500,7 +501,7 @@ namespace ewr {
 
     } // namespace
 
-    std::vector<PrintQueue> QueuesOnPort(const std::vector<PrintQueue>& queues, const std::string& port)
+    std::vector<PrintQueue> usb::QueuesOnPort(const std::vector<PrintQueue>& queues, const std::string& port)
     {
         std::vector<PrintQueue> out;
         if (port.empty())
@@ -527,12 +528,12 @@ namespace ewr {
         return out;
     }
 
-    bool IsReadyPrintDriver(const std::string& driver)
+    bool usb::IsReadyPrintDriver(const std::string& driver)
     {
         return Lowercase(Trim(driver)) == "microsoft ipp class driver";
     }
 
-    ResetRunResult ExecutePayloadSequenceWithFallback(const std::vector<std::vector<unsigned char>>& sequence,
+    ResetRunResult usb::RunSequence(const std::vector<std::vector<unsigned char>>& sequence,
                                                       const ExecutorOptions& options,
                                                       bool appendTraceLog)
     {
@@ -540,11 +541,11 @@ namespace ewr {
 
         TraceLog traceLog(appendTraceLog);
         std::ostream& trace = traceLog.stream;
-        std::unique_ptr<UsbBackend> backend = CreateUsbBackend(trace);
+        std::unique_ptr<usb::Backend> backend = usb::CreateBackend(trace);
 
         WriteTraceBanner(trace, std::string("EWR HARDWARE TRACE LOG (") + backend->PlatformName() + ")", &options.trace);
 
-        std::vector<UsbCandidate> candidates;
+        std::vector<usb::Candidate> candidates;
         if (!PrepareCandidates(*backend, trace, options, candidates, run.deviceFound, run.exec.error))
             return run;
 
@@ -562,7 +563,7 @@ namespace ewr {
 
         for (std::size_t idx = 0; idx < candidates.size(); ++idx)
         {
-            const UsbCandidate& cand = candidates[idx];
+            const usb::Candidate& cand = candidates[idx];
 
             if (pinned >= 1 && static_cast<int>(idx) + 1 != pinned)
                 continue;
@@ -704,7 +705,7 @@ namespace ewr {
         return run;
     }
 
-    QueryRunResult ExecuteQuerySessionWithFallback(const std::vector<std::vector<unsigned char>>& handshake,
+    QueryRunResult usb::RunQuerySession(const std::vector<std::vector<unsigned char>>& handshake,
                                                    const std::vector<std::vector<unsigned char>>& queries,
                                                    const ExecutorOptions& options,
                                                    bool appendTraceLog)
@@ -713,11 +714,11 @@ namespace ewr {
 
         TraceLog traceLog(appendTraceLog);
         std::ostream& trace = traceLog.stream;
-        std::unique_ptr<UsbBackend> backend = CreateUsbBackend(trace);
+        std::unique_ptr<usb::Backend> backend = usb::CreateBackend(trace);
 
         WriteTraceBanner(trace, std::string("EWR STATUS/READ QUERY SESSION (") + backend->PlatformName() + ")", &options.trace);
 
-        std::vector<UsbCandidate> candidates;
+        std::vector<usb::Candidate> candidates;
         if (!PrepareCandidates(*backend, trace, options, candidates, run.deviceFound, run.query.error))
             return run;
 
@@ -725,7 +726,7 @@ namespace ewr {
 
         for (std::size_t idx = 0; idx < candidates.size(); ++idx)
         {
-            const UsbCandidate& cand = candidates[idx];
+            const usb::Candidate& cand = candidates[idx];
 
             if (pinned >= 1 && static_cast<int>(idx) + 1 != pinned)
                 continue;
@@ -806,19 +807,19 @@ namespace ewr {
         return run;
     }
 
-    PrintDataRunResult SendPrintDataWithFallback(const std::vector<unsigned char>& data,
+    usb::PrintDataRunResult usb::SendPrintData(const std::vector<unsigned char>& data,
                                                  const ExecutorOptions& options,
                                                  bool appendTraceLog)
     {
-        PrintDataRunResult run;
+        usb::PrintDataRunResult run;
 
         TraceLog traceLog(appendTraceLog);
         std::ostream& trace = traceLog.stream;
-        std::unique_ptr<UsbBackend> backend = CreateUsbBackend(trace);
+        std::unique_ptr<usb::Backend> backend = usb::CreateBackend(trace);
 
         WriteTraceBanner(trace, std::string("EWR PRINT DATA (") + backend->PlatformName() + ")", &options.trace);
 
-        std::vector<UsbCandidate> candidates;
+        std::vector<usb::Candidate> candidates;
         std::string error;
         if (!PrepareCandidates(*backend, trace, options, candidates, run.deviceFound, error))
         {
@@ -831,7 +832,7 @@ namespace ewr {
 
         for (std::size_t idx = 0; idx < candidates.size() && !opened; ++idx)
         {
-            const UsbCandidate& cand = candidates[idx];
+            const usb::Candidate& cand = candidates[idx];
 
             if (pinned >= 1 && static_cast<int>(idx) + 1 != pinned)
                 continue;
@@ -876,28 +877,28 @@ namespace ewr {
         return run;
     }
 
-    std::vector<InterfaceInfo> ListPrinterInterfaces(bool appendTraceLog)
+    std::vector<usb::InterfaceInfo> usb::ListInterfaces(bool appendTraceLog)
     {
         TraceLog traceLog(appendTraceLog);
         std::ostream& trace = traceLog.stream;
-        std::unique_ptr<UsbBackend> backend = CreateUsbBackend(trace);
+        std::unique_ptr<usb::Backend> backend = usb::CreateBackend(trace);
 
         WriteTraceBanner(trace, std::string("EPSON USB INTERFACE SURVEY (") + backend->PlatformName() + ")");
 
         return SurveyInterfaces(*backend, trace);
     }
 
-    DeviceIdQueryResult QueryPrinterDeviceId(bool appendTraceLog)
+    DeviceIdQueryResult usb::QueryDeviceId(bool appendTraceLog)
     {
         DeviceIdQueryResult out;
 
         TraceLog traceLog(appendTraceLog);
         std::ostream& trace = traceLog.stream;
-        std::unique_ptr<UsbBackend> backend = CreateUsbBackend(trace);
+        std::unique_ptr<usb::Backend> backend = usb::CreateBackend(trace);
 
         WriteTraceBanner(trace, std::string("EPSON USB INTERFACE SURVEY (") + backend->PlatformName() + ")");
 
-        for (const InterfaceInfo& info : SurveyInterfaces(*backend, trace))
+        for (const usb::InterfaceInfo& info : SurveyInterfaces(*backend, trace))
         {
             if (info.deviceId.empty())
                 continue;
@@ -913,10 +914,49 @@ namespace ewr {
         return out;
     }
 
-    void AppendTraceNote(const std::string& text, bool appendTraceLog)
+    void usb::AppendTraceNote(const std::string& text, bool appendTraceLog)
     {
         TraceLog traceLog(appendTraceLog);
         traceLog.stream << text;
+    }
+
+    bool usb::ReportSilentPortQueues(const SilentPortQueues& note)
+    {
+        bool reported = false;
+
+        for (const PrintQueue& queue : note.queues)
+        {
+            if (queue.waitingJobs <= 0)
+                continue;
+
+            reported = true;
+            const bool one = (queue.waitingJobs == 1);
+            log::Log(log::Level::Warning, log::Stage::Handshake, "usb.print_jobs_waiting",
+                     "[!] The printer did not answer, and " + std::to_string(queue.waitingJobs)
+                         + (one ? " print job is" : " print jobs are") + " waiting for it in the queue\n"
+                         "    \"" + queue.name + "\" on " + note.port + ". A waiting job can keep the printer from\n"
+                         "    taking EWR's data. Cancel " + (one ? "it" : "them") + " in Settings > Bluetooth & devices >\n"
+                         "    Printers & scanners > the printer > Open print queue, then power-cycle the\n"
+                         "    printer - it keeps the part it already received - and run EWR again.",
+                     { { "queue", queue.name }, { "port", note.port }, { "jobs", std::to_string(queue.waitingJobs) } });
+        }
+
+        for (const PrintQueue& queue : note.queues)
+        {
+            if (!usb::IsReadyPrintDriver(queue.driver))
+                continue;
+
+            reported = true;
+            log::Log(log::Level::Warning, log::Stage::Handshake, "usb.ready_print_driver",
+                     "[!] The printer did not answer, and Windows Ready Print is driving it: the print\n"
+                     "    queue \"" + queue.name + "\" on " + note.port + " uses the Microsoft IPP Class Driver,\n"
+                     "    which can keep a printer from answering EWR. Remove the printer in Settings >\n"
+                     "    Bluetooth & devices > Printers & scanners, install Epson's own driver for it,\n"
+                     "    then run EWR again.",
+                     { { "queue", queue.name }, { "port", note.port } });
+        }
+
+        return reported;
     }
 
 } // namespace ewr

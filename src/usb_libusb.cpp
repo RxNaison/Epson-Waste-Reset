@@ -1,4 +1,5 @@
 #include "ewr/usb.h"
+#include "ewr/usb_driver.h"
 #include "ewr/format.h"
 #include "ewr/usb_backend.h"
 #include "usb_backends_internal.h"
@@ -52,7 +53,7 @@ namespace ewr {
 
     } // namespace
 
-    void SetAndroidUsbFds(const std::vector<int>& fds)
+    void usb::SetAndroidFds(const std::vector<int>& fds)
     {
         std::lock_guard<std::mutex> lock(g_androidFdMutex);
         g_androidFds = fds;
@@ -61,7 +62,7 @@ namespace ewr {
 
     namespace {
 
-        using namespace usb_timing;
+        using namespace usb::timing;
 
         struct LibusbCandidate
         {
@@ -214,7 +215,7 @@ namespace ewr {
                 if (libusb_get_device_descriptor(devs[i], &desc) < 0)
                     continue;
 
-                if (desc.idVendor != EPSON_VID)
+                if (desc.idVendor != usb::EPSON_VID)
                     continue;
 
                 libusb_config_descriptor* config = nullptr;
@@ -382,7 +383,7 @@ namespace ewr {
             return ExtractDeviceIdString(buffer, static_cast<size_t>(received));
         }
 
-        class LibusbBackend final : public UsbBackend
+        class LibusbBackend final : public usb::Backend
         {
         public:
             explicit LibusbBackend(std::ostream& trace) : trace_(trace)
@@ -449,7 +450,7 @@ namespace ewr {
 
             const std::string& InitError() const override { return initError_; }
 
-            std::vector<UsbCandidate> Enumerate() override
+            std::vector<usb::Candidate> Enumerate() override
             {
                 candidates_.clear();
                 if (devices_ && deviceCount_ > 0)
@@ -468,10 +469,10 @@ namespace ewr {
                     }
                 }
 
-                std::vector<UsbCandidate> out;
+                std::vector<usb::Candidate> out;
                 for (std::size_t i = 0; i < candidates_.size(); ++i)
                 {
-                    UsbCandidate c;
+                    usb::Candidate c;
                     c.ordinal = i;
                     c.className = candidates_[i].printerClass ? "PRINTER" : "VENDOR";
                     c.interfaceNumber = candidates_[i].interfaceNumber;
@@ -586,16 +587,16 @@ namespace ewr {
 
     } // namespace
 
-    std::unique_ptr<UsbBackend> CreateLibusbBackend(std::ostream& trace)
+    std::unique_ptr<usb::Backend> usb::CreateLibusbBackend(std::ostream& trace)
     {
         return std::make_unique<LibusbBackend>(trace);
     }
 
 #ifndef _WIN32
-    // Windows takes CreateUsbBackend from usb_composite.cpp instead.
-    std::unique_ptr<UsbBackend> CreateUsbBackend(std::ostream& trace)
+    // Windows takes usb::CreateBackend from usb_composite.cpp instead.
+    std::unique_ptr<usb::Backend> usb::CreateBackend(std::ostream& trace)
     {
-        return CreateLibusbBackend(trace);
+        return usb::CreateLibusbBackend(trace);
     }
 #endif
 

@@ -1,4 +1,4 @@
-#include "ewr/snmp_gateway.h"
+#include "ewr/network.h"
 #include "ewr/ctrl.h"
 #include "ewr/executor.h"
 #include "ewr/format.h"
@@ -85,7 +85,7 @@ namespace ewr {
 
     } // namespace
 
-    std::vector<NetworkPrinter> DiscoverNetworkPrinters(snmp::IBroadcastChannel& channel,
+    std::vector<NetworkPrinter> snmp::DiscoverPrinters(snmp::IBroadcastChannel& channel,
                                                         const std::vector<std::string>& targets,
                                                         int waitMs, std::string& error,
                                                         std::ostream* trace)
@@ -102,7 +102,7 @@ namespace ewr {
                "==================================================\n";
 
         const std::vector<unsigned char> request =
-            snmp::EncodeGetRequest(kCommunity, kDiscoveryRequestId, SnmpDeviceIdOid());
+            snmp::EncodeGetRequest(kCommunity, kDiscoveryRequestId, snmp::DeviceIdOid());
         auto ask = [&]()
         {
             bool anySent = false;
@@ -206,7 +206,7 @@ namespace ewr {
         return found;
     }
 
-    std::vector<NetworkPrinter> DiscoverNetworkPrinters(int waitMs, std::string& error, std::ostream* trace)
+    std::vector<NetworkPrinter> snmp::DiscoverPrinters(int waitMs, std::string& error, std::ostream* trace)
     {
         const std::unique_ptr<snmp::IBroadcastChannel> channel = snmp::OpenBroadcastChannel(error);
         if (!channel)
@@ -216,20 +216,20 @@ namespace ewr {
             return {};
         }
 
-        return DiscoverNetworkPrinters(*channel, snmp::LocalBroadcastAddresses(), waitMs, error, trace);
+        return snmp::DiscoverPrinters(*channel, snmp::LocalBroadcastAddresses(), waitMs, error, trace);
     }
 
-    snmp::Oid SnmpDeviceIdOid()
+    snmp::Oid snmp::DeviceIdOid()
     {
         return { 1, 3, 6, 1, 4, 1, 1248, 1, 2, 2, 1, 1, 1, 1, 1 };
     }
 
-    snmp::Oid SnmpStatusOid()
+    snmp::Oid snmp::StatusOid()
     {
         return { 1, 3, 6, 1, 4, 1, 1248, 1, 2, 2, 1, 1, 1, 4, 1 };
     }
 
-    snmp::Oid SnmpControlOid(const std::vector<unsigned char>& command)
+    snmp::Oid snmp::ControlOid(const std::vector<unsigned char>& command)
     {
         snmp::Oid oid = { 1, 3, 6, 1, 4, 1, 1248, 1, 2, 2, 44, 1, 1, 2, 1 };
         oid.insert(oid.end(), command.begin(), command.end());
@@ -433,7 +433,7 @@ namespace ewr {
         Trace("---- IEEE 1284 device ID ----\n");
 
         std::vector<unsigned char> value;
-        if (!Get(SnmpDeviceIdOid(), value) || value.empty())
+        if (!Get(snmp::DeviceIdOid(), value) || value.empty())
             return out;
 
         out.deviceId = ExtractDeviceIdString(value.data(), value.size());
@@ -468,7 +468,7 @@ namespace ewr {
         }
 
         std::vector<unsigned char> value;
-        const bool heard = Get(SnmpControlOid(payload), value);
+        const bool heard = Get(snmp::ControlOid(payload), value);
 
         out.sent = m_sendSucceeded;
         out.deviceFound = m_answered;
@@ -553,14 +553,14 @@ namespace ewr {
 
             if (IsStatusCommand(command))
             {
-                heard = Get(SnmpStatusOid(), value);
+                heard = Get(snmp::StatusOid(), value);
                 // Some firmware serves the status only as a control command.
                 if (heard && value.empty())
-                    heard = Get(SnmpControlOid(command), value);
+                    heard = Get(snmp::ControlOid(command), value);
             }
             else
             {
-                heard = Get(SnmpControlOid(command), value);
+                heard = Get(snmp::ControlOid(command), value);
             }
 
             // An SNMP error counts as a refusal too: some firmware drops the
@@ -698,7 +698,7 @@ namespace ewr {
         const ctrl::Exchange exchange = [this](const std::vector<unsigned char>& command,
                                              std::vector<unsigned char>& reply, std::string& error)
         {
-            if (Get(SnmpControlOid(command), reply) || m_answered)
+            if (Get(snmp::ControlOid(command), reply) || m_answered)
                 return true;
 
             error = SilenceError();

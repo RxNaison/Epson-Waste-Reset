@@ -1,6 +1,6 @@
 #pragma once
+#include "ewr/gateway.h"
 #include "ewr/run_lock.h"
-#include "ewr/session.h"
 #include "ewr/snmp.h"
 
 #include <fstream>
@@ -11,17 +11,6 @@
 
 namespace ewr {
 
-    // The printer's IEEE 1284 device ID, the same string the USB
-    // GET_DEVICE_ID request returns.
-    snmp::Oid SnmpDeviceIdOid();
-
-    // The '@BDC ST2' status report as a plain MIB object.
-    snmp::Oid SnmpStatusOid();
-
-    // An EPSON-CTRL command as an OID: Epson's control node followed by the
-    // command, one arc per byte.
-    snmp::Oid SnmpControlOid(const std::vector<unsigned char>& command);
-
     // A printer that answered the network search.
     struct NetworkPrinter
     {
@@ -29,6 +18,21 @@ namespace ewr {
         std::string deviceId; // the IEEE 1284 string USB would return
         std::string model;    // its MDL field
     };
+
+} // namespace ewr
+
+namespace ewr::snmp {
+
+    // The printer's IEEE 1284 device ID, the same string the USB
+    // GET_DEVICE_ID request returns.
+    Oid DeviceIdOid();
+
+    // The '@BDC ST2' status report as a plain MIB object.
+    Oid StatusOid();
+
+    // An EPSON-CTRL command as an OID: Epson's control node followed by the
+    // command, one arc per byte.
+    Oid ControlOid(const std::vector<unsigned char>& command);
 
     // How long the search listens. A printer asleep on Wi-Fi is the slow one.
     constexpr int kDiscoveryWaitMs = 2000;
@@ -40,15 +44,19 @@ namespace ewr {
     // says nothing about the printers out there. `trace`, when given, gets
     // what was asked and every answer with why it was kept or skipped: the
     // only record there is when the printer is not found.
-    std::vector<NetworkPrinter> DiscoverNetworkPrinters(snmp::IBroadcastChannel& channel,
-                                                        const std::vector<std::string>& targets,
-                                                        int waitMs, std::string& error,
-                                                        std::ostream* trace = nullptr);
+    std::vector<NetworkPrinter> DiscoverPrinters(IBroadcastChannel& channel,
+                                                 const std::vector<std::string>& targets,
+                                                 int waitMs, std::string& error,
+                                                 std::ostream* trace = nullptr);
 
     // The same over this machine's own networks, with `error` also set when
     // no broadcast socket could be opened.
-    std::vector<NetworkPrinter> DiscoverNetworkPrinters(int waitMs, std::string& error,
-                                                        std::ostream* trace = nullptr);
+    std::vector<NetworkPrinter> DiscoverPrinters(int waitMs, std::string& error,
+                                                 std::ostream* trace = nullptr);
+
+} // namespace ewr::snmp
+
+namespace ewr {
 
     // A network printer behind the same seam as a USB one. Status, EEPROM
     // reads and EEPROM writes all travel as SNMP GETs - a write is a GET whose

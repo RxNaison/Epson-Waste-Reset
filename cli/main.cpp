@@ -11,7 +11,7 @@
 #include "ewr/maintenance.h"
 #include "ewr/parser.h"
 #include "ewr/session.h"
-#include "ewr/snmp_gateway.h"
+#include "ewr/network.h"
 #include "ewr/usb.h"
 #include "ewr/deviceid.h"
 #include "ewr/database.h"
@@ -2145,7 +2145,7 @@ int main(int argc, char* argv[])
             return FinishRun(1);
         }
 
-        const std::vector<ewr::InterfaceInfo> interfaces = listGateway.ListInterfaces();
+        const std::vector<ewr::usb::InterfaceInfo> interfaces = listGateway.ListInterfaces();
         nlohmann::json jsonInterfaces = nlohmann::json::array();
 
         if (interfaces.empty())
@@ -2192,7 +2192,7 @@ int main(int argc, char* argv[])
         std::string searchError;
         std::ostringstream searchTrace;
         const std::vector<ewr::NetworkPrinter> network =
-            ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, searchError, &searchTrace);
+            ewr::snmp::DiscoverPrinters(ewr::snmp::kDiscoveryWaitMs, searchError, &searchTrace);
         listGateway.AppendTrace(searchTrace.str());
         nlohmann::json jsonNetwork = nlohmann::json::array();
 
@@ -2349,8 +2349,8 @@ int main(int argc, char* argv[])
 
     // --ip auto leaves USB alone like --ip does: a printer there is not the
     // one that was asked for.
-    const std::vector<ewr::InterfaceInfo> interfaces = (netGateway || cli.ipAuto)
-        ? std::vector<ewr::InterfaceInfo>{} : usbGateway.ListInterfaces();
+    const std::vector<ewr::usb::InterfaceInfo> interfaces = (netGateway || cli.ipAuto)
+        ? std::vector<ewr::usb::InterfaceInfo>{} : usbGateway.ListInterfaces();
 
     if (cli.interfaceCandidate >= 1 && cli.interfaceCandidate > static_cast<int>(interfaces.size()))
     {
@@ -2436,7 +2436,7 @@ int main(int argc, char* argv[])
         std::string searchError;
         std::ostringstream searchTrace;
         const std::vector<ewr::NetworkPrinter> found =
-            ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, searchError, &searchTrace);
+            ewr::snmp::DiscoverPrinters(ewr::snmp::kDiscoveryWaitMs, searchError, &searchTrace);
 
         // Before the lock can move on: writing the trace needs the claim.
         usbGateway.AppendTrace(searchTrace.str());

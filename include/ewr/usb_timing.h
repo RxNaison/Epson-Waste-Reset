@@ -8,7 +8,7 @@
 // here are the raw-I/O knobs underneath them. One definition so a value tuned
 // on one platform cannot silently go stale on the other.
 
-namespace ewr::usb_timing {
+namespace ewr::usb::timing {
 
     // Hard budget for one bulk-OUT write to complete.
     inline constexpr int kWriteTimeoutMs = 2000;
@@ -45,4 +45,4 @@ namespace ewr::usb_timing {
     // Linux: budget for the IEEE 1284 GET_DEVICE_ID control transfer.
     inline constexpr int kDeviceIdTimeoutMs = 1000;
 
-} // namespace ewr::usb_timing
+} // namespace ewr::usb::timing

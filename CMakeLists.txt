@@ -188,4 +188,11 @@ if(EWR_BUILD_TESTS)
     # Tests read database.json and the models/ folder, so they must run
     # from the repository root regardless of the build directory layout.
     add_test(NAME UnitTests COMMAND ewr_tests WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+    # The code layout CONTRIBUTING.md describes: ewr:: holds types, include/ewr is public.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME Layout COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_layout.py
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    endif()
 endif()

@@ -133,3 +133,21 @@ capture is ground truth whenever an entry is disputed.
   API a GUI would use.
 - Anything that changes what gets **written** to a printer needs verification
   on at least one real unit before it ships in a release.
+
+### Code layout
+
+`include/ewr/` is what a host programs against (the CLI, the C ABI, a GUI).
+Everything else sits next to its `.cpp` under `src/protocol/`,
+`src/transport/` and `src/update/`, and public headers never include those.
+
+- `ewr::` holds types. A free function lives in a namespace named for what it
+  works on - `ctrl`, `d4`, `usb`, `json`, `backup`, `restore`, `gates`, ... -
+  except `ToString(enum)` overloads, which ADL finds next to their enum.
+- Classes hold state or stand at a seam (`ITransport`, `IDeviceGateway`,
+  `usb::Backend`); pure transforms are free functions. No static-only classes
+  and no static mutable state: every printer must stay fakeable in a test.
+- A name does not repeat its namespace: `json::ResetData`, not
+  `json::JsonResetData`.
+
+`scripts/check_layout.py` checks the first two rules and the include rule; it
+runs with the tests (`ctest`) wherever Python is installed.

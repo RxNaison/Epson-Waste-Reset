@@ -444,6 +444,15 @@ counts how the reads were answered, one read per key: `value` (the key works),
 in three tries, each in a fresh session) and `other`. `keys` lists only the keys that returned a value, with the byte read
 at address 0 and the database entries that use the key; it is `[]` when none did.
 
+With `--all-keys`, and only when no database key fits and the printer answered
+them with something other than a bare `||:;`, the same payload instead reports
+the full 2-byte sweep: `tried` then counts the keys the sweep reached, which is
+every candidate on a miss and only the keys up to the hit on a match, since the
+sweep stops there. **`models` is `[]` for a key no entry carries** - the sweep's
+whole purpose is finding one - so a caller must not assume `models[0]` exists.
+`completed` is still the difference between a sweep that ran its course,
+whether or not it found anything, and one cut short by an error.
+
 A search that ran to the end is `ok: true` whether or not it found a key - read
 `keys`. `completed` is `false`, with `read_failed` or `device_not_found`, when it
 stopped early; `tried` and `answers` then cover the keys it got to.

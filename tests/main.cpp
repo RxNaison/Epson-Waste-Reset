@@ -69,6 +69,7 @@ void test_jig_models_load_and_stay_out_of_the_key_search();
 void test_classify_eeprom_read_reply();
 void test_collect_read_key_candidates();
 void test_search_read_key();
+void test_all_key_candidates();
 void test_json_key_search_data();
 void test_query_session_failfast_on_silence();
 void test_query_session_happy_path();
@@ -290,6 +291,7 @@ int main()
     test_classify_eeprom_read_reply();
     test_collect_read_key_candidates();
     test_search_read_key();
+    test_all_key_candidates();
     test_json_key_search_data();
     test_query_session_failfast_on_silence();
     test_query_session_happy_path();

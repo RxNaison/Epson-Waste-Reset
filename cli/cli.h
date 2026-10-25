@@ -45,6 +45,7 @@ namespace ewr::cli {
         bool dumpFull = false;       // --full (with --dump): all of 0..mem_high
         bool findAddresses = false;  // --find-addresses: repeated dumps around head cleanings
         bool findKey = false;        // --find-key: try every read key in the database, read-only
+        bool allKeys = false;        // --all-keys (with --find-key): sweep every 2-byte key, read-only
         bool noUpdate = false;       // --no-update: offline run, nothing checked or swapped
         bool assumeYes = false;      // --yes: answer the write confirmation, nothing else
         bool forceYes = false;       // --force-yes: also overrule the gates that would stop it

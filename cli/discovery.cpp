@@ -15,6 +15,60 @@
 
 namespace ewr::cli {
 
+    // One working key, reported. The guidance turns on whether any database
+    // entry carries it: none means a genuinely new key (the --all-keys sweep
+    // case), so the model has to be added; otherwise it names a sibling entry
+    // to read with - never to reset with, whose addresses are that model's.
+    static void PrintFoundKey(const ewr::keysearch::Probe& probe, const std::string& detectedMatch)
+    {
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "\n[SUCCESS] Read key 0x%04X (%u) with %u-byte addresses works: address 0x00 holds 0x%02X.",
+                 probe.candidate.rkey, probe.candidate.rkey,
+                 static_cast<unsigned>(probe.candidate.addressLength), probe.value);
+        std::cout << line << std::endl;
+
+        const std::vector<std::string>& names = probe.candidate.models;
+
+        if (names.empty())
+        {
+            std::cout << "\n    No database entry carries this key: this printer's platform is new to\n"
+                         "    EWR. The key unlocks reads (--status, --dump) only, never a reset - the\n"
+                         "    reset addresses are not known for it. Please open an issue with the key,\n"
+                         "    ewr_trace.log and a --dump so the model can be added:\n"
+                         "    https://github.com/RxNaison/Epson-Waste-Reset/issues" << std::endl;
+            return;
+        }
+
+        std::cout << "          Database entries with this key: ";
+        for (size_t i = 0; i < names.size() && i < 6; ++i)
+            std::cout << (i ? ", " : "") << names[i];
+        if (names.size() > 6)
+            std::cout << " (+" << (names.size() - 6) << " more)";
+        std::cout << std::endl;
+
+        bool ownEntry = false;
+        for (const std::string& name : names)
+            ownEntry = ownEntry || (!detectedMatch.empty() && name == detectedMatch);
+
+        if (ownEntry)
+        {
+            std::cout << "          " << detectedMatch
+                      << " is the entry this printer matches: the database already has its key." << std::endl;
+        }
+        else
+        {
+            std::cout << "\n    The printer speaks EWR's protocol with that key. To look at its memory,\n"
+                         "    read it with one of those entries. Neither writes the EEPROM; the second\n"
+                         "    asks before it runs its two head cleanings:\n"
+                         "        ewr --model \"" << names.front() << "\" --dump\n"
+                         "        ewr --model \"" << names.front() << "\" --find-addresses\n"
+                         "\n    Do NOT run a reset with that entry: the key fits, but its addresses are\n"
+                         "    that model's, not this printer's. Open an issue with ewr_trace.log and\n"
+                         "    the dump instead." << std::endl;
+        }
+    }
+
     // --find-key: for a printer no database entry matches. It runs before the
     // model menu because there is no model to pick - the search is for one.
     int RunReadKeySearch(ewr::IDeviceGateway& gateway,
@@ -86,51 +140,19 @@ namespace ewr::cli {
         if (found > 0)
         {
             for (const ewr::keysearch::Probe& probe : search.probes)
-            {
-                if (probe.answer != ewr::ReadAnswer::Value)
-                    continue;
-
-                char line[160];
-                snprintf(line, sizeof(line),
-                         "\n[SUCCESS] Read key 0x%04X (%u) with %u-byte addresses works: address 0x00 holds 0x%02X.",
-                         probe.candidate.rkey, probe.candidate.rkey,
-                         static_cast<unsigned>(probe.candidate.addressLength), probe.value);
-                std::cout << line << std::endl;
-
-                std::cout << "          Database entries with this key: ";
-                const std::vector<std::string>& names = probe.candidate.models;
-                for (size_t i = 0; i < names.size() && i < 6; ++i)
-                    std::cout << (i ? ", " : "") << names[i];
-                if (names.size() > 6)
-                    std::cout << " (+" << (names.size() - 6) << " more)";
-                std::cout << std::endl;
-
-                bool ownEntry = false;
-                for (const std::string& name : names)
-                    ownEntry = ownEntry || (!detectedMatch.empty() && name == detectedMatch);
-
-                if (ownEntry)
-                {
-                    std::cout << "          " << detectedMatch
-                              << " is the entry this printer matches: the database already has its key." << std::endl;
-                }
-                else
-                {
-                    std::cout << "\n    The printer speaks EWR's protocol with that key. To look at its memory,\n"
-                                 "    read it with one of those entries. Neither writes the EEPROM; the second\n"
-                                 "    asks before it runs its two head cleanings:\n"
-                                 "        ewr --model \"" << names.front() << "\" --dump\n"
-                                 "        ewr --model \"" << names.front() << "\" --find-addresses\n"
-                                 "\n    Do NOT run a reset with that entry: the key fits, but its addresses are\n"
-                                 "    that model's, not this printer's. Open an issue with ewr_trace.log and\n"
-                                 "    the dump instead." << std::endl;
-                }
-            }
+                if (probe.answer == ewr::ReadAnswer::Value)
+                    PrintFoundKey(probe, detectedMatch);
 
             return FinishRun(0);
         }
 
         std::cout << "\n[RESULT] No read key in the database works on this printer." << std::endl;
+
+        // The bare '||:;' answer does not even echo the read's action code: the
+        // printer does not take the keyed read EWR uses, so no key could work
+        // and a full sweep would only confirm it. The other outcomes leave the
+        // door open - the printer knows the command, its key is just not here.
+        const bool takesCommand = empty != search.probes.size();
 
         if (empty == search.probes.size())
         {
@@ -147,6 +169,76 @@ namespace ewr::cli {
         {
             std::cout << "    The printer answered none of the reads. That is what a wrong key looks\n"
                          "    like on some firmware, so its own key may just not be in the database." << std::endl;
+        }
+
+        // The full sweep: only with --all-keys, and only when the printer took
+        // the command. Everything below is read-only, like the search above.
+        if (cli.allKeys && takesCommand)
+        {
+            const std::vector<ewr::keysearch::Candidate> all = ewr::keysearch::AllKeyCandidates(models);
+
+            std::cout << "\n[*] --all-keys: sweeping every 2-byte key, likeliest platform families\n"
+                         "    first, stopping at the first that answers. " << all.size() << " keys to try.\n"
+                         "    A key from a family close to a known one usually turns up in the first\n"
+                         "    thousand or so, a few minutes in; going the whole way takes hours.\n"
+                         "    Read-only throughout, and Ctrl-C is safe at any point." << std::endl;
+
+            const ewr::keysearch::Result sweep = ewr::keysearch::Search(gateway, all, options,
+                [animate](size_t tried, size_t total)
+                {
+                    if (animate)
+                        std::cout << "\r[*] Sweeping read keys... " << tried << "/" << total << std::flush;
+                },
+                /*stopAtFirstValue=*/true);
+
+            if (animate)
+                std::cout << std::endl;
+
+            g_jsonData = ewr::json::KeySearchData(detectedMdl, sweep);
+
+            if (!sweep.deviceFound)
+            {
+                std::cerr << "\n[ERROR] The printer stopped answering during the sweep." << std::endl;
+                JsonFail("device_not_found", sweep.error);
+                return FinishRun(1);
+            }
+
+            // completed is false only when the sweep was cut short by an error;
+            // running to the end with no hit is completed and found == 0.
+            if (!sweep.completed)
+            {
+                std::cerr << "\n[ERROR] The sweep stopped after " << sweep.probes.size() << " of "
+                          << all.size() << " keys: " << sweep.error << std::endl;
+                std::cerr << "        Check ewr_trace.log for the hardware trace." << std::endl;
+                JsonFail("read_failed", sweep.error);
+                return FinishRun(1);
+            }
+
+            if (sweep.Count(ewr::ReadAnswer::Value) > 0)
+            {
+                for (const ewr::keysearch::Probe& probe : sweep.probes)
+                    if (probe.answer == ewr::ReadAnswer::Value)
+                        PrintFoundKey(probe, detectedMatch);
+
+                return FinishRun(0);
+            }
+
+            std::cout << "\n[RESULT] Swept " << sweep.probes.size() << " keys; none answered with data. This\n"
+                         "    printer does not take any 2-byte read key, or its key is 1-byte (the old\n"
+                         "    R220 generation, all of which the database already carries)." << std::endl;
+            // A sweep traces every exchange, so its log runs to tens of
+            // megabytes - too big to attach anywhere. The counts above are
+            // what a report needs; the 131-key search's log is the small one.
+            std::cout << "    Please report the counts above rather than ewr_trace.log: a full sweep\n"
+                         "    leaves tens of megabytes of it. Run --find-key without --all-keys for a\n"
+                         "    log small enough to attach." << std::endl;
+            return FinishRun(0);
+        }
+
+        if (takesCommand && !cli.allKeys)
+        {
+            std::cout << "\n    If its key is simply missing, --find-key --all-keys sweeps every 2-byte\n"
+                         "    key (likeliest families first, read-only). It can take hours." << std::endl;
         }
 
         std::cout << "    Please attach ewr_trace.log to an issue or a discussion: it records how\n"

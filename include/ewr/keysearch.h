@@ -45,12 +45,27 @@ namespace ewr::keysearch {
     // shared first: a key many entries use is the likeliest to fit a sibling.
     std::vector<Candidate> CollectCandidates(const std::vector<DbPrinterModel>& models);
 
+    // Every 2-byte read key the database does not already carry, ordered so
+    // the likeliest fit comes first. The key's low byte is sent first and
+    // marks a platform family (every modern ET/L/WF key shares one of a few
+    // low bytes), so the low bytes `known` uses lead, most models first, then
+    // their byte-neighbours - a new family sits beside the last one (0x404C
+    // followed 0x???B keys) - then the rest. Width 2 only: every key the
+    // brute-force case needs is 2-byte, and a 1-byte address cannot reach a
+    // counter past 0xFF. For a printer no entry matches and whose own key the
+    // 131-key `CollectCandidates` sweep did not find; read-only, like `Search`.
+    std::vector<Candidate> AllKeyCandidates(const std::vector<DbPrinterModel>& known);
+
     // Reads address 0 once with each candidate's key. Read commands only: a
     // key gates access, it cannot turn a read into a write. `progress` is
-    // called with (tried, total) as the search advances.
+    // called with (tried, total) as the search advances. `stopAtFirstValue`
+    // ends the search the moment a key answers with data - for the full-key
+    // sweep, where trying every remaining key after a hit is wasted time;
+    // `probes` then holds only the keys actually tried.
     Result Search(IDeviceGateway& gateway,
                   const std::vector<Candidate>& candidates,
                   const ExecutorOptions& options = ExecutorOptions::ForQueries(),
-                  const std::function<void(size_t, size_t)>& progress = {});
+                  const std::function<void(size_t, size_t)>& progress = {},
+                  bool stopAtFirstValue = false);
 
 } // namespace ewr::keysearch

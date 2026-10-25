@@ -21,8 +21,10 @@
 #include <filesystem>
 #include <functional>
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <map>
+#include <set>
 #include <thread>
 #include "ewr/replay.h"
 #include "ewr/gates.h"

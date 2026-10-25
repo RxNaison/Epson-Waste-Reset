@@ -85,6 +85,10 @@ namespace ewr::cli {
                   << "  --find-key       For a printer the database has no entry for: try every\n"
                   << "                   read key in the database and report which one, if any,\n"
                   << "                   the printer answers. Takes no --model. Read-only.\n"
+                  << "  --all-keys       With --find-key, and only if no database key fits: then\n"
+                  << "                   sweep every 2-byte key, likeliest families first, and\n"
+                  << "                   stop at the first that answers. Still read-only, but it\n"
+                  << "                   can run for hours - Ctrl-C is safe at any point.\n"
                   << "  --json           Machine-readable output: one JSON object per line on\n"
                   << "                   stdout, for callers driving EWR from another language.\n"
                   << "                   Never prompts; see docs/json-output.md for the contract.\n"
@@ -168,6 +172,10 @@ namespace ewr::cli {
             else if (arg == "--find-key")
             {
                 cli.findKey = true;
+            }
+            else if (arg == "--all-keys")
+            {
+                cli.allKeys = true;
             }
             else if (arg == "--no-update")
             {
@@ -337,6 +345,10 @@ namespace ewr::cli {
         // only suggest that entry's key gets special treatment.
         if (cli.findKey && !cli.modelOverride.empty())
             return UsageError(cli, "--find-key takes no --model: it tries every read key in the database.");
+
+        // --all-keys only widens --find-key; on its own it has no mode to run.
+        if (cli.allKeys && !cli.findKey)
+            return UsageError(cli, "--all-keys goes with --find-key: it widens that search to every 2-byte key.");
 
         // Over the network: everything but the USB-only modes below.
         if (!cli.ip.empty() || cli.ipAuto)

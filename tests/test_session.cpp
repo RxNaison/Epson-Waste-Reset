@@ -572,6 +572,134 @@ void test_search_read_key()
         CHECK(search.completed);
         CHECK(gw.sessions == 0);
     }
+
+    // stopAtFirstValue: the sweep ends on the first key that answers, reporting
+    // only the keys it actually tried, not every candidate after the hit.
+    {
+        KeyGateway gw;
+        gw.answer = [&](uint16_t rkey, int) { return rkey == 110 ? MakeEepromReadReplyEE16(0, 0x2A) : refused; };
+
+        const ewr::keysearch::Result search = ewr::keysearch::Search(gw, candidates,
+            ewr::ExecutorOptions::ForQueries(), {}, /*stopAtFirstValue=*/true);
+
+        CHECK(search.deviceFound);
+        CHECK(search.completed);
+        CHECK(search.Count(ewr::ReadAnswer::Value) == 1);
+        // 100..110 is eleven keys, all in the first batch of 16: one session,
+        // and nothing past the hit is reported.
+        CHECK(search.probes.size() == 11);
+        CHECK(gw.sessions == 1);
+        CHECK(search.probes.back().candidate.rkey == 110);
+        CHECK(search.probes.back().answer == ewr::ReadAnswer::Value);
+    }
+
+    // stopAtFirstValue with no hit still runs to the end and is 'completed'
+    // with nothing found - that is how the CLI tells a clean miss from an abort.
+    {
+        KeyGateway gw;
+        gw.answer = [&](uint16_t, int) { return refused; };
+
+        const ewr::keysearch::Result search = ewr::keysearch::Search(gw, candidates,
+            ewr::ExecutorOptions::ForQueries(), {}, /*stopAtFirstValue=*/true);
+
+        CHECK(search.completed);
+        CHECK(search.probes.size() == 40);
+        CHECK(search.Count(ewr::ReadAnswer::Value) == 0);
+    }
+}
+
+void test_all_key_candidates()
+{
+    std::cout << "[TEST] test_all_key_candidates" << std::endl;
+
+    auto model = [](const char* name, uint16_t rkey, uint16_t rlen) {
+        ewr::DbPrinterModel m;
+        m.name = name;
+        m.rkey = rkey;
+        m.rlen = rlen;
+        return m;
+    };
+
+    // 0x4A is the heaviest low byte (three models), then 0x4B (two), then
+    // 0x10 (one). A JIG model is ignored; these are keys the database carries.
+    std::vector<ewr::DbPrinterModel> known = {
+        model("A", 0x364A, 2), model("B", 0x204A, 2), model("C", 0x884A, 2),
+        model("D", 0x574B, 2), model("F", 0x334B, 2), model("E", 0x3B10, 1),
+    };
+    known.push_back(model("J", 0x0100, 2));
+    known.back().jig = true; // no read key: must not steer the order.
+
+    const std::vector<ewr::keysearch::Candidate> all = ewr::keysearch::AllKeyCandidates(known);
+
+    // Every candidate is width 2, synthetic (no model names), and unique; the
+    // five distinct width-2 DB keys are left out.
+    CHECK(all.size() == 65536u - 5u);
+    std::set<uint16_t> seen;
+    for (const auto& c : all)
+    {
+        CHECK(c.addressLength == 2);
+        CHECK(c.models.empty());
+        seen.insert(c.rkey);
+    }
+    CHECK(seen.size() == all.size());
+    CHECK(seen.count(0x364A) == 0 && seen.count(0x204A) == 0);
+    CHECK(seen.count(0x884A) == 0 && seen.count(0x574B) == 0);
+    CHECK(seen.count(0x334B) == 0);
+    // The JIG key is width 2 and not a real read key, so it stays in the sweep.
+    CHECK(seen.count(0x0100) == 1);
+
+    auto firstLowByte = [&](uint8_t lo) -> size_t {
+        for (size_t i = 0; i < all.size(); ++i)
+            if ((all[i].rkey & 0xFF) == lo) return i;
+        return all.size();
+    };
+
+    // The heaviest database low byte leads, and each family brings its own
+    // neighbours in with it: 0x4C (beside 0x4B) must come before 0x10, a
+    // lighter family, and well before 0x20, which is neither used nor
+    // adjacent. Taking all known bytes first instead would bury 0x4C behind
+    // every family in the database - no better than counting up from zero,
+    // which is the whole point of the order.
+    CHECK((all.front().rkey & 0xFF) == 0x4A);
+    CHECK(firstLowByte(0x4A) < firstLowByte(0x49));
+    CHECK(firstLowByte(0x49) < firstLowByte(0x4B));
+    CHECK(firstLowByte(0x4B) < firstLowByte(0x4C));
+    CHECK(firstLowByte(0x4C) < firstLowByte(0x10));
+    CHECK(firstLowByte(0x10) < firstLowByte(0x20));
+
+    // The real database: the sweep leaves out exactly its distinct width-2
+    // keys, and leads with the low byte the most models share.
+    ewr::Database gen;
+    CHECK(gen.Load("database.json"));
+    const auto models = gen.Models();
+
+    std::set<uint16_t> dbWidth2;
+    std::array<size_t, 256> weight{};
+    for (const auto& m : models)
+    {
+        if (m.jig) continue;
+        weight[m.rkey & 0xFF]++;
+        if (m.ReadAddressLength() == 2) dbWidth2.insert(m.rkey);
+    }
+    const auto realAll = ewr::keysearch::AllKeyCandidates(models);
+    CHECK(realAll.size() == 65536u - dbWidth2.size());
+
+    const uint8_t heaviest = static_cast<uint8_t>(
+        std::max_element(weight.begin(), weight.end()) - weight.begin());
+    CHECK((realAll.front().rkey & 0xFF) == heaviest);
+
+    // The ET-3950's key from #63, the one case real hardware has confirmed:
+    // 0x404C, whose 0x4C sits beside the current ET/L/WF families' 0x4B. The
+    // order has to reach it in a small fraction of the keys a plain count from
+    // zero would need, or it buys nothing. Stated as a ratio so a database
+    // that grows another family does not turn into a failing magic number.
+    size_t at = realAll.size();
+    for (size_t i = 0; i < realAll.size(); ++i)
+    {
+        if (realAll[i].rkey == 0x404C) { at = i; break; }
+    }
+    CHECK(at < realAll.size());
+    CHECK(at * 4 < 0x404Cu);
 }
 
 void test_evaluate_ink_blocker()

@@ -77,6 +77,7 @@ Running with no options is the supported path. These exist for diagnosis and for
 | `--print-data` | Send a cleaning as print data (ESC/P2 remote mode) even where the model has its own maintenance command - for a printer that refuses that one. |
 | `--find-addresses` | For a model with no reset addresses yet: read the EEPROM three times with a head cleaning between reads - EWR runs them, or you do from the panel - and report the bytes that rise every time. No EEPROM byte is written. |
 | `--find-key` | For a printer the database has no entry for: try every read key in the database and report which one, if any, the printer answers. Takes no `--model`. Read-only. |
+| `--all-keys` | With `--find-key`, and only if no database key fits and the printer answered them at all: sweep every 2-byte key, families closest to the known ones first, and stop at the first that answers. Read-only. A key near a known family usually turns up in a few minutes; the whole range takes hours, and Ctrl-C is safe throughout. A key found this way opens `--status` and `--dump`, never a reset - the reset addresses are still unknown. |
 | `--yes`, `-y` | Answer the reset confirmation with yes, for callers driving EWR non-interactively. See below. |
 | `--force-yes` | `--yes`, and overrule the gates that would stop it: a model mismatch, a printer error, a database conflict. Last resort. |
 | `--cartridge`, `-c` | Reset the cartridge ink levels instead of the waste ink pads, on models that carry a per-color ink map. |

@@ -3,7 +3,9 @@
 #include "protocol/d4session.h"
 
 #include <algorithm>
+#include <array>
 #include <map>
+#include <set>
 
 namespace ewr {
 
@@ -42,10 +44,76 @@ namespace ewr {
         return out;
     }
 
+    std::vector<keysearch::Candidate> keysearch::AllKeyCandidates(const std::vector<DbPrinterModel>& known)
+    {
+        constexpr uint8_t kWidth = 2;
+
+        // How many models share each low byte, and which (key, width) pairs the
+        // database already holds - those were tried by the 131-key sweep.
+        std::array<size_t, 256> weight{};
+        std::set<std::pair<uint16_t, uint8_t>> inDb;
+        for (const DbPrinterModel& model : known)
+        {
+            if (model.jig) // a JIG model has no read key.
+                continue;
+            weight[model.rkey & 0xFF]++;
+            inDb.insert({ model.rkey, model.ReadAddressLength() });
+        }
+
+        std::vector<int> leadBytes;
+        for (int b = 0; b < 256; ++b)
+            if (weight[b] > 0)
+                leadBytes.push_back(b);
+        std::stable_sort(leadBytes.begin(), leadBytes.end(),
+                         [&](int a, int b) { return weight[a] > weight[b]; });
+
+        // Low-byte order: each family the database uses, the heaviest first,
+        // and immediately with it the bytes either side - a new platform sits
+        // beside an established family, so its neighbours are worth more than
+        // the next, lighter family. Taking every known byte first instead
+        // would bury the neighbours behind ~69 blocks, which is no better than
+        // counting up from zero. Then whatever is left.
+        std::array<bool, 256> placed{};
+        std::vector<int> order;
+        auto take = [&](int b) {
+            if (b >= 0 && b < 256 && !placed[b])
+            {
+                placed[b] = true;
+                order.push_back(b);
+            }
+        };
+
+        for (int b : leadBytes)
+        {
+            take(b);
+            take(b - 1);
+            take(b + 1);
+        }
+        for (int b = 0; b < 256; ++b)
+            take(b);
+
+        std::vector<keysearch::Candidate> out;
+        out.reserve(order.size() * 256);
+        for (int lo : order)
+            for (int hi = 0; hi < 256; ++hi)
+            {
+                const uint16_t rkey = static_cast<uint16_t>((hi << 8) | lo);
+                if (inDb.count({ rkey, kWidth }) > 0)
+                    continue;
+                keysearch::Candidate candidate;
+                candidate.rkey = rkey;
+                candidate.addressLength = kWidth;
+                out.push_back(std::move(candidate));
+            }
+
+        return out;
+    }
+
     keysearch::Result keysearch::Search(IDeviceGateway& gateway,
                                 const std::vector<keysearch::Candidate>& candidates,
                                 const ExecutorOptions& options,
-                                const std::function<void(size_t, size_t)>& progress)
+                                const std::function<void(size_t, size_t)>& progress,
+                                bool stopAtFirstValue)
     {
         // One session per batch. A query session stops at the first exchange
         // that draws no reply, and the candidates after it are never sent.
@@ -73,7 +141,9 @@ namespace ewr {
         for (size_t i = 0; i < pending.size(); ++i)
             pending[i] = i;
 
-        for (int pass = 1; pass <= kPasses && !pending.empty(); ++pass)
+        bool foundValue = false;
+
+        for (int pass = 1; pass <= kPasses && !pending.empty() && !foundValue; ++pass)
         {
             std::vector<size_t> unanswered;
 
@@ -128,12 +198,21 @@ namespace ewr {
                     probes[index].answer = ctrl::ClassifyReadReply(reply, probes[index].value, 0);
                     answered[index] = true;
                     resolved++;
+
+                    if (stopAtFirstValue && probes[index].answer == ReadAnswer::Value)
+                    {
+                        foundValue = true;
+                        break;
+                    }
                 }
 
                 next += consumed;
 
                 if (progress)
                     progress(resolved, candidates.size());
+
+                if (foundValue)
+                    break;
             }
 
             if (!search.error.empty())
@@ -142,14 +221,16 @@ namespace ewr {
             pending = std::move(unanswered);
         }
 
-        // Stopped early: report what was answered, in candidate order.
-        if (!search.error.empty())
+        // Stopped early, on an error or the first key that answered: report
+        // only what was actually tried, in candidate order.
+        if (!search.error.empty() || foundValue)
         {
             for (size_t i = 0; i < candidates.size(); ++i)
             {
                 if (answered[i])
                     search.probes.push_back(std::move(probes[i]));
             }
+            search.completed = foundValue;
             return search;
         }
 

@@ -279,12 +279,15 @@ namespace ewr {
                (EndsWith(name, ".tmp") || EndsWith(name, ".staged"));
     }
 
-    void update::CleanupStaleTempFiles()
+    void update::CleanupStaleTempFiles(const std::string& dbPath)
     {
         std::error_code ec;
 
-        // Staged database files always live in the working directory.
-        const fs::path directory = fs::current_path(ec);
+        // Staged files live beside the database they replace: the working
+        // directory, or the per-user folder of an installed copy.
+        fs::path directory = fs::path(dbPath).parent_path();
+        if (directory.empty())
+            directory = fs::current_path(ec);
         if (ec || directory.empty()) return;
 
         for (fs::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec))

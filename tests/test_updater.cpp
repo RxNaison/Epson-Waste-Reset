@@ -40,8 +40,8 @@ void test_stale_temp_file_cleanup()
     fs::create_directories(scratch);
     fs::current_path(scratch);
 
-    // EWR owns these two and must remove them.
-    const std::string ours[] = {"database.json.staged", "database.json.tmp"};
+    // EWR owns these and must remove them.
+    const std::string ours[] = {"database.json.staged", "database.json.tmp", "database.json.seed.tmp"};
 
     // These belong to the user and must survive: EWR runs in whatever folder the
     // user dropped the executable into, often the Desktop or Downloads.
@@ -58,7 +58,7 @@ void test_stale_temp_file_cleanup()
         out << "precious";
     }
 
-    ewr::update::CleanupStaleTempFiles();
+    ewr::update::CleanupStaleTempFiles("database.json");
 
     for (const std::string& name : ours)
         CHECK(!fs::exists(name));
@@ -68,6 +68,16 @@ void test_stale_temp_file_cleanup()
         CHECK(fs::exists(name));
         fs::remove(name);
     }
+
+    // An installed copy keeps its database in the per-user folder, and its
+    // download is staged there, not in the working directory.
+    fs::create_directories("user");
+    {
+        std::ofstream out("user/database.json.staged");
+        out << "staged";
+    }
+    ewr::update::CleanupStaleTempFiles("user/database.json");
+    CHECK(!fs::exists("user/database.json.staged"));
 
     CHECK(!ewr::update::IsTempArtifact("notes.tmp"));
     CHECK(!ewr::update::IsTempArtifact("database.json"));

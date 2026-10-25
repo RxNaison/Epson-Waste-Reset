@@ -121,7 +121,7 @@ namespace ewr::cli {
             std::cout << "[i] --yes: the reset confirmation is answered automatically. Every other gate\n"
                          "    still stops the run before any write.\n" << std::endl;
 
-        ewr::update::CleanupStaleTempFiles();
+        ewr::update::CleanupStaleTempFiles(databasePath);
 
         // Read before anything is asked of the printer: a file EWR cannot trust
         // stops the run here. The file names the model, so it picks the entry

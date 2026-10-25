@@ -63,8 +63,9 @@ namespace ewr::update {
     // True only for EWR's own database staging files.
     bool IsTempArtifact(const std::string& filename);
 
-    // Never touches unrelated *.tmp / *.old files in the working directory.
-    void CleanupStaleTempFiles();
+    // Removes the staging files left beside `dbPath`. Never touches unrelated
+    // *.tmp / *.old files in that folder.
+    void CleanupStaleTempFiles(const std::string& dbPath);
 
     // Blocking. Call it before loading the database: the run then uses
     // what was fetched, and the in-memory copy cannot change under a

@@ -170,9 +170,23 @@ namespace ewr::cli {
 
         ewr::paths::SetDataDir(user);
 
+        // Newest wins: a package upgrade's database replaces the copy the last
+        // one seeded, and an updater download, newer than both, stays. The copy
+        // keeps the seed's time, so the next upgrade compares what the files
+        // hold rather than when they were copied, and goes through a staging
+        // file, so one cut short never leaves a truncated database behind.
         const std::string own = ewr::paths::InDataDir("database.json");
-        if (!fs::exists(own, ec) && fs::exists(seed, ec))
-            fs::copy_file(seed, own, ec);
+        const fs::file_time_type seedTime = fs::last_write_time(seed, ec);
+        if (!ec && (!fs::exists(own, ec) || seedTime > fs::last_write_time(own, ec)))
+        {
+            const std::string staged = own + ".seed.tmp";
+            if (fs::copy_file(seed, staged, fs::copy_options::overwrite_existing, ec))
+            {
+                fs::last_write_time(staged, seedTime, ec);
+                fs::rename(staged, own, ec);
+            }
+            fs::remove(staged, ec);
+        }
 
         return fs::exists(own, ec) ? own : seed;
     }

@@ -343,7 +343,7 @@ namespace ewr {
         return "No SNMP answer from " + m_host + " (UDP " + std::to_string(snmp::kPort) + ").";
     }
 
-    bool SnmpDeviceGateway::Get(const snmp::Oid& oid, std::vector<unsigned char>& value)
+    bool SnmpDeviceGateway::Get(const snmp::Oid& oid, std::vector<unsigned char>& value, bool once)
     {
         value.clear();
 
@@ -357,11 +357,14 @@ namespace ewr {
 
         Trace("[OUT] GET " + snmp::FormatOid(oid) + "\n");
 
-        for (int attempt = 1; attempt <= kAttempts; ++attempt)
+        const int attempts = once ? 1 : kAttempts;
+        const int waitMs = once ? kAttempts * kAttemptTimeoutMs : kAttemptTimeoutMs;
+
+        for (int attempt = 1; attempt <= attempts; ++attempt)
         {
             if (attempt > 1)
                 Trace("[RETRY] No answer - sending the request again (attempt " + std::to_string(attempt)
-                      + " of " + std::to_string(kAttempts) + ").\n");
+                      + " of " + std::to_string(attempts) + ").\n");
 
             if (!m_channel->Send(request))
             {
@@ -371,11 +374,12 @@ namespace ewr {
             }
 
             m_sendSucceeded = true;
+            ++m_sends;
 
             // Anything that is not the answer to this request - a late reply
             // to an earlier one, a malformed datagram - is skipped without
             // restarting the wait.
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kAttemptTimeoutMs);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
             for (;;)
             {
                 const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -468,9 +472,10 @@ namespace ewr {
         }
 
         std::vector<unsigned char> value;
-        const bool heard = Get(snmp::ControlOid(payload), value);
+        const int sendsBefore = m_sends;
+        const bool heard = Get(snmp::ControlOid(payload), value, true);
 
-        out.sent = m_sendSucceeded;
+        out.sent = m_sends > sendsBefore;
         out.deviceFound = m_answered;
         if (heard && !value.empty())
             out.reply = FrameAsD4Data(value);

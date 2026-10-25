@@ -141,7 +141,9 @@ namespace ewr {
             const std::vector<std::vector<unsigned char>>& sequence,
             const ExecutorOptions& options) override;
 
-        // One GET carrying the command, as a read is carried: once.
+        // One GET carrying the command, sent once: a read is asked again on
+        // silence, a cleaning must not be - its answer can be lost after the
+        // printer has already started it.
         CommandRunResult RunCommand(const std::vector<unsigned char>& command,
                                     const ExecutorOptions& options) override;
 
@@ -153,7 +155,9 @@ namespace ewr {
     private:
         // False on silence. True with an empty `value` when the printer
         // answered with an SNMP error or something other than a string.
-        bool Get(const snmp::Oid& oid, std::vector<unsigned char>& value);
+        // `once` sends the request a single time and waits as long as the
+        // retries would have together.
+        bool Get(const snmp::Oid& oid, std::vector<unsigned char>& value, bool once = false);
         void StartTrace();
         void Trace(const std::string& text);
 
@@ -171,6 +175,7 @@ namespace ewr {
         bool m_answered = false;
         bool m_sendFailed = false;
         bool m_sendSucceeded = false;
+        int m_sends = 0;
         int m_eepromReadsAnswered = 0;
         int m_eepromReadsRefused = 0;
         bool m_eepromLockReported = false;

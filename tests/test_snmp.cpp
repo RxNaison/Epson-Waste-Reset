@@ -738,3 +738,52 @@ void test_snmp_backup_then_restore_round_trip()
     CHECK(restored.verificationRan && restored.verifyMismatches == 0);
     CHECK(script->eeprom[0x30] == 0xCA && script->eeprom[0x1FE] == 0x18);
 }
+
+// A read that goes unanswered is asked again; a cleaning is not. Its answer
+// can be the datagram that was lost, after the printer had started on it, and
+// a second GET would run a second cleaning - or a second ink charge.
+void test_snmp_command_is_never_sent_twice()
+{
+    std::cout << "[TEST] test_snmp_command_is_never_sent_twice" << std::endl;
+
+    const std::vector<unsigned char> clean = ewr::ctrl::FactoryPacket(0x0797, 0x84, { 0x02 });
+    const ewr::snmp::Oid oid = ewr::snmp::ControlOid(snmp_test::CommandOf(clean));
+
+    // The answer lost on the way back.
+    {
+        auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
+        snmp_test::ScriptedPrinter* script = printer.get();
+        script->Serve(oid, snmp_test::Bytes("@BDC PS\r\n||:84:OK;"));
+        script->dropFirst = 1;
+
+        ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+        const ewr::CommandRunResult run = gateway.RunCommand(clean, ewr::ExecutorOptions::ForQueries());
+        CHECK(script->requested.size() == 1);
+        CHECK(run.sent);
+        CHECK(run.reply.empty());
+    }
+
+    // No answer at all.
+    {
+        auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
+        snmp_test::ScriptedPrinter* script = printer.get();
+        script->Serve(oid, snmp_test::Bytes("@BDC PS\r\n||:84:OK;"));
+        script->silent = true;
+
+        ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+        const ewr::CommandRunResult run = gateway.RunCommand(clean, ewr::ExecutorOptions::ForQueries());
+        CHECK(script->requested.size() == 1);
+        CHECK(run.sent && !run.deviceFound);
+        CHECK(!run.error.empty());
+    }
+
+    // A send this machine refused never left: nothing to watch for.
+    {
+        auto printer = std::make_unique<snmp_test::ScriptedPrinter>();
+        printer->refuseSend = true;
+
+        ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+        const ewr::CommandRunResult run = gateway.RunCommand(clean, ewr::ExecutorOptions::ForQueries());
+        CHECK(!run.sent);
+    }
+}

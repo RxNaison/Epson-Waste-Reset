@@ -212,6 +212,7 @@ void test_raw_tcp_delivers_print_data();
 void test_read_back_that_disagrees_is_no_success();
 void test_reset_refuses_a_model_with_nothing_to_write();
 void test_c_abi_refuses_what_a_jig_model_cannot_do();
+void test_snmp_command_is_never_sent_twice();
 
 int main()
 {
@@ -430,6 +431,7 @@ int main()
     test_read_back_that_disagrees_is_no_success();
     test_reset_refuses_a_model_with_nothing_to_write();
     test_c_abi_refuses_what_a_jig_model_cannot_do();
+    test_snmp_command_is_never_sent_twice();
 
     std::cout << "\n----------------------------------------" << std::endl;
     if (g_failures == 0)

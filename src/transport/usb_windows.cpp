@@ -48,28 +48,32 @@ DEFINE_GUID(GUID_DEVINTERFACE_USBPRINT, 0x28d78fad, 0x5a12, 0x11d1, 0xae, 0x5b, 
 
 namespace ewr {
 
-    std::string GetWindowsErrorString(DWORD errorCode)
-    {
-        switch (errorCode)
+    namespace {
+
+        std::string GetWindowsErrorString(DWORD errorCode)
         {
-            case ERROR_SUCCESS: return "ERROR_SUCCESS (0): Success";
-            case ERROR_FILE_NOT_FOUND: return "ERROR_FILE_NOT_FOUND (2): The system cannot find the file specified.";
-            case ERROR_ACCESS_DENIED: return "ERROR_ACCESS_DENIED (5): Access is denied. Check Administrator rights or exclusive locks.";
-            case ERROR_INVALID_HANDLE: return "ERROR_INVALID_HANDLE (6): The handle is invalid.";
-            case ERROR_SHARING_VIOLATION: return "ERROR_SHARING_VIOLATION (32): The process cannot access the file because it is being used by another process (e.g. Spooler or Status Monitor).";
-            case ERROR_SEM_TIMEOUT: return "ERROR_SEM_TIMEOUT (121): The semaphore timeout period has expired (USB communication timeout).";
-            case ERROR_GEN_FAILURE: return "ERROR_GEN_FAILURE (31): A device attached to the system is not functioning.";
-            case ERROR_IO_PENDING: return "ERROR_IO_PENDING (997): Overlapped I/O operation is in progress.";
-            case ERROR_OPERATION_ABORTED: return "ERROR_OPERATION_ABORTED (995): The I/O operation has been aborted (canceled request).";
-            case ERROR_INVALID_FUNCTION: return "ERROR_INVALID_FUNCTION (1): The device driver does not implement this request.";
-            default:
+            switch (errorCode)
             {
-                char buf[256];
-                snprintf(buf, sizeof(buf), "Error Code %lu", errorCode);
-                return buf;
+                case ERROR_SUCCESS: return "ERROR_SUCCESS (0): Success";
+                case ERROR_FILE_NOT_FOUND: return "ERROR_FILE_NOT_FOUND (2): The system cannot find the file specified.";
+                case ERROR_ACCESS_DENIED: return "ERROR_ACCESS_DENIED (5): Access is denied. Check Administrator rights or exclusive locks.";
+                case ERROR_INVALID_HANDLE: return "ERROR_INVALID_HANDLE (6): The handle is invalid.";
+                case ERROR_SHARING_VIOLATION: return "ERROR_SHARING_VIOLATION (32): The process cannot access the file because it is being used by another process (e.g. Spooler or Status Monitor).";
+                case ERROR_SEM_TIMEOUT: return "ERROR_SEM_TIMEOUT (121): The semaphore timeout period has expired (USB communication timeout).";
+                case ERROR_GEN_FAILURE: return "ERROR_GEN_FAILURE (31): A device attached to the system is not functioning.";
+                case ERROR_IO_PENDING: return "ERROR_IO_PENDING (997): Overlapped I/O operation is in progress.";
+                case ERROR_OPERATION_ABORTED: return "ERROR_OPERATION_ABORTED (995): The I/O operation has been aborted (canceled request).";
+                case ERROR_INVALID_FUNCTION: return "ERROR_INVALID_FUNCTION (1): The device driver does not implement this request.";
+                default:
+                {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "Error Code %lu", errorCode);
+                    return buf;
+                }
             }
         }
-    }
+
+    } // namespace
 
     namespace {
 

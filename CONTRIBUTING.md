@@ -145,7 +145,10 @@ Everything else sits next to its `.cpp` under `src/protocol/`,
   except `ToString(enum)` overloads, which ADL finds next to their enum.
 - Classes hold state or stand at a seam (`ITransport`, `IDeviceGateway`,
   `usb::Backend`); pure transforms are free functions. No static-only classes
-  and no static mutable state: every printer must stay fakeable in a test.
+  and no static mutable state: every printer must stay fakeable in a test. The
+  exceptions are what a process sets once for every session in it - the data
+  dir, Android's USB descriptors - and `log::Default()`, the reporter hosts
+  attach their sinks to.
 - A name does not repeat its namespace: `json::ResetData`, not
   `json::JsonResetData`.
 

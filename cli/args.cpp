@@ -338,12 +338,13 @@ namespace ewr::cli {
         if (cli.findKey && !cli.modelOverride.empty())
             return UsageError(cli, "--find-key takes no --model: it tries every read key in the database.");
 
-        // Over the network: --status, --dry-run and the waste ink pad reset.
+        // Over the network: everything but the USB-only modes below.
         if (!cli.ip.empty() || cli.ipAuto)
         {
             if (cli.listOnly || cli.findKey || cli.dump || cli.findAddresses || cli.cartridge)
-                return UsageError(cli, "--ip works with --status, --dry-run and the waste ink pad reset; --list,"
-                                       " --find-key, --dump, --find-addresses and --cartridge need USB.");
+                return UsageError(cli, "--ip works with --status, --dry-run, the waste ink pad reset, --restore, --info"
+                                       " and maintenance; --list, --find-key, --dump, --find-addresses and --cartridge"
+                                       " need USB.");
             if (cli.interfaceCandidate >= 1 || cli.usbSoftReset)
                 return UsageError(cli, "--interface and --usb-soft-reset are USB switches and do not combine with --ip.");
         }

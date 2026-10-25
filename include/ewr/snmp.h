@@ -56,9 +56,6 @@ namespace snmp {
         virtual std::vector<unsigned char> Receive(int timeoutMs) = 0;
     };
 
-    // UDP to host:port, `host` a name or an address. nullptr with `error` set
-    // when the name does not resolve or no socket can be opened; a printer
-    // that is merely absent still yields a channel, and silence on it.
     // The port a network Epson takes raw print data on.
     constexpr uint16_t kRawPrintPort = 9100;
 
@@ -69,6 +66,9 @@ namespace snmp {
     bool SendRawTcp(const std::string& host, uint16_t port, const std::vector<unsigned char>& data,
                     int timeoutMs, std::string& error);
 
+    // UDP to host:port, `host` a name or an address. nullptr with `error` set
+    // when the name does not resolve or no socket can be opened; a printer
+    // that is merely absent still yields a channel, and silence on it.
     std::unique_ptr<IDatagramChannel> OpenUdpChannel(const std::string& host,
                                                      uint16_t port,
                                                      std::string& error);

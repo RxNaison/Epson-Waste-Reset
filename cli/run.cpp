@@ -105,8 +105,10 @@ namespace ewr::cli {
     void SetWorkingDirectoryToExecutable()
     {
 #ifdef _WIN32
-        char path[MAX_PATH];
-        DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
+        // Wide: the ANSI path of a folder named outside the code page has '?'
+        // in it, and the run would stay wherever the shell was.
+        wchar_t path[MAX_PATH];
+        DWORD len = GetModuleFileNameW(NULL, path, MAX_PATH);
         if (len > 0 && len < MAX_PATH)
         {
             std::error_code ec;

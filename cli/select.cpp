@@ -115,7 +115,6 @@ namespace ewr::cli {
                 if (uniqueNames.empty())
                 {
                     std::cerr << "[!] --model \"" << cli.modelOverride << "\" matches no usable model." << std::endl;
-                    std::cerr << "    (Database models without resettable waste counters are not offered.)" << std::endl;
                     std::cerr << "    Run without --model and use the menu search, or check 'ewr --list'." << std::endl;
                     JsonFail("model_unknown", "--model \"" + cli.modelOverride + "\" matches no usable model.");
                     return FinishRun(1);

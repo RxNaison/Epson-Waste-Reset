@@ -316,15 +316,19 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # The APK is signed with the project's key, held in the repository's
-  # secrets: EWR_KEYSTORE_BASE64, EWR_KEYSTORE_PASSWORD, EWR_KEY_ALIAS and
-  # EWR_KEY_PASSWORD. Without them there is no APK to publish - an unsigned
-  # one cannot be installed - and the job says so instead of failing the release.
+  # The APK is signed with the project's key, held in the `release`
+  # environment's secrets: EWR_KEYSTORE_BASE64, EWR_KEYSTORE_PASSWORD,
+  # EWR_KEY_ALIAS and EWR_KEY_PASSWORD. Not repository secrets: anyone with
+  # write access could read those from a workflow on their own branch, while
+  # the environment admits only v* tags, and only after a maintainer approves
+  # the run. Without the secrets there is no APK to publish - an unsigned one
+  # cannot be installed - and the job says so instead of failing the release.
   release-android:
     name: Publish draft release (android)
     needs: [verify-version, android]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
       id-token: write

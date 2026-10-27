@@ -1,5 +1,13 @@
 #include "ewr/session.h"
+#include "ewr/gates.h"
+#include "ewr/format.h"
+#include "ewr/status.h"
+#include "ewr/restore.h"
+#include "protocol/ctrl.h"
+#include "protocol/d4session.h"
 #include "ewr/deviceid.h"
+#include "ewr/version.h"
+#include "protocol/jig.h"
 
 #include <algorithm>
 #include <map>
@@ -41,12 +49,12 @@ namespace ewr {
 
     } // namespace
 
-    bool IsExpectedWastePadError(int errorCode)
+    bool gates::IsExpectedWastePadError(int errorCode)
     {
         return errorCode == kServiceRequest || errorCode == kCartridgeOverflow;
     }
 
-    std::optional<Blocker> EvaluateBlocker(const PrinterStatus& status)
+    std::optional<Blocker> gates::Evaluate(const PrinterStatus& status)
     {
         // A clean-looking BUSY report is not proof there is no blocker, so
         // surface it rather than treating it as a green light.
@@ -78,7 +86,7 @@ namespace ewr {
         if (!status.valid || !status.hasError)
             return std::nullopt;
 
-        if (IsExpectedWastePadError(status.errorCode))
+        if (gates::IsExpectedWastePadError(status.errorCode))
             return std::nullopt;
 
         Blocker blocker;
@@ -90,382 +98,36 @@ namespace ewr {
         return blocker;
     }
 
-    std::optional<Blocker> EvaluateInkBlocker(const PrinterStatus& status)
+    std::optional<Blocker> gates::EvaluateInk(const PrinterStatus& status)
     {
         // One more expected state: an empty cartridge cannot gate the very
         // reset that clears it.
         if (status.valid && status.hasError && status.errorCode == kInkOut)
             return std::nullopt;
 
-        return EvaluateBlocker(status);
-    }
-
-    // ------------------------------------------------------------------
-    //  UsbDeviceGateway
-    // ------------------------------------------------------------------
-
-    namespace {
-
-        const char* const kAnotherRunError =
-            "Another EWR run is already driving a printer on this machine.";
-
-    } // namespace
-
-    bool UsbDeviceGateway::NextCallAppends()
-    {
-        const bool append = m_traceStarted;
-        m_traceStarted = true;
-        return append;
-    }
-
-    // Two runs share one usbprint handle and take each other's replies, and
-    // the loser may be the one mid-write, so the second run does not start.
-    bool UsbDeviceGateway::ClaimPrinter()
-    {
-        if (!m_runLock)
-            m_runLock = std::make_unique<RunLock>();
-
-        if (m_runLock->Held())
-            return true;
-
-        log::Log(log::Level::Error, log::Stage::Detect, "usb.another_run",
-                 "[!] Another EWR run is already driving a printer on this machine.\n"
-                 "    Two runs share one USB handle and take each other's replies, so this one\n"
-                 "    stops here. Close the other run - or look for a leftover ewr process\n"
-                 "    waiting at a prompt - and try again.");
-        return false;
-    }
-
-    void UsbDeviceGateway::AppendTrace(const std::string& text)
-    {
-        if (!ClaimPrinter())
-            return;
-
-        AppendTraceNote(text, NextCallAppends());
-    }
-
-    std::unique_ptr<RunLock> UsbDeviceGateway::ReleaseRunLock()
-    {
-        if (!m_runLock || !m_runLock->Held())
-            return nullptr;
-
-        return std::move(m_runLock);
-    }
-
-    DeviceIdQueryResult UsbDeviceGateway::QueryDeviceId()
-    {
-        if (!ClaimPrinter())
-            return {};
-
-        DeviceIdQueryResult result = QueryPrinterDeviceId(NextCallAppends());
-        RememberPrinterName(result.deviceId);
-        return result;
-    }
-
-    std::vector<InterfaceInfo> UsbDeviceGateway::ListInterfaces()
-    {
-        if (!ClaimPrinter())
-            return {};
-
-        std::vector<InterfaceInfo> interfaces = ListPrinterInterfaces(NextCallAppends());
-        for (const InterfaceInfo& info : interfaces)
-        {
-            if (!info.deviceId.empty())
-            {
-                RememberPrinterName(info.deviceId);
-                break;
-            }
-        }
-        return interfaces;
-    }
-
-    void UsbDeviceGateway::RememberPrinterName(const std::string& deviceId)
-    {
-        const std::string name = ParseIeee1284DeviceId(deviceId).model;
-        if (!name.empty())
-            m_printerName = name;
-    }
-
-    ExecutorOptions UsbDeviceGateway::WithPrinterName(ExecutorOptions options) const
-    {
-        if (options.trace.printerReports.empty())
-            options.trace.printerReports = m_printerName;
-        return options;
-    }
-
-    bool ReportSilentPortQueues(const SilentPortQueues& note)
-    {
-        bool reported = false;
-
-        for (const PrintQueue& queue : note.queues)
-        {
-            if (queue.waitingJobs <= 0)
-                continue;
-
-            reported = true;
-            const bool one = (queue.waitingJobs == 1);
-            log::Log(log::Level::Warning, log::Stage::Handshake, "usb.print_jobs_waiting",
-                     "[!] The printer did not answer, and " + std::to_string(queue.waitingJobs)
-                         + (one ? " print job is" : " print jobs are") + " waiting for it in the queue\n"
-                         "    \"" + queue.name + "\" on " + note.port + ". A waiting job can keep the printer from\n"
-                         "    taking EWR's data. Cancel " + (one ? "it" : "them") + " in Settings > Bluetooth & devices >\n"
-                         "    Printers & scanners > the printer > Open print queue, then power-cycle the\n"
-                         "    printer - it keeps the part it already received - and run EWR again.",
-                     { { "queue", queue.name }, { "port", note.port }, { "jobs", std::to_string(queue.waitingJobs) } });
-        }
-
-        for (const PrintQueue& queue : note.queues)
-        {
-            if (!IsReadyPrintDriver(queue.driver))
-                continue;
-
-            reported = true;
-            log::Log(log::Level::Warning, log::Stage::Handshake, "usb.ready_print_driver",
-                     "[!] The printer did not answer, and Windows Ready Print is driving it: the print\n"
-                     "    queue \"" + queue.name + "\" on " + note.port + " uses the Microsoft IPP Class Driver,\n"
-                     "    which can keep a printer from answering EWR. Remove the printer in Settings >\n"
-                     "    Bluetooth & devices > Printers & scanners, install Epson's own driver for it,\n"
-                     "    then run EWR again.",
-                     { { "queue", queue.name }, { "port", note.port } });
-        }
-
-        return reported;
-    }
-
-    // Once per run: a failed read is often followed by another that fails the
-    // same way.
-    void UsbDeviceGateway::ReportSilentPort(const SilentPortQueues& note)
-    {
-        if (!m_silentPortReported)
-            m_silentPortReported = ReportSilentPortQueues(note);
-    }
-
-    ExecutorOptions UsbDeviceGateway::SoftResetOnce(ExecutorOptions options)
-    {
-        if (m_softResetSent)
-            options.usbSoftReset = false;
-
-        m_softResetSent = m_softResetSent || options.usbSoftReset;
-        return options;
-    }
-
-    QueryRunResult UsbDeviceGateway::RunQuery(
-        const std::vector<std::vector<unsigned char>>& handshake,
-        const std::vector<std::vector<unsigned char>>& queries,
-        const ExecutorOptions& options)
-    {
-        if (!ClaimPrinter())
-        {
-            QueryRunResult busy;
-            busy.query.error = kAnotherRunError;
-            return busy;
-        }
-
-        QueryRunResult run = ExecuteQuerySessionWithFallback(handshake, queries, WithPrinterName(SoftResetOnce(options)),
-                                                             NextCallAppends());
-        ReportSilentPort(run.silentPort);
-        return run;
-    }
-
-    ResetRunResult UsbDeviceGateway::RunReset(
-        const std::vector<std::vector<unsigned char>>& sequence,
-        const ExecutorOptions& options)
-    {
-        if (!ClaimPrinter())
-        {
-            ResetRunResult busy;
-            busy.exec.error = kAnotherRunError;
-            return busy;
-        }
-
-        ResetRunResult run = ExecutePayloadSequenceWithFallback(sequence, WithPrinterName(SoftResetOnce(options)),
-                                                                NextCallAppends());
-        ReportSilentPort(run.silentPort);
-        return run;
+        return gates::Evaluate(status);
     }
 
     // ------------------------------------------------------------------
     //  Model-free status read
     // ------------------------------------------------------------------
 
-    StateSnapshot ReadPrinterStatus(IDeviceGateway& gateway, const ExecutorOptions& options)
+    StateSnapshot status::Read(IDeviceGateway& gateway, const ExecutorOptions& options)
     {
         StateSnapshot out;
 
         std::vector<std::vector<unsigned char>> queries;
-        queries.push_back(UniversalGenerator::GenerateStatusQueryPacket());
+        queries.push_back(ctrl::StatusQueryPacket());
 
         const QueryRunResult run =
-            gateway.RunQuery(UniversalGenerator::GenerateHandshake(), queries, options);
+            gateway.RunQuery(d4::Handshake(), queries, options);
 
         if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
             return out;
 
         out.available = true;
-        out.status = ParseStatusReply(run.query.replies[0]);
+        out.status = ctrl::ParseStatusReply(run.query.replies[0]);
         return out;
-    }
-
-    // ------------------------------------------------------------------
-    //  Read-key search
-    // ------------------------------------------------------------------
-
-    size_t ReadKeySearch::Count(ReadAnswer answer) const
-    {
-        size_t count = 0;
-        for (const ReadKeyProbe& probe : probes)
-            count += (probe.answer == answer) ? 1 : 0;
-        return count;
-    }
-
-    std::vector<ReadKeyCandidate> CollectReadKeyCandidates(const std::vector<DbPrinterModel>& models)
-    {
-        std::map<std::pair<uint16_t, uint8_t>, ReadKeyCandidate> byKey;
-        for (const DbPrinterModel& model : models)
-        {
-            ReadKeyCandidate& candidate = byKey[{ model.rkey, model.ReadAddressLength() }];
-            candidate.rkey = model.rkey;
-            candidate.addressLength = model.ReadAddressLength();
-            candidate.models.push_back(model.name);
-        }
-
-        std::vector<ReadKeyCandidate> out;
-        for (auto& entry : byKey)
-            out.push_back(std::move(entry.second));
-
-        // Ties keep the map's (key, width) order, so the list is stable.
-        std::stable_sort(out.begin(), out.end(), [](const ReadKeyCandidate& a, const ReadKeyCandidate& b) {
-            return a.models.size() > b.models.size();
-        });
-
-        return out;
-    }
-
-    ReadKeySearch SearchReadKey(IDeviceGateway& gateway,
-                                const std::vector<ReadKeyCandidate>& candidates,
-                                const ExecutorOptions& options,
-                                const std::function<void(size_t, size_t)>& progress)
-    {
-        // One session per batch. A query session stops at the first exchange
-        // that draws no reply, and the candidates after it are never sent.
-        constexpr size_t kBatch = 16;
-
-        // An unanswered exchange is not yet "the printer ignored this key":
-        // on an SX110 the printer refused the D4 credit four times in one
-        // search, so those reads never left - and one of the four keys was
-        // the closest sibling's. Such a candidate is asked again in a later
-        // pass, and is called silent only after this many tries.
-        constexpr int kPasses = 3;
-
-        ReadKeySearch search;
-
-        // Asking again inside one session buys nothing, and every retry
-        // there costs a fresh session; the passes above do the retrying.
-        ExecutorOptions sweep = options;
-        sweep.maxWriteAttempts = 1;
-
-        std::vector<ReadKeyProbe> probes(candidates.size());
-        std::vector<bool> answered(candidates.size(), false);
-        size_t resolved = 0;
-
-        std::vector<size_t> pending(candidates.size());
-        for (size_t i = 0; i < pending.size(); ++i)
-            pending[i] = i;
-
-        for (int pass = 1; pass <= kPasses && !pending.empty(); ++pass)
-        {
-            std::vector<size_t> unanswered;
-
-            size_t next = 0;
-            while (next < pending.size())
-            {
-                const size_t end = std::min(pending.size(), next + kBatch);
-
-                std::vector<std::vector<unsigned char>> queries;
-                for (size_t slot = next; slot < end; ++slot)
-                {
-                    const ReadKeyCandidate& candidate = candidates[pending[slot]];
-                    queries.push_back(UniversalGenerator::GenerateReadPacket(candidate.rkey, 0, candidate.addressLength));
-                }
-
-                const QueryRunResult run = gateway.RunQuery(UniversalGenerator::GenerateHandshake(), queries, sweep);
-
-                if (!run.deviceFound)
-                {
-                    search.error = run.query.error.empty() ? "No Epson printer answered." : run.query.error;
-                    break;
-                }
-
-                search.deviceFound = true;
-
-                if (run.query.handshakeFailed)
-                {
-                    search.error = run.query.error;
-                    break;
-                }
-
-                // Replies are positional. The first empty one is the exchange
-                // the session stopped at; everything after it was never sent
-                // and stays in this pass.
-                size_t consumed = 0;
-                for (size_t slot = next; slot < end; ++slot)
-                {
-                    const size_t index = pending[slot];
-                    const size_t position = slot - next;
-                    const std::vector<unsigned char> reply =
-                        position < run.query.replies.size() ? run.query.replies[position]
-                                                            : std::vector<unsigned char>{};
-                    consumed++;
-
-                    if (reply.empty())
-                    {
-                        unanswered.push_back(index);
-                        break;
-                    }
-
-                    probes[index].candidate = candidates[index];
-                    probes[index].answer = ClassifyEepromReadReply(reply, probes[index].value, 0);
-                    answered[index] = true;
-                    resolved++;
-                }
-
-                next += consumed;
-
-                if (progress)
-                    progress(resolved, candidates.size());
-            }
-
-            if (!search.error.empty())
-                break;
-
-            pending = std::move(unanswered);
-        }
-
-        // Stopped early: report what was answered, in candidate order.
-        if (!search.error.empty())
-        {
-            for (size_t i = 0; i < candidates.size(); ++i)
-            {
-                if (answered[i])
-                    search.probes.push_back(std::move(probes[i]));
-            }
-            return search;
-        }
-
-        // Still unanswered after every pass.
-        for (size_t index : pending)
-        {
-            probes[index].candidate = candidates[index];
-            probes[index].answer = ReadAnswer::Silent;
-        }
-
-        search.probes = std::move(probes);
-        search.completed = true;
-
-        if (progress)
-            progress(candidates.size(), candidates.size());
-
-        return search;
     }
 
     // ------------------------------------------------------------------
@@ -489,19 +151,168 @@ namespace ewr {
         return ReadStateFor(nullptr);
     }
 
+    namespace {
+
+        // Below this a range read saves less than its probe costs.
+        constexpr size_t kRangeReadMinimum = 24;
+        // One reply carries 2 hex digits per byte: 32 keeps it well inside
+        // the 256-byte packets the session negotiates.
+        constexpr uint8_t kRangeChunk = 32;
+        constexpr uint8_t kRangeProbe = 8;
+
+    } // namespace
+
+    StateSnapshot Session::ReadRanges(const std::vector<std::pair<uint16_t, uint8_t>>& chunks,
+                                      std::vector<bool>& parsed) const
+    {
+        StateSnapshot out;
+        parsed.assign(chunks.size(), false);
+
+        std::vector<std::vector<unsigned char>> queries;
+        queries.push_back(ctrl::StatusQueryPacket());
+        for (const auto& chunk : chunks)
+            queries.push_back(ctrl::RangeReadPacket(
+                m_model.rkey, chunk.first, chunk.second, m_model.ReadAddressLength()));
+
+        const QueryRunResult run =
+            m_gateway.RunQuery(d4::Handshake(), queries, m_queryOptions);
+
+        if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
+            return out;
+
+        out.available = true;
+        out.status = ctrl::ParseStatusReply(run.query.replies[0]);
+
+        for (size_t i = 0; i < chunks.size(); ++i)
+        {
+            if (i + 1 >= run.query.replies.size())
+                break;
+
+            std::vector<uint8_t> bytes;
+            if (!ctrl::ParseRangeReadReply(run.query.replies[i + 1], chunks[i].first, chunks[i].second, bytes))
+                continue;
+
+            parsed[i] = true;
+            for (size_t k = 0; k < bytes.size(); ++k)
+                out.values.push_back({ static_cast<uint16_t>(chunks[i].first + k), bytes[k] });
+        }
+
+        return out;
+    }
+
     StateSnapshot Session::ReadAddresses(const std::vector<uint16_t>& addresses) const
     {
-        return ReadStateFor(&addresses);
+        std::vector<uint16_t> wanted;
+        for (uint16_t addr : addresses)
+        {
+            if (addr <= m_model.mem_high)
+                wanted.push_back(addr);
+        }
+
+        // A JIG model has no key for a range read to carry.
+        if (m_model.jig || m_rangeReads == RangeReads::Refused || wanted.size() < kRangeReadMinimum)
+            return ReadStateFor(&addresses);
+
+        // Runs of consecutive addresses, each cut to what one reply carries.
+        std::vector<std::pair<uint16_t, uint8_t>> chunks;
+        for (size_t i = 0; i < wanted.size();)
+        {
+            size_t j = i + 1;
+            while (j < wanted.size() && wanted[j] == wanted[j - 1] + 1 && j - i < kRangeChunk)
+                ++j;
+            chunks.push_back({ wanted[i], static_cast<uint8_t>(j - i) });
+            i = j;
+        }
+
+        if (m_rangeReads == RangeReads::Unknown)
+        {
+            // The same bytes both ways. Anything but full agreement - a
+            // refusal, a reply of another shape, a different value - and this
+            // session reads byte by byte.
+            const uint16_t start = chunks.front().first;
+            const uint8_t count = std::min<uint8_t>(chunks.front().second, kRangeProbe);
+
+            std::vector<uint16_t> probe;
+            for (uint8_t k = 0; k < count; ++k)
+                probe.push_back(static_cast<uint16_t>(start + k));
+
+            std::vector<bool> parsed;
+            const StateSnapshot ranged = ReadRanges({ { start, count } }, parsed);
+            const StateSnapshot single = ReadStateFor(&probe);
+
+            bool agree = ranged.available && single.available && parsed[0]
+                         && ranged.values.size() == single.values.size();
+            for (size_t k = 0; agree && k < single.values.size(); ++k)
+                agree = single.values[k].second >= 0 && single.values[k] == ranged.values[k];
+
+            m_rangeReads = agree ? RangeReads::Work : RangeReads::Refused;
+
+            m_reporter.Log(log::Level::Info, log::Stage::Read, agree ? "session.range_reads" : "session.single_reads",
+                           agree ? "[i] The printer answers range reads: reading " + std::to_string(wanted.size()) +
+                                       " bytes in " + std::to_string(chunks.size()) + " request(s)."
+                                 : std::string("[i] Reading byte by byte: this printer does not answer range reads"
+                                               " the way it answers single ones."),
+                           { { "bytes", std::to_string(wanted.size()) }, { "requests", std::to_string(chunks.size()) } });
+
+            if (!agree)
+                return ReadStateFor(&addresses);
+        }
+
+        std::vector<bool> parsed;
+        StateSnapshot out = ReadRanges(chunks, parsed);
+        if (!out.available)
+            return ReadStateFor(&addresses);
+
+        // A chunk that did not come back as values is read byte by byte, and
+        // ends range reads for the session: one odd reply is enough doubt.
+        std::vector<uint16_t> leftover;
+        for (size_t i = 0; i < chunks.size(); ++i)
+        {
+            if (parsed[i])
+                continue;
+            for (uint8_t k = 0; k < chunks[i].second; ++k)
+                leftover.push_back(static_cast<uint16_t>(chunks[i].first + k));
+        }
+
+        if (!leftover.empty())
+        {
+            m_rangeReads = RangeReads::Refused;
+            const StateSnapshot single = ReadStateFor(&leftover);
+            out.values.insert(out.values.end(), single.values.begin(), single.values.end());
+        }
+
+        // The caller's order, -1 for anything that never answered.
+        StateSnapshot ordered;
+        ordered.available = true;
+        ordered.status = out.status;
+        for (uint16_t addr : wanted)
+        {
+            int value = -1;
+            for (const auto& entry : out.values)
+            {
+                if (entry.first == addr)
+                {
+                    value = entry.second;
+                    break;
+                }
+            }
+            ordered.values.push_back({ addr, value });
+        }
+
+        return ordered;
     }
 
     // `addressOverride` reads an explicit address list instead of the model's
     // own counter bytes, which is what the commit step needs.
     StateSnapshot Session::ReadStateFor(const std::vector<uint16_t>* addressOverride) const
     {
+        if (m_model.jig)
+            return ReadJigStateFor(addressOverride);
+
         StateSnapshot out;
 
         std::vector<std::vector<unsigned char>> queries;
-        queries.push_back(UniversalGenerator::GenerateStatusQueryPacket());
+        queries.push_back(ctrl::StatusQueryPacket());
 
         // A schema 4 counter can need a byte that is never written (a nibble
         // shared by two pads), hence the union rather than the write list.
@@ -514,19 +325,19 @@ namespace ewr {
             if (addr <= m_model.mem_high)
             {
                 addresses.push_back(addr);
-                queries.push_back(UniversalGenerator::GenerateReadPacket(
+                queries.push_back(ctrl::ReadPacket(
                     m_model.rkey, addr, m_model.ReadAddressLength()));
             }
         }
 
         const QueryRunResult run =
-            m_gateway.RunQuery(UniversalGenerator::GenerateHandshake(), queries, m_queryOptions);
+            m_gateway.RunQuery(d4::Handshake(), queries, m_queryOptions);
 
         if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
             return out;
 
         out.available = true;
-        out.status = ParseStatusReply(run.query.replies[0]);
+        out.status = ctrl::ParseStatusReply(run.query.replies[0]);
 
         for (size_t i = 0; i < addresses.size(); ++i)
         {
@@ -534,10 +345,44 @@ namespace ewr {
             if (i + 1 < run.query.replies.size())
             {
                 uint8_t v = 0;
-                if (ParseEepromReadReply(run.query.replies[i + 1], v, static_cast<int>(addresses[i])))
+                if (ctrl::ParseReadReply(run.query.replies[i + 1], v, static_cast<int>(addresses[i])))
                     value = v;
             }
             out.values.push_back({ addresses[i], value });
+        }
+
+        return out;
+    }
+
+    StateSnapshot Session::ReadJigStateFor(const std::vector<uint16_t>* addressOverride) const
+    {
+        StateSnapshot out = status::Read(m_gateway, m_queryOptions);
+        if (!out.available)
+            return out;
+
+        std::vector<uint16_t> addresses;
+        std::vector<std::vector<unsigned char>> queries;
+        for (uint16_t addr : addressOverride ? *addressOverride : m_model.GetReadAddresses())
+        {
+            if (addr <= m_model.mem_high)
+            {
+                addresses.push_back(addr);
+                queries.push_back(jig::BuildReadPacket(addr));
+            }
+        }
+
+        if (queries.empty())
+            return out;
+
+        ExecutorOptions jigOptions = m_queryOptions;
+        jigOptions.jigMode = true;
+        const QueryRunResult run = m_gateway.RunQuery({}, queries, jigOptions);
+
+        for (size_t i = 0; i < addresses.size(); ++i)
+        {
+            uint8_t value = 0;
+            const bool read = i < run.query.replies.size() && jig::ParseReadReply(run.query.replies[i], value);
+            out.values.push_back({ addresses[i], read ? static_cast<int>(value) : -1 });
         }
 
         return out;
@@ -562,13 +407,13 @@ namespace ewr {
     std::vector<std::vector<unsigned char>> Session::BuildWriteSession(
         const std::vector<std::pair<uint16_t, uint8_t>>& writes) const
     {
-        auto sequence = UniversalGenerator::GenerateHandshake();
+        auto sequence = d4::Handshake();
 
         for (const auto& w : writes)
         {
-            sequence.push_back(UniversalGenerator::CreditGrantPacket());
-            sequence.push_back(UniversalGenerator::CreditRequestPacket());
-            sequence.push_back(UniversalGenerator::GenerateWritePacket(
+            sequence.push_back(d4::CreditGrantPacket());
+            sequence.push_back(d4::CreditRequestPacket());
+            sequence.push_back(ctrl::WritePacket(
                 m_model.rkey, w.first, w.second, m_model.wkey, m_model.WriteAddressLength()));
         }
 
@@ -660,17 +505,47 @@ namespace ewr {
 
     ResetOutcome Session::Reset(const ResetHandlers& handlers)
     {
+        ResetOutcome out;
+
+        // An entry with a read key and nothing to write would otherwise ask its
+        // host to confirm a reset, open a session and send no write at all.
+        if (!m_model.HasResettableCounters())
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Database, "session.reset_unmapped",
+                           "[ERROR] " + m_model.name + " has no reset addresses in the database yet. Nothing was sent.");
+            out.phase = ResetPhase::NotSupported;
+            out.error = m_model.name + " has no reset addresses in the database yet.";
+            return out;
+        }
+
         // ---- Plan: build the write sequence from the database model.
         m_reporter.Log(log::Level::Info, log::Stage::Database, "session.generating",
                        "[*] Generating safe Smart Protocol R/W sequence for " + m_model.name + "...");
 
-        UniversalGenerator generator;
-
         ResetFlow flow;
-        flow.sequence = generator.GenerateSequence(m_model);
+        flow.sequence = ctrl::ResetSequence(m_model);
+        flow.target = "waste";
+
+        // What ctrl::ResetSequence writes: the same two guards, the same order.
+        for (uint16_t addr : m_model.GetAllAddresses())
+        {
+            if (addr <= m_model.mem_high && m_model.CanEncodeWriteAddress(addr))
+                flow.writeAddresses.push_back(addr);
+        }
+
+        if (flow.writeAddresses.empty())
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Database, "session.reset_unwritable",
+                           "[ERROR] None of " + m_model.name + "'s reset addresses can be written: they lie beyond its"
+                           " memory or its address field. Nothing was sent.");
+            out.phase = ResetPhase::NotSupported;
+            out.error = "None of the model's reset addresses can be encoded for writing.";
+            return out;
+        }
+
         flow.verifyAddresses = m_model.GetAllAddresses();
         flow.verifyValues = m_model.GetAllResetValues();
-        flow.classify = [](const PrinterStatus& status) { return EvaluateBlocker(status); };
+        flow.classify = [](const PrinterStatus& status) { return gates::Evaluate(status); };
         flow.expectedErrorNote = " - that is the waste-pad error EWR resets. Proceeding.";
         flow.commit = m_model.HasCloseOps();
 
@@ -686,6 +561,7 @@ namespace ewr {
         {
             m_reporter.Log(log::Level::Error, log::Stage::Database, "session.ink_unmapped",
                            "[ERROR] " + m_model.name + " has no cartridge ink map in the database.");
+            out.phase = ResetPhase::NotSupported;
             out.error = "No cartridge ink map for this model.";
             return out;
         }
@@ -708,6 +584,7 @@ namespace ewr {
         {
             m_reporter.Log(log::Level::Error, log::Stage::Database, "session.ink_unwritable",
                            "[ERROR] None of the ink counter addresses are writable on " + m_model.name + ".");
+            out.phase = ResetPhase::NotSupported;
             out.error = "The model's ink counter addresses cannot be encoded for writing.";
             return out;
         }
@@ -727,10 +604,12 @@ namespace ewr {
 
         ResetFlow flow;
         flow.sequence = BuildWriteSession(writes);
+        flow.writeAddresses = writeAddresses;
+        flow.target = "ink";
         flow.readAddresses = writeAddresses;
         flow.verifyAddresses = writeAddresses;
         flow.verifyValues = writeValues;
-        flow.classify = [](const PrinterStatus& status) { return EvaluateInkBlocker(status); };
+        flow.classify = [](const PrinterStatus& status) { return gates::EvaluateInk(status); };
         flow.expectedErrorNote = " - an empty cartridge is exactly the state this reset clears. Proceeding.";
         flow.counterNoun = "ink counter";
         flow.recheckCommand = "'ewr --dump'";
@@ -752,9 +631,318 @@ namespace ewr {
         return result;
     }
 
-    ResetOutcome Session::RunLifecycle(const ResetFlow& flow, const ResetHandlers& handlers)
+    ResetOutcome Session::Restore(const RestorePlan& plan, const ResetHandlers& handlers)
     {
         ResetOutcome out;
+
+        if (plan.model != m_model.name)
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Database, "session.restore_wrong_model",
+                           "[ERROR] The restore was planned for " + plan.model + ", not " + m_model.name + ".");
+            out.error = "The restore was planned for " + plan.model + ", not " + m_model.name + ".";
+            return out;
+        }
+
+        if (plan.writes.empty())
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Database, "session.restore_empty",
+                           "[ERROR] The file holds none of the bytes EWR writes on " + m_model.name +
+                               ", so there is nothing it could restore.");
+            out.error = "The file holds none of the bytes EWR writes on " + m_model.name + ".";
+            return out;
+        }
+
+        // As the ink reset itself: it has never been sent over the network.
+        if (plan.touchesInk && m_gateway.OverNetwork())
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Database, "session.restore_ink_needs_usb",
+                           "[!] The file holds cartridge ink bytes, and writing those needs USB. Nothing was written.");
+            out.phase = ResetPhase::NotSupported;
+            out.error = "Restoring cartridge ink bytes needs USB.";
+            return out;
+        }
+
+        m_reporter.Log(log::Level::Info, log::Stage::Database, "session.restore_generating",
+                       "[*] Planning the restore of " + std::to_string(plan.writes.size()) +
+                           " byte(s) on " + m_model.name + "...");
+
+        ResetFlow flow;
+        flow.target = "restore";
+
+        // The counters' own bytes too, so the host can show what the restore
+        // does to each pad, not only which bytes it writes - and for a full
+        // restore the bytes that prove which unit this is.
+        std::vector<uint16_t> reads = m_model.GetReadAddresses();
+        auto addRead = [&reads](uint16_t address) {
+            if (std::find(reads.begin(), reads.end(), address) == reads.end())
+                reads.push_back(address);
+        };
+        for (const auto& w : plan.writes)
+            addRead(w.first);
+        for (const auto& p : plan.unitProof)
+            addRead(p.first);
+        flow.readAddresses = reads;
+
+        const bool wasteBytes = plan.touchesWaste;
+        flow.classify = [wasteBytes](const PrinterStatus& status) {
+            return wasteBytes ? gates::Evaluate(status) : gates::EvaluateInk(status);
+        };
+        flow.expectedErrorNote = " - the restore does not need it cleared. Proceeding.";
+        flow.counterNoun = "byte";
+        flow.expectedValueNoun = "restored value";
+        flow.runNoun = "restore";
+        flow.recheckCommand = "'ewr --dump'";
+        flow.commit = wasteBytes && m_model.HasCloseOps();
+        flow.requirePreflight = true; // it has to know what it is about to change
+
+        flow.afterPreflight = [this, &plan](const StateSnapshot& before, ResetFlow& f, ResetOutcome& o,
+                                            const ResetHandlers& h) -> bool
+        {
+            const std::string& printerSerial = before.status.serial;
+
+            // A full restore writes bytes no reset writes. No gate can be
+            // argued past this one: it runs on the unit the dump came from
+            // or not at all.
+            if (plan.requireSameUnit)
+            {
+                std::string unproven;
+                if (!plan.serial.empty() && !printerSerial.empty())
+                {
+                    if (plan.serial != printerSerial)
+                        unproven = "the dump names serial " + plan.serial + " and this printer reports " + printerSerial;
+                }
+                else if (plan.unitProof.size() < restore::kMinimumUnitProof)
+                {
+                    unproven = "neither a serial number nor enough of the printer's own identity bytes are on"
+                               " record to show it is the unit the dump came from";
+                }
+                else
+                {
+                    for (const auto& p : plan.unitProof)
+                    {
+                        int now = -1;
+                        for (const auto& entry : before.values)
+                        {
+                            if (entry.first == p.first)
+                                now = entry.second;
+                        }
+                        if (now != p.second)
+                        {
+                            char where[8];
+                            snprintf(where, sizeof(where), "0x%04X", p.first);
+                            unproven = std::string("identity byte ") + where + " differs from the dump's";
+                            break;
+                        }
+                    }
+                }
+
+                if (!unproven.empty())
+                {
+                    m_reporter.Log(log::Level::Error, log::Stage::Read, "session.restore_all_other_unit",
+                                   "[!] Nothing was written: " + unproven + ". A full restore runs only on the\n"
+                                   "    printer the dump was taken from.");
+                    o.phase = ResetPhase::NotSupported;
+                    o.error = "Nothing was written: " + unproven + ".";
+                    return false;
+                }
+
+                m_reporter.Log(log::Level::Info, log::Stage::Read, "session.restore_unit_confirmed",
+                               (!plan.serial.empty() && !printerSerial.empty())
+                                   ? "[i] Same printer: the serial number matches the dump's."
+                                   : "[i] Same printer: all " + std::to_string(plan.unitProof.size()) +
+                                         " identity bytes match the dump's.");
+            }
+
+            if (plan.requireSameUnit)
+            {
+                // Proven above; the softer checks below are for --restore.
+            }
+            else if (!plan.serial.empty() && !printerSerial.empty() && plan.serial != printerSerial)
+            {
+                m_reporter.Log(log::Level::Warning, log::Stage::Read, "session.restore_other_printer",
+                               "[!] The file was taken from the printer with serial " + plan.serial +
+                                   ", and this one reports " + printerSerial + ".",
+                               { { "file_serial", plan.serial }, { "printer_serial", printerSerial } });
+
+                Blocker other;
+                other.errorName = "DIFFERENT PRINTER";
+                other.explanation =
+                    "These are another printer's counter values. Writing them here does not\n"
+                    "    restore this printer's own state; it gives it the other one's.";
+
+                if (!(h.onBlocker && h.onBlocker(other)))
+                {
+                    m_reporter.Log(log::Level::Info, log::Stage::Read, "session.aborted",
+                                   "[i] Aborted before any EEPROM write. Nothing was changed.");
+                    o.phase = ResetPhase::Aborted;
+                    o.error = "Aborted: the file comes from another printer (serial " + plan.serial + ").";
+                    return false;
+                }
+
+                o.overrides.push_back({ "unit_mismatch", plan.serial, -1 });
+            }
+            else if (plan.serial.empty() || printerSerial.empty())
+            {
+                m_reporter.Log(log::Level::Info, log::Stage::Read, "session.restore_unit_unknown",
+                               std::string("[i] EWR cannot confirm this is the printer the file came from: ") +
+                                   (plan.serial.empty() ? "the file" : "the printer") + " names no serial number.");
+            }
+
+            std::vector<std::pair<uint16_t, uint8_t>> writes;
+            for (const auto& w : plan.writes)
+            {
+                int now = -1;
+                for (const auto& entry : before.values)
+                {
+                    if (entry.first == w.first)
+                    {
+                        now = entry.second;
+                        break;
+                    }
+                }
+
+                if (now == w.second)
+                    o.unchanged.push_back(w.first);
+                else
+                    writes.push_back(w);
+            }
+
+            if (writes.empty())
+            {
+                m_reporter.Log(log::Level::Info, log::Stage::Read, "session.restore_unchanged",
+                               "[i] Nothing to restore: every byte already holds the file's value. Nothing was written.");
+                o.phase = ResetPhase::Done;
+                o.success = true;
+                return false;
+            }
+
+            f.sequence = BuildWriteSession(writes);
+            f.writeAddresses.clear();
+            f.verifyAddresses.clear();
+            f.verifyValues.clear();
+            for (const auto& w : writes)
+            {
+                f.writeAddresses.push_back(w.first);
+                f.verifyAddresses.push_back(w.first);
+                f.verifyValues.push_back(w.second);
+            }
+
+            return true;
+        };
+
+        return RunLifecycle(flow, handlers);
+    }
+
+    bool Session::KeepBackup(const ResetFlow& flow, const ResetHandlers& handlers, ResetOutcome& out)
+    {
+        Backup& backup = out.backup;
+        backup.model = m_model.name;
+        backup.target = flow.target;
+        backup.created = format::UtcTimestamp();
+        backup.ewrVersion = EWR_VERSION;
+        backup.transport = m_gateway.OverNetwork() ? "network" : "usb";
+        backup.serial = out.before.status.serial;
+        backup.addressLength = m_model.WriteAddressLength();
+
+        for (uint16_t addr : flow.writeAddresses)
+        {
+            bool seen = false;
+            for (const auto& entry : backup.bytes)
+                seen = seen || (entry.first == addr);
+            if (seen)
+                continue;
+
+            int value = -1;
+            for (const auto& entry : out.before.values)
+            {
+                if (entry.first == addr)
+                {
+                    value = entry.second;
+                    break;
+                }
+            }
+            backup.bytes.push_back({ addr, value });
+        }
+
+        out.backupTaken = true;
+
+        if (!handlers.saveBackup)
+            return true;
+
+        const std::string answered = std::to_string(backup.Answered());
+        const std::string total = std::to_string(backup.bytes.size());
+
+        // Same policy as a printer error: nobody to ask means no write.
+        auto askToGoOn = [&](const char* name, const std::string& explanation, const char* detail) -> bool
+        {
+            Blocker blocker;
+            blocker.errorName = name;
+            blocker.explanation = explanation;
+
+            if (!(handlers.onBlocker && handlers.onBlocker(blocker)))
+            {
+                m_reporter.Log(log::Level::Info, log::Stage::Read, "session.aborted",
+                               "[i] Aborted before any EEPROM write. Nothing was changed.");
+                out.phase = ResetPhase::Aborted;
+                out.error = std::string("Aborted: ") + (std::string(detail) == "incomplete"
+                    ? "the backup is incomplete." : "the backup could not be saved.");
+                return false;
+            }
+
+            out.overrides.push_back({ "backup", detail, -1 });
+            return true;
+        };
+
+        if (!backup.Complete())
+        {
+            m_reporter.Log(log::Level::Warning, log::Stage::Read, "session.backup_incomplete",
+                           "[!] The preflight answered " + answered + " of the " + total +
+                               " byte(s) this run overwrites, so a backup could not undo all of it.",
+                           { { "answered", answered }, { "total", total } });
+
+            if (!askToGoOn("BACKUP INCOMPLETE",
+                           "Running EWR again usually reads every byte; a backup that is missing some\n"
+                           "    cannot put them back if this write has to be undone.",
+                           "incomplete"))
+                return false;
+        }
+
+        std::string location;
+        if (handlers.saveBackup(backup, location))
+        {
+            out.backupLocation = location;
+            m_reporter.Log(log::Level::Info, log::Stage::Read, "session.backup_saved",
+                           "[*] Backup of the " + total + " byte(s) this run overwrites: " +
+                               (location.empty() ? std::string("kept by the host") : location),
+                           { { "file", location }, { "bytes", total } });
+            return true;
+        }
+
+        m_reporter.Log(log::Level::Warning, log::Stage::Read, "session.backup_failed",
+                       "[!] The backup of the " + total + " byte(s) this run overwrites could not be saved.",
+                       { { "bytes", total } });
+
+        return askToGoOn("BACKUP NOT SAVED",
+                         "Without it this write cannot be undone. Free some disk space, or run EWR from\n"
+                         "    a folder it can write to, and try again.",
+                         "not_saved");
+    }
+
+    ResetOutcome Session::RunLifecycle(ResetFlow flow, const ResetHandlers& handlers)
+    {
+        ResetOutcome out;
+
+        // No JIG write command is known. Refused before anything is read or
+        // sent, so no host can carry a keyless model into the keyed writes.
+        if (m_model.jig)
+        {
+            m_reporter.Log(log::Level::Error, log::Stage::Write, "session.jig_reset_unsupported",
+                           "[!] " + m_model.name + " is read in JIG mode, and EWR cannot reset it yet:"
+                           " its write command is not known. Nothing was sent.");
+            out.phase = ResetPhase::NotSupported;
+            out.error = m_model.name + " cannot be reset yet: no JIG write command is known.";
+            return out;
+        }
 
         // ---- Preflight. A printer locked by a foreign error refuses writes
         // with ':42:NA;', so surface that up front rather than failing halfway.
@@ -784,7 +972,7 @@ namespace ewr {
 
             const std::optional<Blocker> blocker = flow.classify
                 ? flow.classify(out.before.status)
-                : EvaluateBlocker(out.before.status);
+                : gates::Evaluate(out.before.status);
             if (blocker.has_value())
             {
                 const bool proceed = handlers.onBlocker && handlers.onBlocker(*blocker);
@@ -805,6 +993,9 @@ namespace ewr {
                                "\n[i] The printer reports " + out.before.status.errorName +
                                    flow.expectedErrorNote);
             }
+
+            if (flow.afterPreflight && !flow.afterPreflight(out.before, flow, out, handlers))
+                return out;
         }
         else if (flow.requirePreflight)
         {
@@ -812,7 +1003,8 @@ namespace ewr {
                            "[ERROR] The printer did not answer the read-only preflight, and this reset\n"
                            "        does not run blind: no preflight means no error check and no\n"
                            "        read-back verification. Nothing was written.");
-            out.phase = ResetPhase::Aborted;
+            // Not a gate anyone declined: the read itself failed.
+            out.phase = ResetPhase::NotStarted;
             out.error = "Preflight unavailable; this reset does not run without one.";
             return out;
         }
@@ -862,6 +1054,20 @@ namespace ewr {
             out.phase = ResetPhase::Aborted;
             out.error = "The reset was declined at the final confirmation.";
             return out;
+        }
+
+        // ---- Backup, after every gate and before the first write: a run
+        // that stopped at a gate leaves no file behind.
+        if (preflightRan)
+        {
+            if (!KeepBackup(flow, handlers, out))
+                return out;
+        }
+        else
+        {
+            m_reporter.Log(log::Level::Info, log::Stage::Read, "session.backup_unavailable",
+                           "[i] No backup: the printer did not answer the preflight, so there are no\n"
+                           "    values to keep. The reset goes ahead as it always has.");
         }
 
         const bool overUsb = !m_gateway.OverNetwork();
@@ -915,7 +1121,7 @@ namespace ewr {
         if (preflightRan)
         {
             m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verifying",
-                           "\n[*] Verifying the reset by reading the counters back...");
+                           "\n[*] Verifying the " + flow.runNoun + " by reading the " + flow.counterNoun + "s back...");
 
             out.after = flow.readAddresses.has_value() ? ReadStateFor(&flow.readAddresses.value())
                                                        : ReadState();
@@ -951,11 +1157,11 @@ namespace ewr {
                 if (out.verifyMismatches == 0 && out.verifyUnread == 0)
                     m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verified",
                                    "[SUCCESS] Read-back verification: every " + flow.counterNoun +
-                                       " now holds its reset value.");
+                                       " now holds its " + flow.expectedValueNoun + ".");
                 else if (out.verifyMismatches > 0)
                     m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_mismatch",
                                    "[!] Read-back verification: " + std::to_string(out.verifyMismatches) +
-                                       " " + flow.counterNoun + "(s) do not match their reset value. Power-cycle the printer and run " +
+                                       " " + flow.counterNoun + "(s) do not match their " + flow.expectedValueNoun + ". Power-cycle the printer and run " +
                                        flow.recheckCommand + " to re-check.");
                 else
                     m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_incomplete",
@@ -967,6 +1173,16 @@ namespace ewr {
                 m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_unavailable",
                                "[i] Read-back verification unavailable (the printer did not answer the read queries).");
             }
+        }
+
+        // Acknowledged is not applied. A printer can answer ':42:OK;' to every
+        // write and keep its old values (#18, #63); the read-back is what says
+        // so, and a run it contradicts did not do what it was asked.
+        if (out.verifyMismatches > 0)
+        {
+            out.success = false;
+            out.error = "The printer acknowledged the writes, but " + std::to_string(out.verifyMismatches) + " " +
+                        flow.counterNoun + "(s) read back without their " + flow.expectedValueNoun + ".";
         }
 
         out.phase = ResetPhase::Done;

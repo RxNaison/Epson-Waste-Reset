@@ -1,6 +1,9 @@
 #pragma once
+#include "ewr/gateway.h"
+
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ewr {
@@ -32,28 +35,6 @@ namespace ewr {
         std::vector<InkReading> inks;
     };
 
-    // Concatenated data-channel payload bytes, with socket 0 credit/control
-    // traffic skipped. Any packet whose psid and ssid match and are non-zero is
-    // a data packet: GetSocketID can hand back a socket other than the
-    // well-known 2, and this parser sees the negotiated one. Bytes that do not
-    // line up with a plausible D4 header are dropped one at a time, so a partial
-    // capture still yields what arrived.
-    std::vector<unsigned char> ExtractD4Payload(const std::vector<unsigned char>& raw);
-
-    // valid=false when the stream holds no parseable status. A report whose
-    // fields run past the end of the payload parses what arrived and sets
-    // `truncated`; callers must not read the absence of an error entry in a
-    // truncated report as the absence of an error.
-    PrinterStatus ParseStatusReply(const std::vector<unsigned char>& raw);
-
-    // Two firmware reply forms exist:
-    //   A) '...:41:HH;'  - action-code echo followed by the value (HH).
-    //   B) '...EE:AAVV;' - address echo (AA) followed by the value (VV),
-    //      seen on Stylus Photo-era firmware (e.g. R220).
-    // When expectedAddress is >= 0 and the reply echoes an address (form B),
-    // a mismatching echo is rejected. Returns true and sets value on success.
-    bool ParseEepromReadReply(const std::vector<unsigned char>& raw, uint8_t& value, int expectedAddress = -1);
-
     // How a printer answered one EEPROM read. The refusals are kept apart
     // because they are not the same evidence: ':41:NA;' names the read and
     // turns it down (an R220 with any wrong key), while a bare '||:;' does
@@ -67,9 +48,23 @@ namespace ewr {
         Other,    // something else entirely
     };
 
-    // `value` is set only for ReadAnswer::Value.
-    ReadAnswer ClassifyEepromReadReply(const std::vector<unsigned char>& raw, uint8_t& value, int expectedAddress = -1);
-
-    std::string DescribePrinterCondition(const PrinterStatus& status);
+    // Parsed '@BDC ST2' status plus raw counter bytes (address -> value).
+    struct StateSnapshot
+    {
+        bool available = false; // a device answered the query session
+        PrinterStatus status;
+        std::vector<std::pair<uint16_t, int>> values;
+    };
 
 } // namespace ewr
+
+namespace ewr::status {
+
+    // Model-free status read: just the '@BDC ST2' report, no counter reads
+    // (those need a model's read key). What the replay path can know about
+    // a printer.
+    StateSnapshot Read(IDeviceGateway& gateway, const ExecutorOptions& options = ExecutorOptions::ForQueries());
+
+    std::string Describe(const PrinterStatus& status);
+
+} // namespace ewr::status

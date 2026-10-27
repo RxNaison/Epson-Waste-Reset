@@ -1,0 +1,1195 @@
+#include "protocol/d4session.h"
+#include "protocol/ctrl.h"
+#include "ewr/format.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <thread>
+
+namespace ewr {
+
+    namespace {
+
+        using Clock = std::chrono::steady_clock;
+
+        int RemainingMs(Clock::time_point deadline)
+        {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+            return left > 0 ? static_cast<int>(left) : 0;
+        }
+
+        void EmitProgress(log::Reporter& reporter, log::Stage stage, const char* code,
+                          size_t index, size_t total, const std::string& message)
+        {
+            log::Event event;
+            event.level = log::Level::Info;
+            event.stage = stage;
+            event.code = code;
+            event.message = message;
+            event.index = static_cast<int>(index);
+            event.total = static_cast<int>(total);
+            reporter.Emit(event);
+        }
+
+        void EmitTrace(log::Reporter& reporter, const char* code, const std::string& message)
+        {
+            reporter.Log(log::Level::Trace, log::Stage::General, code, message);
+        }
+
+        // Offset of the first bytes that could begin a D4 packet. Every packet
+        // EWR sends or asks for carries matching socket ids (the channel is
+        // opened socket-to-itself) and no packet is shorter than its own 6-byte
+        // header, so anything else is not a header - usbprint.sys prefix junk,
+        // or a burst that starts mid-packet. Without this the framer would read
+        // a length out of the junk; a bogus length that happens to be >= 6
+        // never completes, and the bytes then sit in the buffer being
+        // re-evaluated by every later read for the rest of the session.
+        //
+        // A trailing partial header is kept: the rest of it may be in the next
+        // read.
+        size_t FindPacketStart(const std::vector<unsigned char>& buffer)
+        {
+            for (size_t i = 0; i + 4 <= buffer.size(); ++i)
+            {
+                if (buffer[i] != buffer[i + 1])
+                    continue;
+
+                const size_t total = (static_cast<size_t>(buffer[i + 2]) << 8) | buffer[i + 3];
+                if (total >= 6)
+                    return i;
+            }
+
+            return (buffer.size() > 3) ? buffer.size() - 3 : 0;
+        }
+
+        // Whether `buffered` followed by `more` holds a whole packet, by the
+        // same rules ReadPacket frames one with.
+        bool HoldsWholePacket(const std::vector<unsigned char>& buffered, const std::vector<unsigned char>& more)
+        {
+            std::vector<unsigned char> all(buffered);
+            all.insert(all.end(), more.begin(), more.end());
+
+            const size_t start = FindPacketStart(all);
+            if (all.size() < start + 4)
+                return false;
+
+            const size_t total = (static_cast<size_t>(all[start + 2]) << 8) | all[start + 3];
+            return all.size() - start >= total;
+        }
+
+    } // namespace
+
+    namespace d4 {
+
+        std::string DescribeResult(uint8_t code)
+        {
+            const char* name = nullptr;
+            switch (code)
+            {
+                case 0x01: name = "malformed or unsupported packet"; break;
+                case 0x02: name = "channel not open"; break;
+                case 0x03: name = "no credit available"; break;
+                case 0x04: name = "resources unavailable"; break;
+                default: break;
+            }
+
+            char buf[16];
+            snprintf(buf, sizeof(buf), "0x%02X", code);
+
+            std::string text(buf);
+            if (name)
+            {
+                text += " (";
+                text += name;
+                text += ")";
+            }
+
+            return text;
+        }
+
+    } // namespace d4
+
+    bool d4::Framer::ReadPacket(d4::Packet& pkt, int timeoutMs, log::Reporter& reporter)
+    {
+        const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
+
+        for (;;)
+        {
+            // Drop anything ahead of the next plausible header before reading a
+            // length out of it.
+            const size_t start = FindPacketStart(m_buffer);
+            if (start > 0)
+            {
+                EmitTrace(reporter, "d4.resync", "[!] D4 resync: discarding " + std::to_string(start)
+                    + " leading byte(s) that cannot begin a packet.");
+                m_buffer.erase(m_buffer.begin(), m_buffer.begin() + static_cast<long>(start));
+            }
+
+            // Bytes [2..3] are the big-endian total length, header included.
+            // The timeout bounds only how long bytes may take to arrive; the
+            // length decides where the packet ends.
+            if (m_buffer.size() >= 4)
+            {
+                const size_t total = (static_cast<size_t>(m_buffer[2]) << 8) | m_buffer[3];
+
+                // FindPacketStart already refuses a header announcing less than
+                // its own size, so this cannot fire. It stays because what
+                // follows would otherwise run the payload's end iterator
+                // backwards past its start, and that must not depend on a
+                // guarantee made somewhere else in the file.
+                if (total < 6)
+                {
+                    EmitTrace(reporter, "d4.framing_error", "[!] D4 framing error: header announces "
+                        + std::to_string(total) + " bytes (minimum is 6). Discarding buffered bytes.");
+                    m_buffer.clear();
+                    return false;
+                }
+
+                if (m_buffer.size() >= total)
+                {
+                    pkt.psid = m_buffer[0];
+                    pkt.ssid = m_buffer[1];
+                    pkt.credit = m_buffer[4];
+                    pkt.control = m_buffer[5];
+                    pkt.payload.assign(m_buffer.begin() + 6, m_buffer.begin() + static_cast<long>(total));
+                    m_buffer.erase(m_buffer.begin(), m_buffer.begin() + static_cast<long>(total));
+                    return true;
+                }
+            }
+
+            const int remaining = RemainingMs(deadline);
+            if (remaining == 0)
+            {
+                // A header whose body never arrived. Keeping it would make
+                // every later read on this session re-evaluate the same
+                // incomplete bytes and time out the same way.
+                if (!m_buffer.empty())
+                {
+                    EmitTrace(reporter, "d4.framing_error", "[!] D4 framing error: "
+                        + std::to_string(m_buffer.size()) + " buffered byte(s) never completed a packet."
+                          " Discarding them so the next read starts clean.");
+                    m_buffer.clear();
+                }
+
+                return false;
+            }
+
+            const std::vector<unsigned char> chunk = m_transport.DrainUntil(remaining,
+                [this](const std::vector<unsigned char>& more) { return HoldsWholePacket(m_buffer, more); });
+            if (!chunk.empty())
+            {
+                if (!m_sawHttpReply && d4::LooksLikeHttpReply(chunk.data(), chunk.size()))
+                {
+                    m_sawHttpReply = true;
+                    EmitTrace(reporter, "d4.http_reply", std::string("[!] ") + d4::kHttpPersonalityError);
+                }
+
+                m_buffer.insert(m_buffer.end(), chunk.begin(), chunk.end());
+            }
+            else if (Clock::now() >= deadline)
+            {
+                // Round the loop once more so the deadline path above gets to
+                // discard whatever never completed.
+                continue;
+            }
+            else
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    }
+
+    d4::Session::Session(ITransport& transport, log::Reporter& reporter, const d4::SessionOptions& options)
+        : m_transport(transport)
+        , m_framer(transport)
+        , m_reporter(reporter)
+        , m_options(options)
+    {
+    }
+
+    d4::Session::Session(ITransport& transport, std::ostream& logStream, const d4::SessionOptions& options)
+        : m_transport(transport)
+        , m_framer(transport)
+        , m_reporter(m_ownedReporter)
+        , m_options(options)
+    {
+        std::ostream* stream = &logStream;
+        m_ownedReporter.AddSink([stream](const log::Event& event)
+        {
+            if (event.level == log::Level::Trace)
+                (*stream) << event.message << "\n";
+        });
+    }
+
+    bool d4::Session::Fail(const std::string& error)
+    {
+        m_lastError = error;
+        EmitTrace(m_reporter, "d4.fatal", "[FATAL] " + error);
+        return false;
+    }
+
+    bool d4::Session::SendPacket(uint8_t psid, uint8_t ssid, const std::vector<unsigned char>& payload, uint8_t credit)
+    {
+        std::vector<unsigned char> raw;
+        const uint16_t total = static_cast<uint16_t>(payload.size() + 6);
+        raw.push_back(psid);
+        raw.push_back(ssid);
+        raw.push_back(static_cast<unsigned char>((total >> 8) & 0xFF));
+        raw.push_back(static_cast<unsigned char>(total & 0xFF));
+        raw.push_back(credit);
+        raw.push_back(0x00);
+        raw.insert(raw.end(), payload.begin(), payload.end());
+
+        EmitTrace(m_reporter, "d4.tx", "[OUT] D4 packet (" + std::to_string(raw.size()) + " bytes):\n"
+              + format::HexDump(raw.data(), raw.size()));
+
+        if (!m_transport.Send(raw))
+            return Fail("Transport failure while sending a D4 packet");
+
+        if (m_options.interPacketDelayMs > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(m_options.interPacketDelayMs));
+
+        return true;
+    }
+
+    void d4::Session::Absorb(const d4::Packet& pkt)
+    {
+        if (!pkt.IsTransaction())
+        {
+            // Consumes credit we granted, and may piggy-back fresh send credit
+            // in the header's credit field.
+            if (m_printerCredit > 0)
+                m_printerCredit--;
+
+            m_sendCredit += pkt.credit;
+            return;
+        }
+
+        if (pkt.payload.empty())
+            return;
+
+        const uint8_t cmd = pkt.payload[0];
+
+        if (cmd == (d4::CMD_CREDIT_REQUEST | d4::REPLY_BIT) && pkt.payload.size() >= 6)
+        {
+            const int granted = (pkt.payload[4] << 8) | pkt.payload[5];
+            m_sendCredit += granted;
+            EmitTrace(m_reporter, "d4.credit", "[i] Credit granted: " + std::to_string(granted)
+                + " (send credit now " + std::to_string(m_sendCredit) + ")");
+        }
+        else if (cmd == d4::CMD_CREDIT && pkt.payload.size() >= 5)
+        {
+            // Printer-initiated credit grant.
+            const int granted = (pkt.payload[3] << 8) | pkt.payload[4];
+            m_sendCredit += granted;
+            EmitTrace(m_reporter, "d4.credit", "[i] Printer granted unsolicited credit: " + std::to_string(granted));
+        }
+        else if (cmd == d4::CMD_ERROR)
+        {
+            const uint8_t code = pkt.payload.size() >= 4 ? pkt.payload[3] : 0xFF;
+            m_lastError = "Printer sent a D4 error packet: " + d4::DescribeResult(code);
+            EmitTrace(m_reporter, "d4.error", "[!] " + m_lastError);
+        }
+    }
+
+    bool d4::Session::WaitFor(uint8_t replyCmd, d4::Packet& pkt, int timeoutMs)
+    {
+        const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
+
+        for (;;)
+        {
+            d4::Packet incoming;
+            if (!m_framer.ReadPacket(incoming, RemainingMs(deadline), m_reporter))
+                return false;
+
+            EmitTrace(m_reporter, "d4.rx", "[IN]  D4 " + std::string(incoming.IsTransaction() ? "transaction" : "data")
+                  + " payload (" + std::to_string(incoming.payload.size()) + " bytes):\n"
+                  + format::HexDumpCapped(incoming.payload.data(), incoming.payload.size(), format::kTraceDumpCapBytes));
+
+            Absorb(incoming);
+
+            if (incoming.IsTransaction() && !incoming.payload.empty())
+            {
+                if (incoming.payload[0] == replyCmd)
+                {
+                    pkt = incoming;
+                    return true;
+                }
+
+                if (incoming.payload[0] == d4::CMD_ERROR)
+                    return false;
+            }
+            else if (!incoming.IsTransaction() && incoming.psid == m_socket)
+            {
+                // Data arriving while we wait for a transaction reply belongs
+                // to the caller, not to this wait. Keep it for WaitForData.
+                m_pendingData.push_back(incoming);
+            }
+
+            if (RemainingMs(deadline) == 0)
+                return false;
+        }
+    }
+
+    bool d4::Session::WaitForData(d4::Packet& pkt, int timeoutMs)
+    {
+        // Anything a transaction wait set aside is already here and already
+        // credit-accounted; hand it over before going back to the wire.
+        if (!m_pendingData.empty())
+        {
+            pkt = m_pendingData.front();
+            m_pendingData.erase(m_pendingData.begin());
+            return true;
+        }
+
+        const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
+
+        for (;;)
+        {
+            d4::Packet incoming;
+            if (!m_framer.ReadPacket(incoming, RemainingMs(deadline), m_reporter))
+                return false;
+
+            EmitTrace(m_reporter, "d4.rx", "[IN]  D4 " + std::string(incoming.IsTransaction() ? "transaction" : "data")
+                  + " payload (" + std::to_string(incoming.payload.size()) + " bytes):\n"
+                  + format::HexDumpCapped(incoming.payload.data(), incoming.payload.size(), format::kTraceDumpCapBytes));
+
+            Absorb(incoming);
+
+            if (!incoming.IsTransaction() && incoming.psid == m_socket)
+            {
+                pkt = incoming;
+                return true;
+            }
+
+            if (RemainingMs(deadline) == 0)
+                return false;
+        }
+    }
+
+    bool d4::Session::Start()
+    {
+        // 1. EJL escape out of the printing PDL into IEEE 1284.4 mode. Some
+        //    firmware answers with one short transaction packet; absorb it.
+        {
+            const std::vector<std::vector<unsigned char>> handshake = d4::Handshake();
+            const std::vector<unsigned char>& ejl = handshake[0];
+
+            EmitTrace(m_reporter, "d4.tx", "[OUT] EJL enter (" + std::to_string(ejl.size()) + " bytes):\n"
+                  + format::HexDump(ejl.data(), ejl.size()));
+
+            if (!m_transport.Send(ejl))
+                return Fail("Transport failure while sending the EJL enter packet");
+
+            d4::Packet ignored;
+            if (m_framer.ReadPacket(ignored, m_options.replyTimeoutMs, m_reporter))
+            {
+                EmitTrace(m_reporter, "d4.rx", "[IN]  D4 pre-session reply (" + std::to_string(ignored.payload.size()) + " payload bytes)");
+                Absorb(ignored);
+            }
+        }
+
+        if (!SendPacket(0x00, 0x00, { d4::CMD_INIT, d4::INIT_REVISION }, 0x01))
+            return false;
+
+        d4::Packet reply;
+        if (!WaitFor(d4::CMD_INIT | d4::REPLY_BIT, reply, m_options.replyTimeoutMs))
+            return Fail(m_lastError.empty()
+                ? "Printer did not answer the D4 Init transaction"
+                : m_lastError);
+
+        if (reply.payload.size() >= 2 && reply.payload[1] != 0x00)
+            return Fail("D4 Init rejected: result " + d4::DescribeResult(reply.payload[1]));
+
+        // 3. GetSocketID("EPSON-CTRL"). Firmware without it falls back to the
+        //    well-known socket 2.
+        {
+            std::vector<unsigned char> payload;
+            payload.push_back(d4::CMD_GET_SOCKET_ID);
+            payload.insert(payload.end(), m_options.serviceName.begin(), m_options.serviceName.end());
+
+            if (!SendPacket(0x00, 0x00, payload, 0x01))
+                return false;
+
+            d4::Packet sock;
+            if (WaitFor(d4::CMD_GET_SOCKET_ID | d4::REPLY_BIT, sock, m_options.replyTimeoutMs)
+                && sock.payload.size() >= 3
+                && sock.payload[1] == 0x00
+                && sock.payload[2] != 0x00)
+            {
+                m_socket = sock.payload[2];
+                EmitTrace(m_reporter, "d4.socket", "[i] GetSocketID(\"" + m_options.serviceName + "\") -> socket "
+                      + std::to_string(static_cast<int>(m_socket)));
+            }
+            else
+            {
+                m_socket = d4::SOCKET_EPSON_CTRL;
+                EmitTrace(m_reporter, "d4.socket", "[i] GetSocketID not answered; using well-known socket "
+                      + std::to_string(static_cast<int>(m_socket)));
+            }
+        }
+
+        // 4. OpenChannel (proposed MTU 256/256, zero initial credit).
+        {
+            const std::vector<unsigned char> open = {
+                d4::CMD_OPEN_CHANNEL, m_socket, m_socket,
+                0x01, 0x00, // proposed max packet size, primary -> secondary
+                0x01, 0x00, // proposed max packet size, secondary -> primary
+                0x00, 0x00, // initial credit
+                0x00, 0x00  // maximum outstanding credit (0 = unlimited)
+            };
+
+            if (!SendPacket(0x00, 0x00, open, 0x01))
+                return false;
+
+            d4::Packet openReply;
+            if (!WaitFor(d4::CMD_OPEN_CHANNEL | d4::REPLY_BIT, openReply, m_options.replyTimeoutMs))
+                return Fail(m_lastError.empty()
+                    ? "Printer did not answer OpenChannel (no channel-open reply)"
+                    : m_lastError);
+
+            if (openReply.payload.size() >= 2 && openReply.payload[1] != 0x00)
+                return Fail("OpenChannel rejected: result " + d4::DescribeResult(openReply.payload[1]));
+
+            // Reply layout: result, psid, ssid, MTU P->S (2, BE),
+            // MTU S->P (2, BE), initial credit (2, BE).
+            if (openReply.payload.size() >= 8)
+            {
+                const uint16_t toPrinter = static_cast<uint16_t>((openReply.payload[4] << 8) | openReply.payload[5]);
+                const uint16_t toHost = static_cast<uint16_t>((openReply.payload[6] << 8) | openReply.payload[7]);
+
+                if (toPrinter >= 7)
+                    m_mtuToPrinter = toPrinter;
+                if (toHost >= 7)
+                    m_mtuToHost = toHost;
+            }
+
+            if (openReply.payload.size() >= 10)
+                m_sendCredit += (openReply.payload[8] << 8) | openReply.payload[9];
+
+            m_channelOpen = true;
+            EmitTrace(m_reporter, "d4.channel", "[i] Channel open on socket " + std::to_string(static_cast<int>(m_socket))
+                  + ": MTU " + std::to_string(m_mtuToPrinter) + " to printer / " + std::to_string(m_mtuToHost)
+                  + " to host, initial send credit " + std::to_string(m_sendCredit));
+        }
+
+        // Data set aside before the channel opened answers nothing this session
+        // asked: a late reply to an earlier session, or to a killed run.
+        m_pendingData.clear();
+
+        m_started = true;
+
+        DiscardHeldReplies();
+        return true;
+    }
+
+    // A printer that could not send a reply keeps it - through CloseChannel,
+    // Exit and Init alike, on an R220 - and hands it over the moment any later
+    // session grants credit, where it would pass for the answer to that
+    // session's first query and shift every answer after it by one. Nothing
+    // has been asked yet, so whatever arrives now is such a leftover. With
+    // nothing held, the credit granted here simply buys the first real reply.
+    void d4::Session::DiscardHeldReplies()
+    {
+        constexpr int kMaxHeldReplies = 32;
+
+        for (int discarded = 0; discarded < kMaxHeldReplies; ++discarded)
+        {
+            // Best-effort: the first exchange asks for the same credit and
+            // fails on its own if the printer really will not grant it.
+            if (!EnsurePrinterCredit())
+            {
+                m_lastError.clear();
+                return;
+            }
+
+            d4::Packet stale;
+            if (!WaitForData(stale, m_options.heldReplyWindowMs))
+                return;
+
+            EmitTrace(m_reporter, "d4.held_reply_discarded", "[!] Discarded a reply held over from an earlier session ("
+                + std::to_string(stale.payload.size()) + " bytes) - it answers nothing this session asked.");
+        }
+    }
+
+    bool d4::Session::Restart()
+    {
+        EmitTrace(m_reporter, "d4.restart", "[!] An exchange drew no reply, so neither side's credit count can be"
+            " trusted. Starting a fresh D4 session: its Init resets both.");
+
+        Close();
+
+        m_started = false;
+        m_closed = false;
+        m_channelOpen = false;
+        m_sendCredit = 0;
+        m_printerCredit = 0;
+        m_pendingData.clear();
+        m_framer.DiscardBuffered();
+        m_lastError.clear();
+
+        return Start();
+    }
+
+    bool d4::Session::EnsurePrinterCredit()
+    {
+        if (m_printerCredit > 0)
+            return true;
+
+        if (!SendPacket(0x00, 0x00, { d4::CMD_CREDIT, m_socket, m_socket, 0x00, 0x01 }, 0x01))
+            return false;
+
+        d4::Packet reply;
+        if (!WaitFor(d4::CMD_CREDIT | d4::REPLY_BIT, reply, m_options.replyTimeoutMs))
+            return Fail(m_lastError.empty()
+                ? "Printer did not acknowledge a credit grant"
+                : m_lastError);
+
+        if (reply.payload.size() >= 2 && reply.payload[1] != 0x00)
+            return Fail("Credit grant rejected: result " + d4::DescribeResult(reply.payload[1]));
+
+        m_printerCredit += 1;
+        return true;
+    }
+
+    bool d4::Session::EnsureSendCredit(int timeoutMs)
+    {
+        if (m_sendCredit > 0)
+            return true;
+
+        // Block rather than fire data into a zero-credit channel.
+        if (!SendPacket(0x00, 0x00, { d4::CMD_CREDIT_REQUEST, m_socket, m_socket, 0xFF, 0xFF, 0x00, 0x01 }, 0x01))
+            return false;
+
+        d4::Packet reply;
+        if (!WaitFor(d4::CMD_CREDIT_REQUEST | d4::REPLY_BIT, reply, timeoutMs))
+            return Fail(m_lastError.empty()
+                ? "Printer never granted send credit (flow control stalled)"
+                : m_lastError);
+
+        // WaitFor -> Absorb already booked the granted amount.
+        if (m_sendCredit <= 0)
+            return Fail("Printer answered the credit request but granted zero credit");
+
+        return true;
+    }
+
+    bool d4::Session::SendData(const std::vector<unsigned char>& payload)
+    {
+        if (!m_channelOpen)
+            return Fail("SendData called before the channel was opened");
+
+        const size_t mtuPayload = (m_mtuToPrinter > 6) ? static_cast<size_t>(m_mtuToPrinter - 6) : 1;
+
+        size_t offset = 0;
+        do
+        {
+            const size_t chunkLen = std::min(mtuPayload, payload.size() - offset);
+
+            if (!EnsureSendCredit(m_options.replyTimeoutMs))
+                return false;
+
+            const std::vector<unsigned char> chunk(payload.begin() + static_cast<long>(offset),
+                                                   payload.begin() + static_cast<long>(offset + chunkLen));
+            if (!SendPacket(m_socket, m_socket, chunk, 0x00))
+                return false;
+
+            m_sendCredit -= 1;
+            offset += chunkLen;
+        } while (offset < payload.size());
+
+        return true;
+    }
+
+    bool d4::Session::Exchange(const std::vector<unsigned char>& payload, std::vector<unsigned char>& reply)
+    {
+        // Grant credit to answer, send, then wait for the framed reply.
+        if (!EnsurePrinterCredit())
+            return false;
+
+        if (!SendData(payload))
+            return false;
+
+        reply.clear();
+
+        // One credit buys the printer one packet, so a reply longer than the
+        // channel's payload capacity arrives in pieces. Anything left unread
+        // would be delivered as the answer to the *next* query, and callers
+        // match replies to addresses positionally - so a single truncation
+        // shifts every value after it onto the wrong EEPROM address.
+        const size_t mtuPayload = (m_mtuToHost > 6) ? static_cast<size_t>(m_mtuToHost - 6) : 1;
+
+        for (int fragment = 0; fragment < m_options.maxReplyFragments; ++fragment)
+        {
+            d4::Packet pkt;
+            const int timeout = (fragment == 0) ? m_options.dataTimeoutMs : m_options.fragmentTimeoutMs;
+
+            if (!WaitForData(pkt, timeout))
+            {
+                // Nothing at all is a failed exchange; a continuation that
+                // never came just ends the reply with what did arrive.
+                if (fragment == 0)
+                {
+                    if (m_lastError.empty())
+                        m_lastError = "The printer did not answer on the EPSON-CTRL data channel";
+                    return false;
+                }
+
+                EmitTrace(m_reporter, "d4.fragment_timeout", "[!] Reply fragment " + std::to_string(fragment + 1)
+                    + " never arrived; returning the " + std::to_string(reply.size()) + " byte(s) that did.");
+                break;
+            }
+
+            reply.insert(reply.end(), pkt.payload.begin(), pkt.payload.end());
+
+            // End-of-message, or a packet that did not fill the MTU and so
+            // cannot have been cut short by it. The second test is what keeps
+            // this free on firmware that never sets the control bit: every
+            // reply EWR asks for is far shorter than the negotiated MTU.
+            if (pkt.IsEndOfMessage() || pkt.payload.size() < mtuPayload)
+                return true;
+
+            EmitTrace(m_reporter, "d4.fragment", "[i] Reply fragment " + std::to_string(fragment + 1)
+                + " filled the MTU without end-of-message; granting credit for the next one.");
+
+            if (!EnsurePrinterCredit())
+                break;
+        }
+
+        return true;
+    }
+
+    void d4::Session::Close()
+    {
+        // A session that never fully started never entered D4 mode, so there is
+        // nothing to close and CloseChannel/Exit would be the first packets it
+        // ever saw. Closing twice would send them twice.
+        if (m_closed || !m_started)
+            return;
+
+        m_closed = true;
+
+        const int timeout = std::min(m_options.replyTimeoutMs, 500);
+
+        if (m_channelOpen)
+        {
+            if (SendPacket(0x00, 0x00, { d4::CMD_CLOSE_CHANNEL, m_socket, m_socket }, 0x01))
+            {
+                d4::Packet reply;
+                WaitFor(d4::CMD_CLOSE_CHANNEL | d4::REPLY_BIT, reply, timeout);
+            }
+
+            m_channelOpen = false;
+        }
+
+        if (SendPacket(0x00, 0x00, { d4::CMD_EXIT }, 0x01))
+        {
+            d4::Packet reply;
+            WaitFor(d4::CMD_EXIT | d4::REPLY_BIT, reply, timeout);
+        }
+    }
+
+    bool d4::ExtractDataPayload(const std::vector<unsigned char>& packet, std::vector<unsigned char>& payload)
+    {
+        if (packet.size() < 7 || packet[0] == 0x00 || packet[0] != packet[1])
+            return false;
+
+        const size_t total = (static_cast<size_t>(packet[2]) << 8) | packet[3];
+        if (total < 7 || total > packet.size())
+            return false;
+
+        payload.assign(packet.begin() + 6, packet.begin() + static_cast<long>(total));
+        return true;
+    }
+
+    namespace {
+
+        // A fresh session is not always there for the asking: the printer that
+        // lost the reply may still be busy. An L365 answered Exit, EJL and
+        // Init throughout while ignoring GetSocketID and OpenChannel, and one
+        // immediate attempt (about 4 s of timeouts) declared the run dead while
+        // the printer needed longer and then came back on its own. Retries are
+        // spaced by a doubling wait rather than fired back to back.
+        bool RestartWithBackoff(d4::Session& session, log::Reporter& reporter, const ExecutorOptions& options)
+        {
+            const int attempts = (options.sessionRestartAttempts > 0) ? options.sessionRestartAttempts : 1;
+            int waitMs = (options.sessionRestartBackoffMs > 0) ? options.sessionRestartBackoffMs : 0;
+
+            for (int attempt = 1; attempt <= attempts; ++attempt)
+            {
+                if (attempt > 1)
+                {
+                    if (attempt == 2)
+                    {
+                        reporter.Log(log::Level::Info, log::Stage::Handshake, "d4.session_recovering",
+                                     "[!] The printer stopped answering - waiting for it to come back...");
+                    }
+
+                    EmitTrace(reporter, "d4.restart_wait", "[!] No channel yet (" + session.LastError() + "). Waiting "
+                        + std::to_string(waitMs) + " ms before fresh session attempt " + std::to_string(attempt)
+                        + " of " + std::to_string(attempts) + ".");
+
+                    if (waitMs > 0)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+
+                    waitMs *= 2;
+                }
+
+                if (session.Restart())
+                    return true;
+            }
+
+            return false;
+        }
+
+        // Closes the D4 channel however the session ends.
+        struct SessionCloseGuard
+        {
+            d4::Session& session;
+
+            ~SessionCloseGuard() { session.Close(); }
+        };
+
+    } // namespace
+
+    ExecutionResult d4::RunSequence(ITransport& transport,
+                                      const std::vector<std::vector<unsigned char>>& sequence,
+                                      log::Reporter& reporter,
+                                      const ExecutorOptions& options)
+    {
+        ExecutionResult result;
+
+        d4::SessionOptions sessionOptions;
+        sessionOptions.replyTimeoutMs = options.handshakeDrainTimeoutMs;
+        sessionOptions.dataTimeoutMs = options.writeAckTimeoutMs;
+        sessionOptions.interPacketDelayMs = options.interPacketDelayMs;
+
+        d4::Session session(transport, reporter, sessionOptions);
+        SessionCloseGuard sessionCloseGuard{ session };
+
+        EmitTrace(reporter, "d4.banner", "=== IEEE 1284.4 SESSION CORE ===\n");
+
+        if (!session.Start())
+        {
+            result.handshakeFailed = true;
+            result.error = session.SawHttpReply()
+                ? d4::kHttpPersonalityError
+                : ("Printer is not responding to the IEEE 1284.4 handshake ("
+                   + session.LastError() + ") - wrong USB interface or unsupported model.");
+            reporter.Log(log::Level::Info, log::Stage::Handshake, "exec.handshake_failed",
+                         "-> Handshake FAILED: " + session.LastError());
+            return result;
+        }
+
+        result.handshakeConfirmed = true;
+
+        // Set by an exchange that drew no reply; the next one runs on a fresh
+        // session (see d4::Session::Restart).
+        bool restartNeeded = false;
+
+        const ctrl::Exchange exchange = [&](const std::vector<unsigned char>& command,
+                                          std::vector<unsigned char>& reply, std::string& error)
+        {
+            if (restartNeeded)
+            {
+                if (!RestartWithBackoff(session, reporter, options))
+                {
+                    error = "A packet went unacknowledged and the printer would not open a fresh D4 session ("
+                          + session.LastError() + ")";
+                    EmitTrace(reporter, "exec.trace_fatal", "[FATAL] " + error + "\n");
+                    return false;
+                }
+
+                restartNeeded = false;
+            }
+
+            if (session.Exchange(command, reply))
+                return true;
+
+            if (session.LastError().find("Transport failure") != std::string::npos)
+            {
+                error = session.LastError();
+                return false;
+            }
+
+            restartNeeded = true;
+            return true;
+        };
+
+        ctrl::RunCommands(exchange, ctrl::ExtractCommands(sequence), reporter, options, result);
+        return result;
+    }
+
+    std::vector<ctrl::Command> ctrl::ExtractCommands(const std::vector<std::vector<unsigned char>>& sequence)
+    {
+        // The session owns handshake and credit choreography, so only data
+        // payloads survive.
+        std::vector<ctrl::Command> commands;
+        for (const auto& pkt : sequence)
+        {
+            std::vector<unsigned char> payload;
+            if (d4::ExtractDataPayload(pkt, payload))
+                commands.push_back({ std::move(payload), ctrl::IsWrite(pkt) });
+        }
+        return commands;
+    }
+
+    void ctrl::RunCommands(const ctrl::Exchange& exchange,
+                         const std::vector<ctrl::Command>& commands,
+                         log::Reporter& reporter,
+                         const ExecutorOptions& options,
+                         ExecutionResult& result)
+    {
+        // A write is idempotent, so sending it again after a lost
+        // acknowledgement is safe.
+        for (size_t i = 0; i < commands.size(); ++i)
+        {
+            const bool isWrite = commands[i].isWrite;
+            if (isWrite)
+                result.writesTotal++;
+
+            const bool verifyThisWrite = isWrite && options.verifyWrites;
+            const int maxAttempts = verifyThisWrite ? options.maxWriteAttempts : 1;
+            bool confirmed = false;
+
+            // Copied, not referenced: a ':42:NG;' may rebuild this payload with
+            // the model's alternate keyword before the next attempt.
+            std::vector<unsigned char> payload = commands[i].payload;
+            bool triedAlternateKey = false;
+
+            for (int attempt = 1; attempt <= maxAttempts; ++attempt)
+            {
+                if (attempt > 1)
+                {
+                    EmitProgress(reporter, log::Stage::Write, "exec.write_retry", i + 1, commands.size(),
+                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
+                                     + " | Retrying write (attempt " + std::to_string(attempt) + "/" + std::to_string(maxAttempts) + ")...");
+                    EmitTrace(reporter, "exec.retry", "[RETRY] Command " + std::to_string(i + 1)
+                        + " attempt " + std::to_string(attempt) + "/" + std::to_string(maxAttempts));
+
+                    if (options.retryDelayMs > 0)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(options.retryDelayMs));
+                }
+
+                std::vector<unsigned char> reply;
+                std::string fatal;
+                if (!exchange(payload, reply, fatal))
+                {
+                    result.error = fatal;
+                    return;
+                }
+
+                result.packetsSent++;
+
+                if (!reply.empty())
+                    result.ackCount++;
+
+                if (isWrite && ctrl::IsWriteNg(reply))
+                {
+                    std::vector<unsigned char> alternate;
+                    if (!triedAlternateKey
+                        && ctrl::SubstituteTrailingWriteKey(payload, options.writeKey, options.alternateWriteKey, alternate))
+                    {
+                        triedAlternateKey = true;
+                        payload = std::move(alternate);
+
+                        EmitProgress(reporter, log::Stage::Write, "exec.write_key_retry", i + 1, commands.size(),
+                                     "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
+                                         + " | Key rejected (||:42:NG;) - retrying with the alternate keyword.");
+                        EmitTrace(reporter, "exec.retry", "[RETRY] Write rejected with ':42:NG;' on command "
+                            + std::to_string(i + 1) + "; retrying with the alternate keyword ('wkey1')");
+
+                        continue;
+                    }
+
+                    result.writesRejected++;
+                    result.error = "Printer REJECTED EEPROM write (command " + std::to_string(i + 1)
+                                 + ", reply ':42:NG;'). The write key may not match this model.";
+                    EmitProgress(reporter, log::Stage::Write, "exec.write_rejected", i + 1, commands.size(),
+                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
+                                     + " | EEPROM write REJECTED (||:42:NG;).");
+                    EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write rejected with ':42:NG;' on command " + std::to_string(i + 1) + "\n");
+
+                    return;
+                }
+
+                if (isWrite && ctrl::IsWriteNa(reply))
+                {
+                    result.writesRejected++;
+                    result.error = "Printer REFUSED EEPROM write (command " + std::to_string(i + 1)
+                                 + ", reply ':42:NA;'). The printer is likely locked by another error"
+                                   " state (empty cartridge, paper jam, open cover). Clear that error"
+                                   " first, then run EWR again.";
+                    EmitProgress(reporter, log::Stage::Write, "exec.write_refused", i + 1, commands.size(),
+                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
+                                     + " | EEPROM write REFUSED (||:42:NA;) - printer locked by another error.");
+                    EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write refused with ':42:NA;' on command " + std::to_string(i + 1) + "\n");
+
+                    return;
+                }
+
+                if (!verifyThisWrite)
+                {
+                    EmitProgress(reporter, log::Stage::Write, reply.empty() ? "exec.packet_sent" : "exec.packet_acked",
+                                 i + 1, commands.size(),
+                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
+                                     + (reply.empty() ? " | Sent. (No reply)" : " | Answered."));
+                    confirmed = true;
+                    break;
+                }
+
+                if (ctrl::IsWriteOk(reply))
+                {
+                    result.writesVerified++;
+                    confirmed = true;
+                    EmitProgress(reporter, log::Stage::Write, "exec.write_verified", i + 1, commands.size(),
+                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
+                                     + " | EEPROM write verified (||:42:OK;).");
+                    break;
+                }
+
+                EmitTrace(reporter, "exec.write_unconfirmed", "[WARNING] Command " + std::to_string(i + 1) + " write reply missing ':42:OK;'");
+            }
+
+            // The flag means the alternate keyword WORKED, not that it was
+            // tried. Hosts surface it as a database fix worth reporting, so a
+            // run where both keywords were rejected must not claim it.
+            if (confirmed && triedAlternateKey)
+                result.alternateKeyUsed = true;
+
+            if (verifyThisWrite && !confirmed)
+            {
+                result.writesUnverified = true;
+
+                if (result.ackCount > 0)
+                {
+                    result.error = "EEPROM write not confirmed after " + std::to_string(maxAttempts)
+                                 + " attempts (command " + std::to_string(i + 1)
+                                 + "): the printer replies, but never with ':42:OK;'. Some writes may have"
+                                   " been applied without confirmation - power-cycle the printer and check"
+                                   " whether the error cleared before retrying.";
+                }
+                else
+                {
+                    result.error = "EEPROM write not acknowledged after " + std::to_string(maxAttempts)
+                                 + " attempts (command " + std::to_string(i + 1) + ")";
+                }
+
+                EmitTrace(reporter, "exec.trace_fatal", "[FATAL] " + result.error + "\n");
+
+                return;
+            }
+        }
+
+        if (options.verifyWrites && result.writesTotal == 0)
+        {
+            result.error = "The sequence contains no EEPROM write packets - nothing was reset.";
+            return;
+        }
+
+        if (result.ackCount == 0)
+        {
+            result.error = "The printer did not acknowledge any packets. The reset sequence was rejected or ignored.";
+            return;
+        }
+
+        if (options.verifyWrites)
+        {
+            result.success = (result.writesVerified == result.writesTotal);
+            if (!result.success)
+            {
+                result.error = "Incomplete EEPROM write: verified " + std::to_string(result.writesVerified)
+                             + " of " + std::to_string(result.writesTotal) + " write operations.";
+            }
+        }
+        else
+        {
+            result.success = true;
+        }
+    }
+
+    QuerySessionResult d4::RunQuerySession(ITransport& transport,
+                                             const std::vector<std::vector<unsigned char>>& queries,
+                                             log::Reporter& reporter,
+                                             const ExecutorOptions& options)
+    {
+        QuerySessionResult result;
+
+        d4::SessionOptions sessionOptions;
+        sessionOptions.replyTimeoutMs = options.handshakeDrainTimeoutMs;
+        sessionOptions.dataTimeoutMs = options.writeAckTimeoutMs;
+        sessionOptions.interPacketDelayMs = options.interPacketDelayMs;
+
+        d4::Session session(transport, reporter, sessionOptions);
+        SessionCloseGuard sessionCloseGuard{ session };
+
+        EmitTrace(reporter, "d4.banner", "=== IEEE 1284.4 SESSION CORE (read-only) ===\n");
+
+        if (!session.Start())
+        {
+            result.handshakeFailed = true;
+            result.error = session.SawHttpReply()
+                ? d4::kHttpPersonalityError
+                : ("Printer is not responding to the IEEE 1284.4 handshake ("
+                   + session.LastError() + ") - wrong USB interface or unsupported model.");
+            reporter.Log(log::Level::Info, log::Stage::Handshake, "exec.handshake_failed",
+                         "-> Handshake FAILED: " + session.LastError());
+            return result;
+        }
+
+        result.handshakeConfirmed = true;
+
+        bool allAnswered = true;
+
+        // Set by an exchange that drew no reply; the next one runs on a fresh
+        // session (see d4::Session::Restart).
+        bool restartNeeded = false;
+
+        for (size_t q = 0; q < queries.size(); ++q)
+        {
+            std::vector<unsigned char> payload;
+            if (!d4::ExtractDataPayload(queries[q], payload))
+            {
+                EmitTrace(reporter, "exec.query_skipped", "[WARNING] Skipping a query packet that is not a D4 data packet");
+                result.replies.push_back({});
+                allAnswered = false;
+                continue;
+            }
+
+            std::vector<unsigned char> reply;
+            const int maxAttempts = (options.maxWriteAttempts > 1) ? options.maxWriteAttempts : 1;
+
+            for (int attempt = 1; attempt <= maxAttempts; ++attempt)
+            {
+                if (attempt > 1)
+                {
+                    EmitTrace(reporter, "exec.retry", "[RETRY] Query attempt " + std::to_string(attempt) + "/" + std::to_string(maxAttempts));
+
+                    if (options.retryDelayMs > 0)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(options.retryDelayMs));
+                }
+
+                if (restartNeeded)
+                {
+                    if (!RestartWithBackoff(session, reporter, options))
+                    {
+                        result.error = "A query went unanswered and the printer would not open a fresh D4 session ("
+                                     + session.LastError() + ")";
+                        break;
+                    }
+
+                    restartNeeded = false;
+                }
+
+                result.packetsSent++;
+
+                reply.clear();
+                if (session.Exchange(payload, reply))
+                    break;
+
+                if (session.LastError().find("Transport failure") != std::string::npos)
+                {
+                    result.error = session.LastError();
+                    return result;
+                }
+
+                EmitTrace(reporter, "exec.query_unanswered", "[WARNING] Query drew no reply");
+                restartNeeded = true;
+            }
+
+            if (reply.empty())
+            {
+                // Every retry ran on a fresh session, so this is no lost reply:
+                // the printer stopped answering. Asking each remaining address
+                // three more times would only add minutes to a failed run.
+                if (result.error.empty())
+                {
+                    result.error = "The printer stopped answering at query " + std::to_string(q + 1) + " of "
+                                 + std::to_string(queries.size()) + " (" + std::to_string(maxAttempts)
+                                 + " attempt(s), each retry on a fresh D4 session).";
+                }
+
+                EmitTrace(reporter, "exec.query_stopped", "[FATAL] " + result.error);
+                result.replies.resize(queries.size());
+                return result;
+            }
+            else
+            {
+                // Downstream parsers expect raw drained bytes, not a payload.
+                std::vector<unsigned char> framed;
+                const uint16_t total = static_cast<uint16_t>(reply.size() + 6);
+                framed.push_back(session.Socket());
+                framed.push_back(session.Socket());
+                framed.push_back(static_cast<unsigned char>((total >> 8) & 0xFF));
+                framed.push_back(static_cast<unsigned char>(total & 0xFF));
+                framed.push_back(0x00);
+                framed.push_back(0x01);
+                framed.insert(framed.end(), reply.begin(), reply.end());
+                result.replies.push_back(std::move(framed));
+            }
+        }
+
+        result.success = allAnswered;
+
+        if (!result.success && result.error.empty())
+            result.error = "The printer did not answer one or more status/read queries.";
+
+        return result;
+    }
+
+    std::vector<unsigned char> d4::DataPacket(const std::vector<unsigned char>& payload)
+    {
+        // D4 header uses Big-Endian length; inner Epson frames use Little-Endian length
+        std::vector<unsigned char> packet;
+        packet.push_back(d4::SOCKET_EPSON_CTRL);
+        packet.push_back(d4::SOCKET_EPSON_CTRL);
+        uint16_t d4_len = static_cast<uint16_t>(payload.size() + 6);
+        packet.push_back((d4_len >> 8) & 0xFF);
+        packet.push_back(d4_len & 0xFF);
+        packet.push_back(d4::CREDIT);
+        packet.push_back(0x00);
+        packet.insert(packet.end(), payload.begin(), payload.end());
+
+        return packet;
+    }
+
+    std::vector<unsigned char> d4::CreditGrantPacket()
+    {
+        return { 0x00, 0x00, 0x00, 0x0B, 0x01, 0x00, 0x03,
+                 d4::SOCKET_EPSON_CTRL, d4::SOCKET_EPSON_CTRL, 0x00, 0x01 };
+    }
+
+    std::vector<unsigned char> d4::CreditRequestPacket()
+    {
+        return { 0x00, 0x00, 0x00, 0x0D, 0x01, 0x00, 0x04,
+                 d4::SOCKET_EPSON_CTRL, d4::SOCKET_EPSON_CTRL, 0xFF, 0xFF, 0x00, 0x01 };
+    }
+
+    std::vector<std::vector<unsigned char>> d4::Handshake()
+    {
+        std::vector<std::vector<unsigned char>> handshake;
+
+        // The leading NULs flush the hardware parser state.
+        const unsigned char ejl_init[] = {
+            0x00, 0x00, 0x00, 0x1B, 0x01, '@', 'E', 'J', 'L', ' ', '1', '2', '8', '4', '.', '4', '\n',
+            '@', 'E', 'J', 'L', '\n',
+            '@', 'E', 'J', 'L', '\n'
+        };
+        handshake.push_back(std::vector<unsigned char>(std::begin(ejl_init), std::end(ejl_init)));
+
+        const unsigned char d4_init[] = {
+            0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00, 0x10
+        };
+        handshake.push_back(std::vector<unsigned char>(std::begin(d4_init), std::end(d4_init)));
+
+        const unsigned char d4_open[] = {
+            0x00, 0x00, 0x00, 0x11, 0x01, 0x00, 0x01,
+            d4::SOCKET_EPSON_CTRL, d4::SOCKET_EPSON_CTRL, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00
+        };
+        handshake.push_back(std::vector<unsigned char>(std::begin(d4_open), std::end(d4_open)));
+
+        return handshake;
+    }
+
+} // namespace ewr

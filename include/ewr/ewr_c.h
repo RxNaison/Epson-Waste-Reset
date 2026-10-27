@@ -65,8 +65,19 @@ typedef enum ewr_status
     EWR_ERR_WRITE_FAILED     = 11,
     EWR_ERR_WRITE_UNVERIFIED = 12, /* acknowledged, but the read-back disagreed */
     EWR_ERR_IO               = 13,
-    EWR_ERR_MODEL_MISMATCH   = 14  /* the printer says it is something else */
+    EWR_ERR_MODEL_MISMATCH   = 14, /* the printer says it is something else */
+    EWR_ERR_BAD_BACKUP       = 15, /* ABI 3: a backup or dump EWR cannot use */
+    EWR_ERR_NOT_STARTED      = 16, /* ABI 3: sent, but the printer never set to work */
+    EWR_ERR_PRINTER_ERROR    = 17  /* ABI 3: the printer reported an error while at it */
 } ewr_status;
+
+/* ABI 3. What ewr_head_clean asks for. */
+typedef enum ewr_clean_group
+{
+    EWR_CLEAN_ALL   = 0,
+    EWR_CLEAN_BLACK = 1,
+    EWR_CLEAN_COLOR = 2
+} ewr_clean_group;
 
 typedef enum ewr_level
 {
@@ -106,12 +117,18 @@ typedef struct ewr_event
 /* Pointers in `event` are valid only for the duration of the call. */
 typedef void (*ewr_event_cb)(const ewr_event* event, void* user);
 
+/* ABI 3. Handed the backup of every byte a write is about to overwrite, as
+ * the JSON a backup file holds (docs/c-api.md), after the last gate and
+ * before the first write. Return 1 once it is kept, 0 if it could not be:
+ * that stops the write unless the blocker callback lets it go ahead. */
+typedef int (*ewr_backup_cb)(const char* backup_json, void* user);
+
 /* A question only the host can answer. Return 1 to go ahead, 0 to stop.
  * `json` describes what is being asked; see docs/c-api.md. */
 typedef int (*ewr_decision_cb)(const char* json, void* user);
 
-EWR_API const char* ewr_version(void);              /* "1.4.1" */
-EWR_API int         ewr_abi_version(void);          /* this header's revision: 2 */
+EWR_API const char* ewr_version(void);              /* "1.6.0" */
+EWR_API int         ewr_abi_version(void);          /* this header's revision: 3 */
 EWR_API int         ewr_json_contract_version(void);/* docs/json-output.md `v` */
 
 /* "ok", "blocked", ... for logging. Never NULL, even for an unknown code. */
@@ -149,6 +166,29 @@ EWR_API void ewr_session_set_blocker_callback(ewr_session* session, ewr_decision
 /* The unconditional ask-once gate before the first write. Without it, a reset
  * stops with EWR_ERR_BLOCKED - there is no implied yes. */
 EWR_API void ewr_session_set_confirm_callback(ewr_session* session, ewr_decision_cb callback, void* user);
+
+/* ABI 3. Without this callback a write keeps no backup of its own, and the
+ * bytes come back only in the result's "backup" object - which a host that
+ * crashes mid-write never sees. Set it to keep them before the write. */
+EWR_API void ewr_session_set_backup_callback(ewr_session* session, ewr_backup_cb callback, void* user);
+
+/* ABI 3. Whether the file at `path` is a database this EWR can load: the
+ * same check the built-in updater runs on a download before it swaps it in.
+ * For a host that downloads database.json itself. Needs no session.
+ * {"models": n, "schema_version": n}; EWR_ERR_DATABASE when it is not one. */
+EWR_API int ewr_database_check(const char* path, char** out_json);
+
+/* ABI 3. Where EWR writes ewr_trace.log, for every session in the process.
+ * NULL or "" is the current directory, the default. Set it before opening a
+ * session, from a folder the process may write: an app's private storage. */
+EWR_API void ewr_set_data_dir(const char* dir);
+
+#if defined(__ANDROID__)
+/* ABI 3, Android builds only. The printers the app opened through UsbManager
+ * (UsbDeviceConnection.getFileDescriptor()), for every session in the
+ * process. EWR never closes them. Call again whenever the set changes. */
+EWR_API void ewr_android_set_usb_fds(const int* fds, size_t count);
+#endif
 
 /* 1-based interface from ewr_list_interfaces; 0 (the default) is automatic. */
 EWR_API void ewr_session_set_interface(ewr_session* session, int candidate);
@@ -199,6 +239,51 @@ EWR_API int ewr_dump(ewr_session* session, const char* model, char** out_json);
  * `ink` selects the cartridge ink reset over the waste pads.
  * {"model": ..., "phase": ..., "writes": {...}, "verification": {...}, ...} */
 EWR_API int ewr_reset(ewr_session* session, const char* model, int ink, char** out_json);
+
+/* ABI 3. Writes back what `file_contents` - a backup file or an --dump file,
+ * as text - holds of `model`'s own counter bytes: only the bytes a reset of
+ * that model writes, and only those that differ. The same lifecycle as
+ * ewr_reset, with the backup callback for what it overwrites. `model` may be
+ * NULL for the one the file names; a file for another model is
+ * EWR_ERR_BAD_BACKUP, as is one that cannot be read.
+ * {"model", "target": "restore", "source", "planned_writes", "skipped",
+ *  "missing", "unchanged", "phase", "writes", "verification", ...} */
+EWR_API int ewr_restore(ewr_session* session, const char* model, const char* file_contents, char** out_json);
+
+/* ABI 3. The expert restore: every byte of an --dump file that differs from
+ * the printer, not only the counters - except the serial, head ID, USB ID and
+ * network address, which are never written. It runs only on the unit the dump
+ * came from (the serial both name, or else the dump's identity bytes all read
+ * back unchanged); no callback can overrule that. `allow_unmapped` must be 1:
+ * it says the caller knows these are bytes no reset writes. Builds without
+ * EWR_RESTORE_ALL answer EWR_ERR_NOT_SUPPORTED. Same answer as ewr_restore. */
+EWR_API int ewr_restore_all(ewr_session* session, const char* model, const char* dump_contents,
+                            int allow_unmapped, char** out_json);
+
+/* ABI 3. Read-only. {"model", "printer", "firmware", "serial", "serial_source",
+ * "counters": [{"key", "value"}], "first_use", "fatal_errors": [{"kind",
+ * "slot", "code"}]}. `model` may be NULL: then only the status and firmware. */
+EWR_API int ewr_read_info(ewr_session* session, const char* model, char** out_json);
+
+/* ABI 3. The printer's own maintenance, with the gates and confirm callback a
+ * reset has, sent once and watched until the printer is done - minutes, not
+ * seconds. No EEPROM byte is written, but a cleaning uses ink and fills the
+ * waste pads. `model` may be NULL for a printer the database does not know:
+ * the cleaning then goes as print data, which has no levels.
+ *
+ * `level`: "gentle", "normal", "medium", "strong" - what the model lists; NULL
+ * is "normal". `power` non-zero is the ink charge instead of a cleaning, and
+ * ignores `level`. `print_data` non-zero sends it as print data even where
+ * the model has its own maintenance command.
+ * {"model", "action", "level", "group", "phase", "route", "sent", "reply",
+ *  "started", "seconds", "printer_before", "printer_after", "pads_before",
+ *  "pads_after", "overrides"} */
+EWR_API int ewr_head_clean(ewr_session* session, const char* model, const char* level, int group,
+                           int power, int print_data, char** out_json);
+
+/* ABI 3. Prints the nozzle check pattern: load plain paper. `variant` 1 asks
+ * for the alternate pattern. Same answer as ewr_head_clean. */
+EWR_API int ewr_nozzle_check(ewr_session* session, const char* model, int variant, char** out_json);
 
 #ifdef __cplusplus
 } /* extern "C" */

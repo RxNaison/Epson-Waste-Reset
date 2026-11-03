@@ -63,6 +63,24 @@ namespace ewr {
             return (buffer.size() > 3) ? buffer.size() - 3 : 0;
         }
 
+        // Room for several status reports (an L3060's is 122 bytes).
+        constexpr size_t kReceivedKept = 4096;
+
+        // Downstream parsers expect raw drained bytes, not a payload.
+        std::vector<unsigned char> FrameReply(uint8_t socket, const std::vector<unsigned char>& payload)
+        {
+            std::vector<unsigned char> framed;
+            const uint16_t total = static_cast<uint16_t>(payload.size() + 6);
+            framed.push_back(socket);
+            framed.push_back(socket);
+            framed.push_back(static_cast<unsigned char>((total >> 8) & 0xFF));
+            framed.push_back(static_cast<unsigned char>(total & 0xFF));
+            framed.push_back(0x00);
+            framed.push_back(0x01);
+            framed.insert(framed.end(), payload.begin(), payload.end());
+            return framed;
+        }
+
         // Whether `buffered` followed by `more` holds a whole packet, by the
         // same rules ReadPacket frames one with.
         bool HoldsWholePacket(const std::vector<unsigned char>& buffered, const std::vector<unsigned char>& more)
@@ -186,6 +204,10 @@ namespace ewr {
                 }
 
                 m_buffer.insert(m_buffer.end(), chunk.begin(), chunk.end());
+
+                m_received.insert(m_received.end(), chunk.begin(), chunk.end());
+                if (m_received.size() > kReceivedKept)
+                    m_received.erase(m_received.begin(), m_received.end() - static_cast<long>(kReceivedKept));
             }
             else if (Clock::now() >= deadline)
             {
@@ -1044,6 +1066,17 @@ namespace ewr {
                    + session.LastError() + ") - wrong USB interface or unsupported model.");
             reporter.Log(log::Level::Info, log::Stage::Handshake, "exec.handshake_failed",
                          "-> Handshake FAILED: " + session.LastError());
+
+            if (options.acceptPlainStatus)
+            {
+                const std::vector<unsigned char> report = d4::FindPlainStatus(session.Received());
+                if (!report.empty())
+                {
+                    result.plainStatus = FrameReply(d4::SOCKET_EPSON_CTRL, report);
+                    EmitTrace(reporter, "d4.plain_status", "[i] The printer is out of packet mode but sent its status"
+                        " by itself (" + std::to_string(report.size()) + " bytes); that answers this poll.");
+                }
+            }
             return result;
         }
 
@@ -1125,17 +1158,7 @@ namespace ewr {
             }
             else
             {
-                // Downstream parsers expect raw drained bytes, not a payload.
-                std::vector<unsigned char> framed;
-                const uint16_t total = static_cast<uint16_t>(reply.size() + 6);
-                framed.push_back(session.Socket());
-                framed.push_back(session.Socket());
-                framed.push_back(static_cast<unsigned char>((total >> 8) & 0xFF));
-                framed.push_back(static_cast<unsigned char>(total & 0xFF));
-                framed.push_back(0x00);
-                framed.push_back(0x01);
-                framed.insert(framed.end(), reply.begin(), reply.end());
-                result.replies.push_back(std::move(framed));
+                result.replies.push_back(FrameReply(session.Socket(), reply));
             }
         }
 

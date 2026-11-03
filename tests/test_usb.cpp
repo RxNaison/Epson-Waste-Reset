@@ -404,3 +404,36 @@ void test_driver_keeps_non_d4_fallbacks_for_non_d4_interfaces()
     CHECK(wrong.opened.size() == 4); // two quick sessions, then END4 and ESC/P Remote
     CHECK(sentNonD4(wrong.transport));
 }
+
+// A status poll on a printer out of packet mode: the print interface sends
+// its report by itself, which answers the poll there. Without it the run
+// walked on to the scanner interface (an L3060, PR #64).
+void test_driver_stops_at_a_plain_status_report()
+{
+    std::cout << "[TEST] test_driver_stops_at_a_plain_status_report" << std::endl;
+
+    const auto poll = [](bool accept) {
+        auto backend = std::make_unique<FakeBackend>(
+            "usbprint", std::vector<ewr::usb::Candidate>{ MakeCandidate("USBPRINT", 1), MakeCandidate("IMAGE", 0) });
+        backend->attemptsBase = 2;
+        backend->transport.replyFor = [](const std::vector<unsigned char>& sent) {
+            return IsEjlEnter(sent) ? L3060PlainCleaningReport() : std::vector<unsigned char>{};
+        };
+
+        ewr::ExecutorOptions options = LostReplyOptions();
+        options.acceptPlainStatus = accept;
+        std::ostringstream trace;
+        const ewr::QueryRunResult run = ewr::usb::RunQuerySession(
+            *backend, trace, ewr::d4::Handshake(), { ewr::ctrl::StatusQueryPacket() }, options);
+        return std::make_pair(run, backend->opened);
+    };
+
+    const auto [taken, takenOpened] = poll(true);
+    CHECK(takenOpened == std::vector<std::size_t>({ 0 }));
+    CHECK(taken.candidatesTried == 1);
+    CHECK(ewr::ctrl::ParseStatusReply(taken.query.plainStatus).stateCode == 0x07);
+
+    const auto [walked, walkedOpened] = poll(false);
+    CHECK(walkedOpened == std::vector<std::size_t>({ 0, 0, 1, 1, 1 }));
+    CHECK(walked.query.plainStatus.empty());
+}

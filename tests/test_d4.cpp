@@ -964,3 +964,64 @@ void test_d4_session_reports_whether_the_enter_was_answered()
     CHECK(healthy.success);
     CHECK(healthy.d4Answered);
 }
+
+// An L3060 at work on print data sends '@BDC ST2' by itself, outside packet
+// mode (PR #64). Only such a report counts: one inside a D4 packet belongs to
+// a session, and a report cut short says nothing.
+void test_d4_finds_a_status_report_sent_outside_packet_mode()
+{
+    std::cout << "[TEST] test_d4_finds_a_status_report_sent_outside_packet_mode" << std::endl;
+
+    const std::vector<unsigned char> cleaning = L3060PlainCleaningReport();
+    const std::vector<unsigned char> idle = ewr::d4::ExtractPayload(MakeSt2State(0x04));
+
+    CHECK(ewr::d4::FindPlainStatus(cleaning) == cleaning);
+    CHECK(ewr::ctrl::ParseStatusReply(WrapD4DataOnSocket(cleaning, 0x02)).stateCode == 0x07);
+
+    // The latest whole one, behind junk and an earlier report. The blanked
+    // serial ends the first in six equal bytes, a D4 header's socket pair
+    // and length, but no control byte.
+    std::vector<unsigned char> stream = { 0x15, 0x00 };
+    stream.insert(stream.end(), cleaning.begin(), cleaning.end());
+    stream.insert(stream.end(), idle.begin(), idle.end());
+    CHECK(ewr::d4::FindPlainStatus(stream) == idle);
+
+    // A report cut short leaves the whole one before it standing.
+    std::vector<unsigned char> cut = cleaning;
+    cut.insert(cut.end(), idle.begin(), idle.end() - 2);
+    CHECK(ewr::d4::FindPlainStatus(cut) == cleaning);
+    CHECK(ewr::d4::FindPlainStatus(std::vector<unsigned char>(cleaning.begin(), cleaning.end() - 1)).empty());
+
+    CHECK(ewr::d4::FindPlainStatus(MakeSt2State(0x04)).empty());
+    CHECK(ewr::d4::FindPlainStatus({}).empty());
+}
+
+// The handshake fails while the printer works through print data; the poll
+// is answered by the report it sent anyway, when the caller asks for that.
+void test_d4_query_session_takes_a_plain_status_report()
+{
+    std::cout << "[TEST] test_d4_query_session_takes_a_plain_status_report" << std::endl;
+
+    const auto poll = [](const std::vector<unsigned char>& onEnter, bool accept) {
+        FakeTransport t;
+        t.replyFor = [onEnter](const std::vector<unsigned char>& sent) {
+            return IsEjlEnter(sent) ? onEnter : std::vector<unsigned char>{};
+        };
+        ewr::ExecutorOptions options = LostReplyOptions();
+        options.acceptPlainStatus = accept;
+        ewr::log::Reporter reporter;
+        return ewr::d4::RunQuerySession(t, { ewr::ctrl::StatusQueryPacket() }, reporter, options);
+    };
+
+    const ewr::QuerySessionResult taken = poll(L3060PlainCleaningReport(), true);
+    CHECK(taken.handshakeFailed);
+    CHECK(!taken.plainStatus.empty());
+    CHECK(ewr::ctrl::ParseStatusReply(taken.plainStatus).stateCode == 0x07);
+
+    CHECK(poll(L3060PlainCleaningReport(), false).plainStatus.empty());
+
+    // A status reply in D4 framing is no plain report.
+    const ewr::QuerySessionResult framed = poll(MakeSt2State(0x04), true);
+    CHECK(framed.handshakeFailed);
+    CHECK(framed.plainStatus.empty());
+}

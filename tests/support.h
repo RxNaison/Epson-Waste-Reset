@@ -1521,6 +1521,21 @@ inline std::vector<unsigned char> MakeSt2State(int state, int error = -1)
     return WrapSt2Body(body);
 }
 
+// What an L3060 sent by itself, outside packet mode, about once a second
+// while it cleaned from print data (PR #64): state 0x07 CLEANING. Its serial
+// is blanked. "01 01 07 06" reads as a D4 header announcing 1798 bytes.
+inline std::vector<unsigned char> L3060PlainCleaningReport()
+{
+    return { 0x40, 0x42, 0x44, 0x43, 0x20, 0x53, 0x54, 0x32, 0x0d, 0x0a, 0x72, 0x00, 0x01, 0x01, 0x07, 0x06,
+             0x02, 0x01, 0x00, 0x0c, 0x02, 0xd5, 0x00, 0x0f, 0x0d, 0x03, 0x03, 0x01, 0x69, 0x04, 0x02, 0x69,
+             0x05, 0x03, 0x69, 0x01, 0x00, 0x69, 0x10, 0x03, 0x01, 0x09, 0x4e, 0x13, 0x01, 0x01, 0x19, 0x0c,
+             0x00, 0x00, 0x00, 0x00, 0x00, 0x75, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x24, 0x02, 0x00, 0x00,
+             0x28, 0x04, 0xff, 0x01, 0x00, 0x00, 0x2f, 0x01, 0x02, 0x36, 0x20, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0x4f, 0x04, 0x00, 0x00, 0x83, 0x01, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0xff,
+             0xff, 0xff, 0xff, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x37, 0x05, 0x02, 0x00, 0x00,
+             0x00, 0x00, 0x40, 0x0a, 'X', '0', '0', '0', '0', '0', '0', '0', '0', '0' };
+}
+
 // A printer whose status moves through a script, one entry per poll, and
 // that records every command and print job it is sent.
 struct MaintenanceGateway : ewr::IDeviceGateway
@@ -1530,6 +1545,11 @@ struct MaintenanceGateway : ewr::IDeviceGateway
     std::vector<std::vector<unsigned char>> statuses;
     size_t nextStatus = 0;
     bool goneWhenSilent = false;
+    // Statuses at these positions come only outside packet mode: the
+    // handshake fails, and a poll that accepts a plain report gets it.
+    std::set<size_t> outOfPacketMode;
+    // ExecutorOptions::acceptPlainStatus of every status query, in order.
+    std::vector<bool> pollsAcceptedPlain;
     std::map<uint16_t, uint8_t> eeprom;
     std::vector<std::vector<unsigned char>> commands;
     std::vector<std::vector<unsigned char>> jobs;
@@ -1538,7 +1558,7 @@ struct MaintenanceGateway : ewr::IDeviceGateway
 
     ewr::QueryRunResult RunQuery(const std::vector<std::vector<unsigned char>>&,
                                  const std::vector<std::vector<unsigned char>>& queries,
-                                 const ewr::ExecutorOptions&) override
+                                 const ewr::ExecutorOptions& options) override
     {
         ewr::QueryRunResult run;
         run.deviceFound = true;
@@ -1551,6 +1571,16 @@ struct MaintenanceGateway : ewr::IDeviceGateway
             {
                 const size_t i = std::min(nextStatus, statuses.size() - 1);
                 nextStatus++;
+                pollsAcceptedPlain.push_back(options.acceptPlainStatus);
+                if (outOfPacketMode.count(i))
+                {
+                    ewr::QueryRunResult plain;
+                    plain.deviceFound = true;
+                    plain.query.handshakeFailed = true;
+                    if (options.acceptPlainStatus)
+                        plain.query.plainStatus = statuses[i];
+                    return plain;
+                }
                 if (statuses[i].empty())
                 {
                     ewr::QueryRunResult silent;

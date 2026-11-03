@@ -123,6 +123,13 @@ namespace ewr {
             gateway.RunQuery(d4::Handshake(), queries, options);
 
         out.deviceFound = run.deviceFound;
+        if (run.deviceFound && run.query.handshakeFailed && !run.query.plainStatus.empty())
+        {
+            out.available = true;
+            out.status = ctrl::ParseStatusReply(run.query.plainStatus);
+            return out;
+        }
+
         if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
             return out;
 

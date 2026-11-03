@@ -99,7 +99,7 @@ Both come from the first USB session of a run that ends with the printer silent,
 | `maintenance.sending` | `route`: `factory`, `remote` or `factory_print`, `group`: `all`, `black` or `color` |
 | `maintenance.started` | `state`: the printer's state when it was first seen at work |
 | `maintenance.silent` | `seconds`: when the printer first left a status query unanswered after print data, which it does while it works on the job |
-| `maintenance.fallback` | `from`: `factory`, `reply`: the refusal (`\|\|:84:NA;`). The print-data cleaning is sent instead, once |
+| `maintenance.fallback` | `from`: `factory`, `to`: `remote` or `factory_print`, `reply`: the refusal (`\|\|:84:NA;`). The cleaning is sent as print data instead, once |
 | `maintenance.done` | `seconds`: from the send until the printer was idle again |
 | `maintenance.error` | `error`, `error_code`: what the printer reported while at it |
 | `maintenance.refused` | `reply`: the printer's answer to the maintenance command |
@@ -404,9 +404,9 @@ the printer was first used; its encoding is not known yet. A `fatal_errors`
 ```
 
 - `route` is `factory` (the model's own maintenance command, from its database
-  entry) or `remote` (ESC/P2 remote mode, sent as print data). `factory_print`
-  is an experiment the CLI reaches only through an undocumented flag: the
-  factory command sent as print data.
+  entry), `remote` (ESC/P2 remote mode, sent as print data) or
+  `factory_print` (the factory command sent as print data, `ESC |`). The last
+  comes from `fallback_from`, or from a flag the CLI does not document.
 - `phase` is `not_started`, `aborted`, `not_supported`, `device_not_found`,
   `send_failed`, `never_started`, `error`, `timed_out` or `done`. Only `done`
   is `ok: true`: the printer was seen at work, or stopped answering after
@@ -415,12 +415,15 @@ the printer was first used; its encoding is not known yet. A `fatal_errors`
   while it worked on print data. Print data and the status query share one
   channel, and the query waits behind the job, so the printer is not watched
   at work there. `started` is true in that case too. For a cleaning,
-  `pads_before` against `pads_after` shows whether it ran.
+  `pads_before` against `pads_after` shows whether it ran. A printer that
+  sends its status by itself during the job is watched from that instead,
+  and this stays false.
 - `fallback_from` (from 1.6) is `factory` when the printer refused the
   factory command with `||:84:NA;`, which means nothing ran. Then the
-  print-data cleaning was sent instead, once: `route` is `remote` and `reply`
-  keeps the refusal. Only at level `normal` and for `power-clean`, since the
-  print-data cleaning has no other level.
+  cleaning was sent as print data instead, once, and `reply` keeps the
+  refusal. At level `normal` and for `power-clean` that is the printer's own
+  cleaning (`route` is `remote`); at any other level, the same factory
+  command inside a print job (`route` is `factory_print`).
 - `pads_before` and `pads_after` are the waste counters before and after, as in
   `status`'s `pads`, so a caller can see what a cleaning used.
 - `overrides` has the reset's shape: five keys per entry, `detected_model` for a

@@ -153,8 +153,8 @@ namespace ewr::cli {
                           ? "    With the printer's own maintenance command, from its database entry."
                       : route == "factory_print"
                           ? "    EXPERIMENTAL: the printer's own maintenance command, sent as print data (ESC |).\n"
-                            "    Untested on any printer. If the printer does not take it, it may print a\n"
-                            "    few stray characters on a sheet."
+                            "    One printer (an L3060) has run it so far. If the printer does not take it,\n"
+                            "    it may print a few stray characters on a sheet."
                           : "    Sent as print data (ESC/P2 remote mode), which the printer takes like a job.")
                   << std::endl;
 
@@ -281,8 +281,7 @@ namespace ewr::cli {
         if (outcome.phase == ewr::MaintenancePhase::Done)
         {
             if (cli.nozzleCheck)
-                std::cout << "\n[i] Look at the page: a line with gaps is a clogged nozzle. If nothing printed,\n"
-                             "    try the alternate pattern (ewr --nozzle-check alt)." << std::endl;
+                std::cout << "\n[i] Look at the page: a line with gaps is a clogged nozzle." << std::endl;
             else
                 std::cout << "\n[i] Print a nozzle check (ewr --nozzle-check) to see whether it helped." << std::endl;
             return FinishRun(0);

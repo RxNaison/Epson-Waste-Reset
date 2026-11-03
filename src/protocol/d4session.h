@@ -68,6 +68,11 @@ namespace ewr::d4 {
         "This interface answered with HTTP (IPP-over-USB), not IEEE 1284.4 - it is the"
         " printer's IPP personality, so the maintenance channel is on another interface.";
 
+    // The last whole '@BDC ST2' report in `received` that no D4 header frames:
+    // what a printer out of packet mode sends by itself, as an L3060 working
+    // on print data does about once a second (PR #64). Empty when none.
+    std::vector<unsigned char> FindPlainStatus(const std::vector<unsigned char>& received);
+
     // ---- The session
 
     struct Packet
@@ -115,9 +120,14 @@ namespace ewr::d4 {
         // discard the status line as unframed junk before anyone saw it.
         bool SawHttpReply() const { return m_sawHttpReply; }
 
+        // The latest bytes read, framed or not, for FindPlainStatus: the
+        // resync drops a report sent outside packet mode as junk.
+        const std::vector<unsigned char>& Received() const { return m_received; }
+
     private:
         ITransport& m_transport;
         std::vector<unsigned char> m_buffer;
+        std::vector<unsigned char> m_received;
         bool m_sawHttpReply = false;
     };
 
@@ -181,6 +191,8 @@ namespace ewr::d4 {
         // IEEE 1284.4 however the rest of the handshake went. A bare NAK or an
         // HTTP status is not such an answer. Sticky across Restart().
         bool EnterAnswered() const { return m_enterAnswered; }
+
+        const std::vector<unsigned char>& Received() const { return m_framer.Received(); }
 
     private:
         bool SendPacket(uint8_t psid, uint8_t ssid, const std::vector<unsigned char>& payload, uint8_t credit);

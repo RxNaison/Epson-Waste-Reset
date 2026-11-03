@@ -38,6 +38,12 @@ namespace ewr {
         // keyless JIG mode. Takes precedence over useSessionLayer.
         bool jigMode = false;
 
+        // A status poll while the printer works on print data: when the D4
+        // handshake fails, an '@BDC ST2' report the printer sent outside
+        // packet mode answers the poll (QuerySessionResult::plainStatus), and
+        // the interface fallback stops there.
+        bool acceptPlainStatus = false;
+
         // --interface: pin the run to one candidate, identified by its
         // 1-based position in the enumeration order (the number --list
         // shows). Disables the automatic fallback. <= 0 means automatic.
@@ -125,6 +131,11 @@ namespace ewr {
         bool d4Answered = false;
         size_t packetsSent = 0;
         std::vector<std::vector<unsigned char>> replies;
+        // With ExecutorOptions::acceptPlainStatus only: the handshake failed,
+        // but the printer sent its last '@BDC ST2' report outside packet
+        // mode, as an L3060 at work on print data does (PR #64). Framed like
+        // a reply, so ctrl::ParseStatusReply reads it.
+        std::vector<unsigned char> plainStatus;
         std::string error;
     };
 

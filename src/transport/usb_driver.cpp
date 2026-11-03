@@ -853,7 +853,10 @@ namespace ewr {
 
                 closeGuard.Close();
 
-                if (!result.handshakeFailed || !pacer.Again(attempt, result.d4Answered, trace))
+                // A status report the printer sent outside packet mode is an
+                // answer from this interface (ExecutorOptions::acceptPlainStatus).
+                const bool answered = !result.handshakeFailed || !result.plainStatus.empty();
+                if (answered || !pacer.Again(attempt, result.d4Answered, trace))
                     break;
             }
 
@@ -862,15 +865,16 @@ namespace ewr {
 
             run.candidatesTried++;
             run.query = result;
-            NoteSilentPort(run.silentPort, cand, result.handshakeFailed);
+            const bool silent = result.handshakeFailed && result.plainStatus.empty();
+            NoteSilentPort(run.silentPort, cand, silent);
 
-            if (result.handshakeFailed && pinned < 1 && idx + 1 < candidates.size())
+            if (silent && pinned < 1 && idx + 1 < candidates.size())
             {
                 trace << "[!] Handshake failed on this interface. Falling back to the next candidate.\n\n";
                 continue;
             }
 
-            if (result.handshakeFailed && pinned >= 1)
+            if (silent && pinned >= 1)
                 trace << "[!] Handshake failed on the pinned interface. Fallback is disabled by the interface pin.\n\n";
 
             break;
@@ -879,7 +883,7 @@ namespace ewr {
         if (run.candidatesTried == 0)
             run.query.error = backend.DescribeOpenFailure(false);
         else
-            SettleSilentPort(run.silentPort, run.query.handshakeFailed, trace);
+            SettleSilentPort(run.silentPort, run.query.handshakeFailed && run.query.plainStatus.empty(), trace);
 
         return run;
     }

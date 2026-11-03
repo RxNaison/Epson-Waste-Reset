@@ -136,6 +136,42 @@ namespace ewr {
         return payload;
     }
 
+    std::vector<unsigned char> d4::FindPlainStatus(const std::vector<unsigned char>& received)
+    {
+        static const std::string kPrefix = "@BDC ST2\r\n";
+        constexpr size_t kHeader = 6;
+
+        std::vector<unsigned char> found;
+        for (auto it = received.begin();; ++it)
+        {
+            it = std::search(it, received.end(), kPrefix.begin(), kPrefix.end());
+            if (it == received.end())
+                break;
+
+            // '@BDC ST2', a 2-byte little-endian length, then that many bytes.
+            const size_t at = static_cast<size_t>(it - received.begin());
+            const size_t lengthAt = at + kPrefix.size();
+            if (lengthAt + 2 > received.size())
+                break;
+            const size_t end = lengthAt + 2 + (received[lengthAt] | (static_cast<size_t>(received[lengthAt + 1]) << 8));
+            if (end > received.size())
+                break;
+
+            // A reply inside a D4 data packet has the packet's header right
+            // before it: matching socket ids, a length that holds at least the
+            // prefix, and a control byte of 0 or 1 (end of message). That one
+            // belongs to a session, not to this.
+            const bool framed = at >= kHeader && received[at - kHeader] == received[at - kHeader + 1] &&
+                                received[at - kHeader] != 0x00 && received[at - 1] <= 0x01 &&
+                                ((static_cast<size_t>(received[at - 4]) << 8) | received[at - 3]) >=
+                                    kHeader + kPrefix.size() + 2;
+            if (!framed)
+                found.assign(received.begin() + static_cast<long>(at), received.begin() + static_cast<long>(end));
+        }
+
+        return found;
+    }
+
     PrinterStatus ctrl::ParseStatusReply(const std::vector<unsigned char>& raw)
     {
         PrinterStatus status;

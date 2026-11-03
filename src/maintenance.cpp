@@ -303,31 +303,32 @@ namespace ewr {
             if (!out.reply.empty() && out.reply.find(":84:OK") == std::string::npos)
             {
                 // NA is a plain no: on an L1800 and an L3060 nothing ran
-                // (PR #64). The print-data cleaning is the printer's own
-                // normal one, so it stands in for that level only.
+                // (PR #64), so the cleaning goes once more as print data. The
+                // printer's own cleaning (CH) is its normal level and ran on
+                // all three printers there; any other level goes as the same
+                // command inside a print job, which the L3060 ran.
                 const bool declined = out.reply.find(":84:NA") != std::string::npos;
-                const bool standIn = declined && (request.action == MaintenanceAction::PowerClean ||
-                                                  request.level == "normal");
 
-                m_reporter.Log(standIn ? log::Level::Warning : log::Level::Error, log::Stage::Write,
+                m_reporter.Log(declined ? log::Level::Warning : log::Level::Error, log::Stage::Write,
                                "maintenance.refused",
                                "[!] The printer refused the command (" + out.reply + ").",
                                { { "reply", out.reply } });
 
-                if (!standIn)
+                if (!declined)
                 {
                     out.phase = MaintenancePhase::SendFailed;
                     out.error = "The printer refused the command (" + out.reply + ").";
-                    if (declined)
-                        out.error += " The print-data cleaning runs only the printer's own level (\"normal\").";
                     return out;
                 }
 
+                const bool printersOwn = request.action == MaintenanceAction::PowerClean || request.level == "normal";
                 out.fallbackFrom = "factory";
-                out.route = "remote";
+                out.route = printersOwn ? "remote" : "factory_print";
                 m_reporter.Log(log::Level::Warning, log::Stage::Write, "maintenance.fallback",
-                               "[!] Nothing ran. Sending the printer's own cleaning as print data instead, once.",
-                               { { "from", "factory" }, { "reply", out.reply } });
+                               printersOwn
+                                   ? "[!] Nothing ran. Sending the printer's own cleaning as print data instead, once."
+                                   : "[!] Nothing ran. Sending the same command inside a print job instead, once.",
+                               { { "from", "factory" }, { "to", out.route }, { "reply", out.reply } });
             }
         }
 
@@ -338,11 +339,11 @@ namespace ewr {
             if (out.route == "factory_print")
             {
                 job = remote::BuildFactoryJob(ctrl::FactoryBody(m_model->rkey, ctrl::CMD_CLEAN, FactoryPayload(request)));
-                how = " as print data, in the form of its own maintenance command (experimental, level " +
+                how = " as print data, in the form of its own maintenance command (level " +
                       (request.action == MaintenanceAction::PowerClean ? std::string("charge") : request.level) + ")...";
             }
             else if (request.action == MaintenanceAction::NozzleCheck)
-                job = remote::BuildJob({ remote::NozzleCheck(request.nozzleVariant) });
+                job = remote::BuildJob({ remote::NozzleCheck(request.nozzleVariant) }, true);
             else
             {
                 const uint8_t group = request.group == CleanGroup::Black ? 1 : request.group == CleanGroup::Color ? 2 : 0;
@@ -415,9 +416,13 @@ namespace ewr {
                        "[*] Watching the printer's status until it is done...");
 
         // Print data and the status query share one channel, and the query
-        // waits behind the job: a printer at work on it does not answer at
-        // all (L350, L1800, L3060 in PR #64). There, silence is the work.
+        // waits behind the job: a printer at work on it does not answer in
+        // D4 (L350, L1800, L3060 in PR #64). An L3060 still sends its status
+        // outside packet mode about once a second, which the poll takes; an
+        // L350 sends nothing, and there silence is the work.
         const bool printData = out.route != "factory";
+        ExecutorOptions pollOptions = m_options;
+        pollOptions.acceptPlainStatus = printData;
 
         int silent = 0;
         for (;;)
@@ -425,7 +430,7 @@ namespace ewr {
             if (pollIntervalMs > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(pollIntervalMs));
 
-            const StateSnapshot now = status::Read(m_gateway, m_options);
+            const StateSnapshot now = status::Read(m_gateway, pollOptions);
             out.seconds = elapsed();
 
             if (!now.available || !now.status.valid)

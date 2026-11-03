@@ -58,7 +58,7 @@ namespace remote {
         return Command('J', 'E', { 0x00 });
     }
 
-    std::vector<unsigned char> BuildJob(const std::vector<std::vector<unsigned char>>& commands)
+    std::vector<unsigned char> BuildJob(const std::vector<std::vector<unsigned char>>& commands, bool printsPage)
     {
         std::vector<unsigned char> job = kLeavePacketMode;
 
@@ -66,6 +66,9 @@ namespace remote {
         for (const auto& command : commands)
             job.insert(job.end(), command.begin(), command.end());
         LeaveRemoteMode(job);
+
+        if (printsPage)
+            job.push_back(0x0C); // FF
 
         EnterRemoteMode(job);
         const std::vector<unsigned char> end = JobEnd();

@@ -24,6 +24,15 @@ void test_remote_mode_job_bytes()
     expected.insert(expected.end(), body.begin(), body.end());
     CHECK(job == expected);
 
+    // A job that prints a sheet ejects it with a form feed once remote mode
+    // is left, before the JE block.
+    std::vector<unsigned char> page = expected;
+    const std::vector<unsigned char> firstExit = { 'N', 'C', 0x02, 0x00, 0x00, 0x00, 0x1B, 0x00, 0x00, 0x00 };
+    page.insert(std::search(page.begin(), page.end(), firstExit.begin(), firstExit.end()) + firstExit.size(),
+                static_cast<unsigned char>(0x0C));
+    CHECK(ewr::remote::BuildJob({ ewr::remote::NozzleCheck() }, true) == page);
+    CHECK(std::count(job.begin(), job.end(), 0x0C) == 0);
+
     // The packet-mode exit: 27 bytes, five spaces, as the SX110 took it.
     CHECK(ewr::remote::kLeavePacketMode.size() == 27);
     CHECK(ewr::remote::kLeavePacketMode[3] == 0x1B);
@@ -339,6 +348,101 @@ void test_maintenance_print_data_watch_and_fallback()
         CHECK(gw.commands.empty() && gw.jobs.size() == 1);
         CHECK(gw.jobs[0] == ewr::remote::BuildFactoryJob(ewr::ctrl::FactoryBody(model.rkey, 0x84, { 0x02 })));
     }
+
+    // NA at a level the printer's own cleaning does not have: the same
+    // command goes inside a print job, once, as it ran on an L3060.
+    {
+        ewr::DbPrinterModel strong = model;
+        strong.cleaning.clean["strong"] = { 0x11 };
+        MaintenanceGateway gw;
+        gw.statuses = { MakeSt2State(0x04), silent, MakeSt2State(0x04) };
+        gw.commandReply = MakeCommandReply("||:84:NA;");
+        ewr::Maintenance maintenance(gw, &strong, reporter);
+        maintenance.pollIntervalMs = 0;
+
+        std::vector<ewr::log::Event> events;
+        const int sink = reporter.AddSink([&](const ewr::log::Event& e) { events.push_back(e); });
+
+        ewr::MaintenanceRequest request;
+        request.level = "strong";
+        const ewr::MaintenanceOutcome out = maintenance.Run(request);
+        reporter.RemoveSink(sink);
+        CHECK(out.phase == ewr::MaintenancePhase::Done);
+        CHECK(out.route == "factory_print" && out.fallbackFrom == "factory");
+        CHECK(out.reply == "||:84:NA;");
+        CHECK(gw.commands.size() == 1 && gw.commands[0] == ewr::ctrl::FactoryPacket(strong.rkey, 0x84, { 0x11 }));
+        CHECK(gw.jobs.size() == 1);
+        CHECK(gw.jobs[0] == ewr::remote::BuildFactoryJob(ewr::ctrl::FactoryBody(strong.rkey, 0x84, { 0x11 })));
+
+        const auto fallback = std::find_if(events.begin(), events.end(), [](const ewr::log::Event& e) {
+            return e.code == "maintenance.fallback";
+        });
+        CHECK(fallback != events.end() && fallback->fields.at("to") == "factory_print");
+    }
+}
+
+// An L3060 at work on print data does not answer in D4, but sends its status
+// outside packet mode; an L350 sends nothing (PR #64). The print-data watch
+// takes the report, so the printer is watched at work.
+void test_maintenance_watches_a_printer_out_of_packet_mode()
+{
+    std::cout << "[TEST] test_maintenance_watches_a_printer_out_of_packet_mode" << std::endl;
+
+    ewr::log::Reporter reporter;
+    ewr::DbPrinterModel model = MakeSessionModel();
+    model.cleaning.clean["normal"] = { 0x02 };
+
+    // Print data: CLEANING twice from outside packet mode, then idle.
+    {
+        MaintenanceGateway gw;
+        gw.statuses = { MakeSt2State(0x04), MakeSt2State(0x07), MakeSt2State(0x07), MakeSt2State(0x04) };
+        gw.outOfPacketMode = { 1, 2 };
+        ewr::Maintenance maintenance(gw, nullptr, reporter);
+        maintenance.pollIntervalMs = 0;
+
+        std::vector<ewr::log::Event> events;
+        const int sink = reporter.AddSink([&](const ewr::log::Event& e) { events.push_back(e); });
+
+        ewr::MaintenanceRequest request;
+        request.remoteOnly = true;
+        const ewr::MaintenanceOutcome out = maintenance.Run(request);
+        reporter.RemoveSink(sink);
+        CHECK(out.phase == ewr::MaintenancePhase::Done && out.started);
+        CHECK(!out.silentWhileWorking);
+        // The preflight reads as always; only the watch takes a plain report.
+        CHECK((gw.pollsAcceptedPlain == std::vector<bool>{ false, true, true, true }));
+
+        const auto started = std::find_if(events.begin(), events.end(), [](const ewr::log::Event& e) {
+            return e.code == "maintenance.started";
+        });
+        CHECK(started != events.end() && started->fields.at("state") == "CLEANING");
+    }
+
+    // Over EPSON-CTRL the printer stays in packet mode: no poll takes one.
+    {
+        MaintenanceGateway gw;
+        gw.statuses = { MakeSt2State(0x04), MakeSt2State(0x07), MakeSt2State(0x04) };
+        gw.commandReply = MakeCommandReply("||:84:OK;");
+        ewr::Maintenance maintenance(gw, &model, reporter);
+        maintenance.pollIntervalMs = 0;
+
+        const ewr::MaintenanceOutcome out = maintenance.Run({});
+        CHECK(out.route == "factory" && out.phase == ewr::MaintenancePhase::Done);
+        CHECK(std::none_of(gw.pollsAcceptedPlain.begin(), gw.pollsAcceptedPlain.end(), [](bool b) { return b; }));
+    }
+
+    // status::Read takes the plain report only when asked to.
+    {
+        MaintenanceGateway gw;
+        gw.statuses = { MakeSt2State(0x07) };
+        gw.outOfPacketMode = { 0 };
+
+        ewr::ExecutorOptions options;
+        CHECK(!ewr::status::Read(gw, options).available);
+        options.acceptPlainStatus = true;
+        const ewr::StateSnapshot plain = ewr::status::Read(gw, options);
+        CHECK(plain.available && plain.deviceFound && plain.status.stateCode == 0x07);
+    }
 }
 
 void test_maintenance_stops_where_it_should()
@@ -362,24 +466,6 @@ void test_maintenance_stops_where_it_should()
         CHECK(out.fallbackFrom.empty());
         CHECK(gw.commands.size() == 1 && gw.jobs.empty());
         CHECK(gw.nextStatus == 1); // the preflight only
-    }
-
-    // NA at a level only the factory command has: refused, no stand-in.
-    {
-        ewr::DbPrinterModel strong = model;
-        strong.cleaning.clean["strong"] = { 0x11 };
-        MaintenanceGateway gw;
-        gw.statuses = { MakeSt2State(0x04) };
-        gw.commandReply = MakeCommandReply("||:84:NA;");
-        ewr::Maintenance maintenance(gw, &strong, reporter);
-        maintenance.pollIntervalMs = 0;
-
-        ewr::MaintenanceRequest request;
-        request.level = "strong";
-        const ewr::MaintenanceOutcome out = maintenance.Run(request);
-        CHECK(out.phase == ewr::MaintenancePhase::SendFailed);
-        CHECK(out.error.find("\"normal\"") != std::string::npos);
-        CHECK(gw.commands.size() == 1 && gw.jobs.empty());
     }
 
     // No answer at all: sent once, and the status decides.
@@ -423,7 +509,7 @@ void test_maintenance_stops_where_it_should()
         CHECK(out.phase == ewr::MaintenancePhase::NeverStarted);
         CHECK(out.route == "remote");
         CHECK(gw.jobs.size() == 1 && gw.commands.empty());
-        CHECK(gw.jobs[0] == ewr::remote::BuildJob({ ewr::remote::NozzleCheck() }));
+        CHECK(gw.jobs[0] == ewr::remote::BuildJob({ ewr::remote::NozzleCheck() }, true));
     }
 
     // An error mid-way ends the watch with the printer's own words.

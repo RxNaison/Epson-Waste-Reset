@@ -23,6 +23,9 @@ namespace ewr::d4 {
     constexpr uint8_t CMD_CREDIT_REQUEST = 0x04;
     constexpr uint8_t CMD_EXIT           = 0x08;
     constexpr uint8_t CMD_GET_SOCKET_ID  = 0x09;
+    // The EJL enter is itself a transaction packet whose command byte is the
+    // 'E' of "EJL", so a D4 engine answers it 0xC5 like any other command.
+    constexpr uint8_t CMD_EJL_ENTER      = 0x45;
     constexpr uint8_t CMD_ERROR          = 0x7F;
     constexpr uint8_t REPLY_BIT          = 0x80;
     constexpr uint8_t INIT_REVISION      = 0x10;
@@ -174,6 +177,11 @@ namespace ewr::d4 {
         // interface" from a printer that simply never answered.
         bool SawHttpReply() const { return m_framer.SawHttpReply(); }
 
+        // A D4 engine answered the EJL enter, so this interface speaks
+        // IEEE 1284.4 however the rest of the handshake went. A bare NAK or an
+        // HTTP status is not such an answer. Sticky across Restart().
+        bool EnterAnswered() const { return m_enterAnswered; }
+
     private:
         bool SendPacket(uint8_t psid, uint8_t ssid, const std::vector<unsigned char>& payload, uint8_t credit);
         // Absorbs credit/error traffic until the wanted reply code arrives.
@@ -199,6 +207,7 @@ namespace ewr::d4 {
         SessionOptions m_options;
 
         bool m_started = false;
+        bool m_enterAnswered = false;
         bool m_closed = false;
         bool m_channelOpen = false;
         uint8_t m_socket = SOCKET_EPSON_CTRL;

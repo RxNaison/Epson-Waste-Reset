@@ -48,7 +48,9 @@ namespace ewr {
         // GetSocketID and OpenChannel for over eight seconds mid-dump, then
         // recovered by itself (issue #39). So a session that cannot be rebuilt
         // is tried again this many times, waiting sessionRestartBackoffMs
-        // before the second attempt and doubling it after each one.
+        // before the second attempt and doubling it after each one. A first
+        // handshake that fails after the EJL enter drew a D4 answer gets the
+        // same, on fresh opens (#68).
         int sessionRestartAttempts = 4;
         int sessionRestartBackoffMs = 2000;
 
@@ -100,6 +102,9 @@ namespace ewr {
         bool handshakeConfirmed = false;
         // Nothing was written; callers may retry another interface.
         bool handshakeFailed = false;
+        // The interface answered the EJL enter in IEEE 1284.4 framing, so a
+        // failed handshake there is a printer that paused, not a wrong interface.
+        bool d4Answered = false;
         // At least one write drew replies, but ':42:OK;' never arrived.
         bool writesUnverified = false;
         // A write was retried with the alternate keyword ('wkey1') after
@@ -116,6 +121,8 @@ namespace ewr {
         bool handshakeConfirmed = false;
         // No queries were sent; callers may retry another interface.
         bool handshakeFailed = false;
+        // As in ExecutionResult.
+        bool d4Answered = false;
         size_t packetsSent = 0;
         std::vector<std::vector<unsigned char>> replies;
         std::string error;

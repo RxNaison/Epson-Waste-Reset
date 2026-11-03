@@ -3,12 +3,15 @@
 #include "ewr/usb.h"
 
 #include <cstdint>
+#include <ostream>
 #include <string>
 #include <vector>
 
 // The platform-neutral driver loop over every Epson interface: candidate
 // iteration, the --interface pin, retry and fallback, and the trace.
 namespace ewr::usb {
+
+    class Backend;
 
     constexpr uint16_t EPSON_VID = 0x04B8;
 
@@ -39,6 +42,17 @@ namespace ewr::usb {
                                    const std::vector<std::vector<unsigned char>>& queries,
                                    const ExecutorOptions& options,
                                    bool appendTraceLog = false);
+
+    // The same two runs over a given backend and trace stream instead of the
+    // platform's and ewr_trace.log: the seam the driver-loop tests drive.
+    ResetRunResult RunSequence(Backend& backend, std::ostream& trace,
+                               const std::vector<std::vector<unsigned char>>& sequence,
+                               const ExecutorOptions& options);
+
+    QueryRunResult RunQuerySession(Backend& backend, std::ostream& trace,
+                                   const std::vector<std::vector<unsigned char>>& handshake,
+                                   const std::vector<std::vector<unsigned char>>& queries,
+                                   const ExecutorOptions& options);
 
     struct PrintDataRunResult
     {

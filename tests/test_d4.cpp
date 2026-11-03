@@ -911,3 +911,56 @@ void test_d4_session_reports_the_http_personality()
     CHECK(result.handshakeFailed);
     CHECK(result.error == ewr::d4::kHttpPersonalityError);
 }
+
+// The driver waits out a failed handshake only where a D4 engine answered the
+// EJL enter (#68). An ET-2800's print interface answers with a bare NAK and
+// its IPP personality with HTTP; neither is such an answer.
+void test_d4_session_reports_whether_the_enter_was_answered()
+{
+    std::cout << "[TEST] test_d4_session_reports_whether_the_enter_was_answered" << std::endl;
+
+    using Replier = std::function<std::vector<unsigned char>(const std::vector<unsigned char>&)>;
+    const auto query = [](const Replier& replier) {
+        FakeTransport t;
+        t.replyFor = replier;
+        ewr::log::Reporter reporter;
+        return ewr::d4::RunQuerySession(t, LostReplyQueries(), reporter, LostReplyOptions());
+    };
+
+    // The EP-706A in #68: the enter answered, Init not.
+    const Replier paused = [](const std::vector<unsigned char>& sent) {
+        return IsEjlEnter(sent) ? D4Frame(0x00, 0x00, { 0xC5, 0x00 }, 0x01) : std::vector<unsigned char>{};
+    };
+
+    const ewr::QuerySessionResult pausedQuery = query(paused);
+    CHECK(pausedQuery.handshakeFailed);
+    CHECK(pausedQuery.d4Answered);
+
+    FakeTransport pausedReset;
+    pausedReset.replyFor = paused;
+    ewr::log::Reporter reporter;
+    const ewr::ExecutionResult reset =
+        ewr::d4::RunSequence(pausedReset, legacy::GenerateSequence(MakeTestModel()), reporter, LostReplyOptions());
+    CHECK(reset.handshakeFailed);
+    CHECK(reset.d4Answered);
+
+    const ewr::QuerySessionResult nak = query([](const std::vector<unsigned char>&) {
+        return std::vector<unsigned char>{ 0x15 };
+    });
+    CHECK(nak.handshakeFailed);
+    CHECK(!nak.d4Answered);
+
+    const ewr::QuerySessionResult http = query([](const std::vector<unsigned char>&) { return Http500Reply(); });
+    CHECK(http.handshakeFailed);
+    CHECK(!http.d4Answered);
+
+    const ewr::QuerySessionResult silent = query([](const std::vector<unsigned char>&) {
+        return std::vector<unsigned char>{};
+    });
+    CHECK(silent.handshakeFailed);
+    CHECK(!silent.d4Answered);
+
+    const ewr::QuerySessionResult healthy = query(D4SessionReplier(0x02, EchoReadReply));
+    CHECK(healthy.success);
+    CHECK(healthy.d4Answered);
+}

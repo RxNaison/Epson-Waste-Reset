@@ -431,9 +431,22 @@ inline std::vector<unsigned char> D4Frame(unsigned char psid, unsigned char ssid
     return raw;
 }
 
-// Answers the D4 session choreography like a real R220: Init, GetSocketID,
-// OpenChannel (MTU to printer configurable, MTU to host 256, no initial
-// credit), credit grants of 1, close/exit. Data packets go to dataReplyFor.
+// The 27-byte enter: a transaction header whose control byte is the '@' of
+// "@EJL", so byte 6 is its 'E'.
+inline bool IsEjlEnter(const std::vector<unsigned char>& sent)
+{
+    return sent.size() == 27 && sent[0] == 0x00 && sent[1] == 0x00 && sent[5] == '@' && sent[6] == 'E';
+}
+
+inline bool IsD4Init(const std::vector<unsigned char>& sent)
+{
+    return sent.size() >= 7 && sent[0] == 0x00 && sent[1] == 0x00 && sent[6] == ewr::d4::CMD_INIT;
+}
+
+// Answers the D4 session choreography like a real R220: the EJL enter, Init,
+// GetSocketID, OpenChannel (MTU to printer configurable, MTU to host 256, no
+// initial credit), credit grants of 1, close/exit. Data packets go to
+// dataReplyFor.
 inline std::function<std::vector<unsigned char>(const std::vector<unsigned char>&)>
 D4SessionReplier(unsigned char socket,
                  std::function<std::vector<unsigned char>(const std::vector<unsigned char>&)> dataReplyFor,
@@ -445,8 +458,7 @@ D4SessionReplier(unsigned char socket,
         if (sent.size() < 7)
             return {};
 
-        // EJL enter blob: transaction header followed by the '@EJL' magic.
-        if (sent[0] == 0x00 && sent[1] == 0x00 && sent[6] == '@')
+        if (IsEjlEnter(sent))
             return D4Frame(0x00, 0x00, { 0xC5, 0x00 }, 0x01);
 
         if (sent[0] == 0x00 && sent[1] == 0x00)
@@ -508,7 +520,7 @@ public:
         if (sent.size() < 7)
             return {};
 
-        if (sent[0] == 0x00 && sent[1] == 0x00 && sent[6] == '@')
+        if (IsEjlEnter(sent))
             return D4Frame(0x00, 0x00, { 0xC5, 0x00 }, 0x01);
 
         if (sent[0] == 0x00 && sent[1] == 0x00)

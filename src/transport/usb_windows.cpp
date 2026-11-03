@@ -806,8 +806,9 @@ namespace ewr {
 
                 const ULONGLONG start = GetTickCount64();
 
-                // Shared because the Spooler and Epson Status Monitor routinely
-                // hold this device open and an exclusive open just fails.
+                // usbprint.sys ignores the share mode: on an R220 a second open
+                // succeeded even while an exclusive one was held. So no flag here
+                // keeps another process from reading this device's replies.
                 HANDLE handle = CreateFile(candidates_[ordinal].path.c_str(), GENERIC_READ | GENERIC_WRITE,
                     FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
                     FILE_FLAG_OVERLAPPED | FILE_FLAG_WRITE_THROUGH, NULL);

@@ -71,6 +71,8 @@ namespace ewr::usb {
         // and a Windows run carries both - hence per candidate, not per
         // backend. There is no in-place retry: a failed session is always
         // closed first, so the second attempt inherits nothing from the first.
+        // An interface that answered in D4 framing gets the spaced
+        // sessionRestartAttempts instead (usb_driver.cpp).
         virtual int AttemptsPerCandidate(std::size_t ordinal) const = 0;
 
         // "" when the candidate's class cannot answer.

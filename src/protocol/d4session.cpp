@@ -386,6 +386,9 @@ namespace ewr {
             if (m_framer.ReadPacket(ignored, m_options.replyTimeoutMs, m_reporter))
             {
                 EmitTrace(m_reporter, "d4.rx", "[IN]  D4 pre-session reply (" + std::to_string(ignored.payload.size()) + " payload bytes)");
+                if (ignored.IsTransaction() && !ignored.payload.empty()
+                    && ignored.payload[0] == (d4::CMD_EJL_ENTER | d4::REPLY_BIT))
+                    m_enterAnswered = true;
                 Absorb(ignored);
             }
         }
@@ -770,7 +773,10 @@ namespace ewr {
 
         EmitTrace(reporter, "d4.banner", "=== IEEE 1284.4 SESSION CORE ===\n");
 
-        if (!session.Start())
+        const bool started = session.Start();
+        result.d4Answered = session.EnterAnswered();
+
+        if (!started)
         {
             result.handshakeFailed = true;
             result.error = session.SawHttpReply()
@@ -1026,7 +1032,10 @@ namespace ewr {
 
         EmitTrace(reporter, "d4.banner", "=== IEEE 1284.4 SESSION CORE (read-only) ===\n");
 
-        if (!session.Start())
+        const bool started = session.Start();
+        result.d4Answered = session.EnterAnswered();
+
+        if (!started)
         {
             result.handshakeFailed = true;
             result.error = session.SawHttpReply()

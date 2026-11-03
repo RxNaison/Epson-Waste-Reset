@@ -298,3 +298,109 @@ void test_composite_runs_on_the_transports_that_came_up()
     CHECK(dead->InitError() == "SetupAPI enumeration failed.");
     CHECK(dead->Enumerate().empty());
 }
+
+// The EP-706A in #68 answered the EJL enter, then left Init unanswered on two
+// back-to-back sessions, and the reset gave up seconds before it answered
+// again. An interface that answered in D4 framing is waited for, on fresh
+// sessions, before the next interface is tried.
+void test_driver_waits_out_a_d4_interface_that_paused()
+{
+    std::cout << "[TEST] test_driver_waits_out_a_d4_interface_that_paused" << std::endl;
+
+    FakeBackend backend("usbprint", { MakeCandidate("USBPRINT", 1), MakeCandidate("IMAGE", 0) });
+    backend.attemptsBase = 2; // usbprint's quick attempts
+
+    int inits = 0;
+    const auto printer = D4SessionReplier(0x02, EchoReadReply);
+    backend.transport.replyFor = [&inits, printer](const std::vector<unsigned char>& sent) {
+        if (IsD4Init(sent) && ++inits <= 3)
+            return std::vector<unsigned char>{};
+        return printer(sent);
+    };
+
+    std::vector<ewr::log::Event> events;
+    const int sinkId = ewr::log::Default().AddSink([&](const ewr::log::Event& e) { events.push_back(e); });
+
+    std::ostringstream trace;
+    const ewr::QueryRunResult run = ewr::usb::RunQuerySession(
+        backend, trace, ewr::d4::Handshake(), LostReplyQueries(), LostReplyOptions());
+
+    ewr::log::Default().RemoveSink(sinkId);
+
+    CHECK(run.query.success);
+    CHECK(CountAnsweredReads(run.query) == 6);
+    // Three paused sessions and the one that answered, all on the printer
+    // interface: the scanner behind it is never tried.
+    CHECK(backend.opened == std::vector<std::size_t>({ 0, 0, 0, 0 }));
+    CHECK(trace.str().find("before fresh session attempt 4 of 4") != std::string::npos);
+    CHECK(std::count_if(events.begin(), events.end(), [](const ewr::log::Event& e) {
+              return e.code == "d4.session_recovering";
+          }) == 1);
+}
+
+// A wrong interface answers the enter with something that is not D4 - the
+// ET-2800's print interface with a bare NAK (#16) - and still falls through
+// after the backend's quick attempts, without a wait.
+void test_driver_falls_through_a_non_d4_interface_without_waiting()
+{
+    std::cout << "[TEST] test_driver_falls_through_a_non_d4_interface_without_waiting" << std::endl;
+
+    FakeBackend backend("usbprint", { MakeCandidate("USBPRINT", 1), MakeCandidate("IMAGE", 0) });
+    backend.attemptsBase = 2;
+    backend.transport.replyFor = [](const std::vector<unsigned char>&) {
+        return std::vector<unsigned char>{ 0x15 };
+    };
+
+    std::ostringstream trace;
+    const ewr::QueryRunResult run = ewr::usb::RunQuerySession(
+        backend, trace, ewr::d4::Handshake(), LostReplyQueries(), LostReplyOptions());
+
+    CHECK(!run.query.success);
+    CHECK(run.query.handshakeFailed);
+    // FakeBackend gives ordinal 1 one quick attempt more than ordinal 0.
+    CHECK(backend.opened == std::vector<std::size_t>({ 0, 0, 1, 1, 1 }));
+    CHECK(trace.str().find("before fresh session attempt") == std::string::npos);
+}
+
+// END4's flush only ever drew a malformed-packet error from a D4 engine (#68),
+// so an interface that answered in D4 framing gets no non-D4 fallback. One
+// that did not still gets END4 and ESC/P Remote.
+void test_driver_keeps_non_d4_fallbacks_for_non_d4_interfaces()
+{
+    std::cout << "[TEST] test_driver_keeps_non_d4_fallbacks_for_non_d4_interfaces" << std::endl;
+
+    const auto sequence = legacy::GenerateSequence(MakeTestModel());
+    const auto sentNonD4 = [](const FakeTransport& t) {
+        return std::any_of(t.sent.begin(), t.sent.end(), [](const std::vector<unsigned char>& p) {
+            const bool end4 = p.size() >= 4 && p[0] == 'E' && p[1] == 'N' && p[2] == 'D' && p[3] == '4';
+            const bool escRemote = p.size() >= 2 && p[0] == 0x1B && p[1] == '@';
+            return end4 || escRemote;
+        });
+    };
+
+    FakeBackend paused("usbprint", { MakeCandidate("USBPRINT", 1) });
+    paused.attemptsBase = 2;
+    paused.transport.replyFor = [](const std::vector<unsigned char>& sent) {
+        return IsEjlEnter(sent) ? D4Frame(0x00, 0x00, { 0xC5, 0x00 }, 0x01) : std::vector<unsigned char>{};
+    };
+
+    std::ostringstream pausedTrace;
+    const ewr::ResetRunResult pausedRun = ewr::usb::RunSequence(paused, pausedTrace, sequence, LostReplyOptions());
+    CHECK(!pausedRun.exec.success);
+    CHECK(pausedRun.exec.handshakeFailed);
+    CHECK(paused.opened.size() == 4); // the paced sessions, and nothing after them
+    CHECK(!sentNonD4(paused.transport));
+    CHECK(pausedTrace.str().find("END4 and ESC/P Remote skipped") != std::string::npos);
+
+    FakeBackend wrong("usbprint", { MakeCandidate("USBPRINT", 1) });
+    wrong.attemptsBase = 2;
+    wrong.transport.replyFor = [](const std::vector<unsigned char>&) {
+        return std::vector<unsigned char>{ 0x15 };
+    };
+
+    std::ostringstream wrongTrace;
+    const ewr::ResetRunResult wrongRun = ewr::usb::RunSequence(wrong, wrongTrace, sequence, LostReplyOptions());
+    CHECK(!wrongRun.exec.success);
+    CHECK(wrong.opened.size() == 4); // two quick sessions, then END4 and ESC/P Remote
+    CHECK(sentNonD4(wrong.transport));
+}

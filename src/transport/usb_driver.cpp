@@ -364,6 +364,106 @@ namespace ewr {
             return outcome;
         }
 
+        // END4 first: it is Epson's own framing and the one the captures show.
+        // ESC/P Remote follows because it assumes least about the transport,
+        // so it is what is left standing when END4 draws nothing back. True
+        // when one of them reset the counter, with `exec` carrying that outcome;
+        // otherwise `exec` keeps its silent-handshake status, so the caller
+        // still moves on, and takes the last path's reason.
+        bool RunNonD4Fallbacks(usb::Backend& backend,
+                               const usb::Candidate& cand,
+                               const std::vector<std::vector<unsigned char>>& sequence,
+                               const ExecutorOptions& options,
+                               std::ostream& trace,
+                               ExecutionResult& exec)
+        {
+            for (const NonD4Path path : { NonD4Path::End4, NonD4Path::EscRemote })
+            {
+                const FallbackAttempt attempt = TryNonD4Fallback(backend, cand, sequence, options, trace, path);
+                if (!attempt.attempted)
+                    return false; // no factory writes at all - neither path applies
+
+                if (attempt.success)
+                {
+                    exec.success = true;
+                    exec.handshakeFailed = false;
+                    exec.writesTotal = attempt.writesTotal;
+                    exec.writesVerified = attempt.writesVerified;
+                    exec.error.clear();
+                    log::Log(log::Level::Info, log::Stage::Write, "usb.fallback_success",
+                             "[SUCCESS] Direct-control fallback reset the counter ("
+                                 + std::to_string(attempt.writesVerified) + "/"
+                                 + std::to_string(attempt.writesTotal) + " writes verified).");
+                    return true;
+                }
+
+                exec.error = attempt.error;
+            }
+
+            return false;
+        }
+
+        // How many fresh sessions one candidate gets, and the wait before each.
+        // An interface whose D4 engine answered the EJL enter has paused when
+        // its handshake then fails, not refused: an EP-706A left two
+        // back-to-back Inits unanswered and was answering again two seconds
+        // after the second gave up (#68). Such an interface gets the doubling
+        // wait a session restart gets. One that never answered in D4 keeps the
+        // backend's quick attempts, so a wrong interface still falls through fast.
+        class FreshSessionPacer
+        {
+        public:
+            FreshSessionPacer(const ExecutorOptions& options, int quickAttempts)
+                : quick_(std::max(quickAttempts, 1))
+                , paced_(std::max(quick_, options.sessionRestartAttempts))
+                , waitMs_(std::max(options.sessionRestartBackoffMs, 0))
+            {
+            }
+
+            int Limit() const { return d4Answered_ ? paced_ : quick_; }
+
+            bool D4Answered() const { return d4Answered_; }
+
+            // After attempt `done` (1-based) failed its handshake: false once
+            // the candidate is spent, otherwise waits out what is due first.
+            bool Again(int done, bool d4Answered, std::ostream& trace)
+            {
+                d4Answered_ = d4Answered_ || d4Answered;
+                if (done >= Limit())
+                    return false;
+
+                if (!d4Answered_)
+                {
+                    trace << "[!] Handshake silent - retrying this interface with a brand-new session (fresh open).\n";
+                    return true;
+                }
+
+                if (!announced_)
+                {
+                    announced_ = true;
+                    log::Log(log::Level::Info, log::Stage::Handshake, "d4.session_recovering",
+                             "[!] The printer stopped answering - waiting for it to come back...");
+                }
+
+                trace << "[!] This interface answered in IEEE 1284.4 framing, so its failed handshake is a pause."
+                      << " Waiting " << waitMs_ << " ms before fresh session attempt " << (done + 1)
+                      << " of " << Limit() << ".\n";
+
+                if (waitMs_ > 0)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(waitMs_));
+
+                waitMs_ *= 2;
+                return true;
+            }
+
+        private:
+            int quick_;
+            int paced_;
+            int waitMs_;
+            bool d4Answered_ = false;
+            bool announced_ = false;
+        };
+
         // The printer has finished initializing: it is ready, or reporting
         // the error it is really in.
         bool IsRestingState(const PrinterStatus& status)
@@ -537,16 +637,21 @@ namespace ewr {
                                                       const ExecutorOptions& options,
                                                       bool appendTraceLog)
     {
+        TraceLog traceLog(appendTraceLog);
+        std::unique_ptr<usb::Backend> backend = usb::CreateBackend(traceLog.stream);
+        return usb::RunSequence(*backend, traceLog.stream, sequence, options);
+    }
+
+    ResetRunResult usb::RunSequence(usb::Backend& backend, std::ostream& trace,
+                                    const std::vector<std::vector<unsigned char>>& sequence,
+                                    const ExecutorOptions& options)
+    {
         ResetRunResult run;
 
-        TraceLog traceLog(appendTraceLog);
-        std::ostream& trace = traceLog.stream;
-        std::unique_ptr<usb::Backend> backend = usb::CreateBackend(trace);
-
-        WriteTraceBanner(trace, std::string("EWR HARDWARE TRACE LOG (") + backend->PlatformName() + ")", &options.trace);
+        WriteTraceBanner(trace, std::string("EWR HARDWARE TRACE LOG (") + backend.PlatformName() + ")", &options.trace);
 
         std::vector<usb::Candidate> candidates;
-        if (!PrepareCandidates(*backend, trace, options, candidates, run.deviceFound, run.exec.error))
+        if (!PrepareCandidates(backend, trace, options, candidates, run.deviceFound, run.exec.error))
             return run;
 
         const int pinned = options.interfaceCandidate;
@@ -557,7 +662,7 @@ namespace ewr {
         log::Log(log::Level::Info, log::Stage::Detect, "usb.device_detected",
                  "[SUCCESS] Auto-detected Epson Printer (PID: " + candidates[0].pid + ")");
         log::Log(log::Level::Info, log::Stage::General, "usb.sequence_begin",
-                 std::string("\nExecuting universal ") + backend->PlatformName() + " hardware state machine...");
+                 std::string("\nExecuting universal ") + backend.PlatformName() + " hardware state machine...");
         log::Log(log::Level::Info, log::Stage::General, "usb.trace_log",
                  "[i] Saving hardware trace to ewr_trace.log for diagnostics.");
 
@@ -568,23 +673,23 @@ namespace ewr {
             if (pinned >= 1 && static_cast<int>(idx) + 1 != pinned)
                 continue;
 
-            WriteSelectionDecision(trace, *backend, cand, idx, candidates.size());
+            WriteSelectionDecision(trace, backend, cand, idx, candidates.size());
 
             if (options.usbSoftReset)
-                SoftResetAndSettle(*backend, cand, options, trace);
+                SoftResetAndSettle(backend, cand, options, trace);
 
             // A silent handshake is never repaired on a live handle: the retry
             // is a brand-new session that inherits nothing from the failed one.
             ExecutionResult result;
             bool opened = false;
-            const int attempts = backend->AttemptsPerCandidate(cand.ordinal);
-            for (int attempt = 0; attempt < attempts; ++attempt)
+            FreshSessionPacer pacer(options, backend.AttemptsPerCandidate(cand.ordinal));
+            for (int attempt = 1;; ++attempt)
             {
                 trace << "[Session] Candidate " << (idx + 1) << " of " << candidates.size()
-                      << ", attempt " << (attempt + 1) << " of " << attempts
+                      << ", attempt " << attempt << " of " << pacer.Limit()
                       << ": starting a fresh session.\n";
 
-                ITransport* transport = backend->Open(cand.ordinal);
+                ITransport* transport = backend.Open(cand.ordinal);
                 if (!transport)
                     break;
 
@@ -592,11 +697,11 @@ namespace ewr {
 
                 trace << "\n==================================================\n";
                 trace << "BEGIN PAYLOAD SEQUENCE EXECUTION\n";
-                trace << "Interface:     " << backend->Describe(cand.ordinal) << "\n";
+                trace << "Interface:     " << backend.Describe(cand.ordinal) << "\n";
                 trace << "Total Packets: " << sequence.size() << "\n";
                 trace << "==================================================\n\n";
 
-                ScopedBackendClose closeGuard(*backend);
+                ScopedBackendClose closeGuard(backend);
 
                 // Host sinks plus this run's trace file, at Trace level so the
                 // file gets full hex detail alongside the user-facing lines.
@@ -616,11 +721,8 @@ namespace ewr {
                 closeGuard.Close();
                 log::Log(log::Level::Info, log::Stage::General, "usb.lock_released", "Hardware lock released.");
 
-                if (!result.handshakeFailed)
+                if (!result.handshakeFailed || !pacer.Again(attempt, result.d4Answered, trace))
                     break;
-
-                if (attempt + 1 < attempts)
-                    trace << "[!] Handshake silent - retrying this interface with a brand-new session (fresh open).\n";
             }
 
             if (!opened)
@@ -630,45 +732,18 @@ namespace ewr {
             run.exec = result;
             NoteSilentPort(run.silentPort, cand, result.handshakeFailed);
 
-            // D4 stayed silent: try END4 on this same interface before moving
-            // to the next candidate. Once per run, on the first silent one.
+            // The handshake failed: try the non-D4 paths on this same interface
+            // before moving to the next candidate. Once per run, on the first
+            // such interface. One that answered in D4 framing uses up that turn
+            // without them: it is a D4 engine that paused, and all END4's flush
+            // ever drew from one was a malformed-packet error (#68).
             if (result.handshakeFailed && !fallbackAttempted)
             {
                 fallbackAttempted = true;
 
-                // END4 first: it is Epson's own framing and the one the captures
-                // show. ESC/P Remote follows because it assumes least about the
-                // transport, so it is what is left standing when END4 draws
-                // nothing back.
-                bool counterReset = false;
-                for (const NonD4Path path : { NonD4Path::End4, NonD4Path::EscRemote })
-                {
-                    const FallbackAttempt attempt =
-                        TryNonD4Fallback(*backend, cand, sequence, options, trace, path);
-                    if (!attempt.attempted)
-                        break; // no factory writes at all - neither path applies
-
-                    if (attempt.success)
-                    {
-                        run.exec.success = true;
-                        run.exec.handshakeFailed = false;
-                        run.exec.writesTotal = attempt.writesTotal;
-                        run.exec.writesVerified = attempt.writesVerified;
-                        run.exec.error.clear();
-                        log::Log(log::Level::Info, log::Stage::Write, "usb.fallback_success",
-                                 "[SUCCESS] Direct-control fallback reset the counter ("
-                                     + std::to_string(attempt.writesVerified) + "/"
-                                     + std::to_string(attempt.writesTotal) + " writes verified).");
-                        counterReset = true;
-                        break;
-                    }
-
-                    // Keep the silent-handshake status so the interface fallback
-                    // below still runs, but surface this path's real reason.
-                    run.exec.error = attempt.error;
-                }
-
-                if (counterReset)
+                if (pacer.D4Answered())
+                    trace << "[i] END4 and ESC/P Remote skipped: this interface answered in IEEE 1284.4 framing.\n";
+                else if (RunNonD4Fallbacks(backend, cand, sequence, options, trace, run.exec))
                     break;
             }
 
@@ -676,21 +751,20 @@ namespace ewr {
             {
                 log::Log(log::Level::Info, log::Stage::Handshake, "usb.interface_fallback",
                          "[!] Interface " + std::to_string(idx + 1) + "/" + std::to_string(candidates.size())
-                             + " stayed silent to D4, END4 and ESC/P Remote. Trying the next USB interface...");
-                trace << "[!] Handshake silent (D4, END4 and ESC/P Remote) on this interface."
-                         " Trying the next USB interface candidate.\n\n";
+                             + " did not answer. Trying the next USB interface...");
+                trace << "[!] Handshake failed on this interface. Trying the next USB interface candidate.\n\n";
                 continue;
             }
 
             if (result.handshakeFailed && pinned >= 1)
-                trace << "[!] Handshake silent on the pinned interface. Interface fallback is disabled by the pin (END4 was still attempted here).\n\n";
+                trace << "[!] Handshake failed on the pinned interface. Interface fallback is disabled by the pin.\n\n";
 
             break;
         }
 
         if (run.candidatesTried == 0)
         {
-            run.exec.error = backend->DescribeOpenFailure(true);
+            run.exec.error = backend.DescribeOpenFailure(true);
             return run;
         }
 
@@ -710,16 +784,22 @@ namespace ewr {
                                                    const ExecutorOptions& options,
                                                    bool appendTraceLog)
     {
+        TraceLog traceLog(appendTraceLog);
+        std::unique_ptr<usb::Backend> backend = usb::CreateBackend(traceLog.stream);
+        return usb::RunQuerySession(*backend, traceLog.stream, handshake, queries, options);
+    }
+
+    QueryRunResult usb::RunQuerySession(usb::Backend& backend, std::ostream& trace,
+                                        const std::vector<std::vector<unsigned char>>& handshake,
+                                        const std::vector<std::vector<unsigned char>>& queries,
+                                        const ExecutorOptions& options)
+    {
         QueryRunResult run;
 
-        TraceLog traceLog(appendTraceLog);
-        std::ostream& trace = traceLog.stream;
-        std::unique_ptr<usb::Backend> backend = usb::CreateBackend(trace);
-
-        WriteTraceBanner(trace, std::string("EWR STATUS/READ QUERY SESSION (") + backend->PlatformName() + ")", &options.trace);
+        WriteTraceBanner(trace, std::string("EWR STATUS/READ QUERY SESSION (") + backend.PlatformName() + ")", &options.trace);
 
         std::vector<usb::Candidate> candidates;
-        if (!PrepareCandidates(*backend, trace, options, candidates, run.deviceFound, run.query.error))
+        if (!PrepareCandidates(backend, trace, options, candidates, run.deviceFound, run.query.error))
             return run;
 
         const int pinned = options.interfaceCandidate;
@@ -731,21 +811,21 @@ namespace ewr {
             if (pinned >= 1 && static_cast<int>(idx) + 1 != pinned)
                 continue;
 
-            WriteSelectionDecision(trace, *backend, cand, idx, candidates.size());
+            WriteSelectionDecision(trace, backend, cand, idx, candidates.size());
 
             if (options.usbSoftReset)
-                SoftResetAndSettle(*backend, cand, options, trace);
+                SoftResetAndSettle(backend, cand, options, trace);
 
             QuerySessionResult result;
             bool opened = false;
-            const int attempts = backend->AttemptsPerCandidate(cand.ordinal);
-            for (int attempt = 0; attempt < attempts; ++attempt)
+            FreshSessionPacer pacer(options, backend.AttemptsPerCandidate(cand.ordinal));
+            for (int attempt = 1;; ++attempt)
             {
                 trace << "[Session] Candidate " << (idx + 1) << " of " << candidates.size()
-                      << ", attempt " << (attempt + 1) << " of " << attempts
+                      << ", attempt " << attempt << " of " << pacer.Limit()
                       << ": starting a fresh session.\n";
 
-                ITransport* transport = backend->Open(cand.ordinal);
+                ITransport* transport = backend.Open(cand.ordinal);
                 if (!transport)
                     break;
 
@@ -753,11 +833,11 @@ namespace ewr {
 
                 trace << "\n==================================================\n";
                 trace << "BEGIN QUERY SESSION (read-only)\n";
-                trace << "Interface:     " << backend->Describe(cand.ordinal) << "\n";
+                trace << "Interface:     " << backend.Describe(cand.ordinal) << "\n";
                 trace << "Queries:       " << queries.size() << "\n";
                 trace << "==================================================\n\n";
 
-                ScopedBackendClose closeGuard(*backend);
+                ScopedBackendClose closeGuard(backend);
 
                 log::Reporter& reporter = log::Default();
                 {
@@ -773,11 +853,8 @@ namespace ewr {
 
                 closeGuard.Close();
 
-                if (!result.handshakeFailed)
+                if (!result.handshakeFailed || !pacer.Again(attempt, result.d4Answered, trace))
                     break;
-
-                if (attempt + 1 < attempts)
-                    trace << "[!] Handshake silent - retrying this interface with a brand-new session (fresh open).\n";
             }
 
             if (!opened)
@@ -789,18 +866,18 @@ namespace ewr {
 
             if (result.handshakeFailed && pinned < 1 && idx + 1 < candidates.size())
             {
-                trace << "[!] Handshake silent on this interface. Falling back to the next candidate.\n\n";
+                trace << "[!] Handshake failed on this interface. Falling back to the next candidate.\n\n";
                 continue;
             }
 
             if (result.handshakeFailed && pinned >= 1)
-                trace << "[!] Handshake silent on the pinned interface. Fallback is disabled by the interface pin.\n\n";
+                trace << "[!] Handshake failed on the pinned interface. Fallback is disabled by the interface pin.\n\n";
 
             break;
         }
 
         if (run.candidatesTried == 0)
-            run.query.error = backend->DescribeOpenFailure(false);
+            run.query.error = backend.DescribeOpenFailure(false);
         else
             SettleSilentPort(run.silentPort, run.query.handshakeFailed, trace);
 

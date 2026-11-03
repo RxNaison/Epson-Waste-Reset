@@ -1525,8 +1525,11 @@ inline std::vector<unsigned char> MakeSt2State(int state, int error = -1)
 // that records every command and print job it is sent.
 struct MaintenanceGateway : ewr::IDeviceGateway
 {
-    std::vector<std::vector<unsigned char>> statuses; // one per status query, the last repeats
+    // One per status query, the last repeats. An empty one is a printer that
+    // does not answer the handshake; with `goneWhenSilent` it is not there.
+    std::vector<std::vector<unsigned char>> statuses;
     size_t nextStatus = 0;
+    bool goneWhenSilent = false;
     std::map<uint16_t, uint8_t> eeprom;
     std::vector<std::vector<unsigned char>> commands;
     std::vector<std::vector<unsigned char>> jobs;
@@ -1548,6 +1551,13 @@ struct MaintenanceGateway : ewr::IDeviceGateway
             {
                 const size_t i = std::min(nextStatus, statuses.size() - 1);
                 nextStatus++;
+                if (statuses[i].empty())
+                {
+                    ewr::QueryRunResult silent;
+                    silent.deviceFound = !goneWhenSilent;
+                    silent.query.handshakeFailed = !goneWhenSilent;
+                    return silent;
+                }
                 run.query.replies.push_back(statuses[i]);
                 continue;
             }

@@ -37,8 +37,8 @@ namespace ewr {
         return d4::DataPacket(epson_cmd);
     }
 
-    std::vector<unsigned char> ctrl::FactoryPacket(uint16_t rkey, uint8_t action,
-                                                                         const std::vector<unsigned char>& payload)
+    std::vector<unsigned char> ctrl::FactoryBody(uint16_t rkey, uint8_t action,
+                                                 const std::vector<unsigned char>& payload)
     {
         std::vector<unsigned char> inner;
         inner.push_back(rkey & 0xFF);
@@ -47,6 +47,13 @@ namespace ewr {
         inner.push_back(static_cast<unsigned char>(~action & 0xFF));
         inner.push_back(static_cast<unsigned char>(((action >> 1) & 0x7F) | ((action << 7) & 0x80)));
         inner.insert(inner.end(), payload.begin(), payload.end());
+        return inner;
+    }
+
+    std::vector<unsigned char> ctrl::FactoryPacket(uint16_t rkey, uint8_t action,
+                                                                         const std::vector<unsigned char>& payload)
+    {
+        const std::vector<unsigned char> inner = FactoryBody(rkey, action, payload);
 
         std::vector<unsigned char> epson_cmd;
         epson_cmd.push_back(ctrl::PREFIX_PIPE);

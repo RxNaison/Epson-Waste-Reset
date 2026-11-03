@@ -292,7 +292,7 @@ ctypes frees a thunk that nothing holds, and EWR will call it.
 | `ewr_dump` | yes | `{"model", "answered", "total", "values"}`; minutes, not seconds |
 | `ewr_reset` | yes | `{"model", "phase", "writes", "verification", "before", "after", "overrides", "backup", ...}`; `overrides` names each gate your callbacks, or `ewr_session_set_allow_model_mismatch`, let it past |
 | `ewr_restore`, `ewr_restore_all` | yes | `ewr_reset`'s keys with `target: "restore"`, plus `"source", "planned_writes", "skipped", "missing", "unchanged"` |
-| `ewr_head_clean`, `ewr_nozzle_check` | yes | `{"model", "action", "level", "group", "phase", "route", "sent", "reply", "started", "seconds", "printer_before", "printer_after", "pads_before", "pads_after", "overrides"}` |
+| `ewr_head_clean`, `ewr_nozzle_check` | yes | `{"model", "action", "level", "group", "phase", "route", "sent", "reply", "started", "seconds", "printer_before", "printer_after", "pads_before", "pads_after", "overrides", "fallback_from", "silent_while_working"}`; see `docs/json-output.md` for the last two |
 | `ewr_read_info` | yes | `{"model", "printer", "firmware", "serial", "serial_source", "counters", "first_use", "fatal_errors"}` |
 | `ewr_database_check` | no | `{"models", "schema_version"}` |
 

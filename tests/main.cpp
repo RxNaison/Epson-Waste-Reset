@@ -152,6 +152,7 @@ void test_remote_mode_job_bytes();
 void test_maintenance_blocker_policy();
 void test_maintenance_routes();
 void test_maintenance_factory_clean_runs_once_and_is_watched();
+void test_maintenance_print_data_watch_and_fallback();
 void test_maintenance_stops_where_it_should();
 void test_query_path_refuses_what_is_not_a_read();
 void test_restore_all_plan_never_writes_identity();
@@ -378,6 +379,7 @@ int main()
     test_maintenance_blocker_policy();
     test_maintenance_routes();
     test_maintenance_factory_clean_runs_once_and_is_watched();
+    test_maintenance_print_data_watch_and_fallback();
     test_maintenance_stops_where_it_should();
     test_query_path_refuses_what_is_not_a_read();
     test_restore_all_plan_never_writes_identity();

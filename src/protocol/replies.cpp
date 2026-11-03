@@ -12,7 +12,8 @@ namespace ewr {
     namespace {
 
         // Names for the ESC/P-R status constants (values published in Epson's
-        // GPLv2 epson-inkjet-escpr driver package).
+        // GPLv2 epson-inkjet-escpr driver package). 0x0F and 0x11 are not in
+        // that list; epson_print_conf names them.
         std::string PrinterStateName(int code)
         {
             switch (code)
@@ -30,6 +31,8 @@ namespace ewr {
                 case 0x0A: return "SHUTDOWN";
                 case 0x0B: return "WAIT PAPER INIT";
                 case 0x0C: return "INIT PAPER";
+                case 0x0F: return "NOZZLE CHECK";
+                case 0x11: return "CHARGING";
                 default:   return "UNKNOWN STATE";
             }
         }

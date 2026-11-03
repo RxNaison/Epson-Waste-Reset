@@ -122,6 +122,7 @@ namespace ewr {
         const QueryRunResult run =
             gateway.RunQuery(d4::Handshake(), queries, options);
 
+        out.deviceFound = run.deviceFound;
         if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
             return out;
 
@@ -177,6 +178,7 @@ namespace ewr {
         const QueryRunResult run =
             m_gateway.RunQuery(d4::Handshake(), queries, m_queryOptions);
 
+        out.deviceFound = run.deviceFound;
         if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
             return out;
 
@@ -333,6 +335,7 @@ namespace ewr {
         const QueryRunResult run =
             m_gateway.RunQuery(d4::Handshake(), queries, m_queryOptions);
 
+        out.deviceFound = run.deviceFound;
         if (!run.deviceFound || run.query.handshakeFailed || !AnyReplyArrived(run.query.replies))
             return out;
 

@@ -52,6 +52,8 @@ namespace ewr {
     struct StateSnapshot
     {
         bool available = false; // a device answered the query session
+        // A device was there to ask, answered or not: silent is not gone.
+        bool deviceFound = false;
         PrinterStatus status;
         std::vector<std::pair<uint16_t, int>> values;
     };

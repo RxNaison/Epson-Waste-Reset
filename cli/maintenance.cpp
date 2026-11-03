@@ -125,6 +125,7 @@ namespace ewr::cli {
                                                   : ewr::CleanGroup::All;
         request.nozzleVariant = cli.nozzleVariant;
         request.remoteOnly = cli.remoteOnly;
+        request.factoryAsPrintData = cli.factoryAsPrintData;
 
         ewr::Maintenance maintenance(gateway, model, ewr::log::Default(), options);
 
@@ -150,6 +151,10 @@ namespace ewr::cli {
 
         std::cout << (route == "factory"
                           ? "    With the printer's own maintenance command, from its database entry."
+                      : route == "factory_print"
+                          ? "    EXPERIMENTAL: the printer's own maintenance command, sent as print data (ESC |).\n"
+                            "    Untested on any printer. If the printer does not take it, it may print a\n"
+                            "    few stray characters on a sheet."
                           : "    Sent as print data (ESC/P2 remote mode), which the printer takes like a job.")
                   << std::endl;
 
@@ -275,7 +280,10 @@ namespace ewr::cli {
 
         if (outcome.phase == ewr::MaintenancePhase::Done)
         {
-            if (!cli.nozzleCheck)
+            if (cli.nozzleCheck)
+                std::cout << "\n[i] Look at the page: a line with gaps is a clogged nozzle. If nothing printed,\n"
+                             "    try the alternate pattern (ewr --nozzle-check alt)." << std::endl;
+            else
                 std::cout << "\n[i] Print a nozzle check (ewr --nozzle-check) to see whether it helped." << std::endl;
             return FinishRun(0);
         }

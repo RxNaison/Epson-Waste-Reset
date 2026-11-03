@@ -66,6 +66,7 @@ namespace ewr::cli {
         std::string cleanGroup;      // --clean-group all|black|color
         bool powerClean = false;     // --power-clean: the ink charge
         bool remoteOnly = false;     // --print-data: the print-data route even where a factory level exists
+        bool factoryAsPrintData = false; // --factory-as-print-data (hidden): 0x84 wrapped as print data
     };
 
     // What every mode works with once the printer and its model are settled.

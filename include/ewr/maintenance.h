@@ -39,6 +39,10 @@ namespace ewr {
         int nozzleVariant = 0;        // 1: the alternate pattern
         // The print-data route even where the model has a factory level.
         bool remoteOnly = false;
+        // Experimental, route "factory_print": the factory command with the
+        // model's level, sent as print data (ESC |) rather than over
+        // EPSON-CTRL. Unverified on any printer.
+        bool factoryAsPrintData = false;
     };
 
     enum class MaintenancePhase
@@ -58,11 +62,19 @@ namespace ewr {
     {
         MaintenancePhase phase = MaintenancePhase::NotStarted;
         bool success = false;
-        // "factory" (the keyed command 0x84) or "remote" (print data).
+        // "factory" (the keyed command 0x84), "remote" (print data) or
+        // "factory_print" (0x84 as print data, experimental).
         std::string route;
+        // "factory" when the printer refused 0x84 outright (NA) and the
+        // cleaning went as print data instead; `reply` keeps that refusal.
+        std::string fallbackFrom;
         bool sent = false;
         std::string reply;     // the factory command's answer, e.g. "||:84:OK;"
-        bool started = false;  // the printer was seen at work
+        // The printer was seen at work, or went silent after print data:
+        // the status query waits behind the job on the same channel.
+        bool started = false;
+        bool silentWhileWorking = false; // the second case
+
         int seconds = 0;       // from the send to the last status read
         StateSnapshot before;  // status, and the counters when the model is known
         StateSnapshot after;

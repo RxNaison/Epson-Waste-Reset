@@ -27,9 +27,19 @@ namespace remote {
     // cycle (the 0x10 flag).
     std::vector<unsigned char> HeadClean(uint8_t group = 0, bool power = false);
 
+    // "JE": the job is over. Without it a newer printer can leave the last
+    // page half out, as an L3060's nozzle check did (PR #64).
+    std::vector<unsigned char> JobEnd();
+
     // A whole job: packet mode left, the printer initialized, remote mode
-    // entered, the commands, remote mode left.
+    // entered, the commands, remote mode left, then JE in remote mode of its
+    // own - the ending Epson's driver sends after a cleaning.
     std::vector<unsigned char> BuildJob(const std::vector<std::vector<unsigned char>>& commands);
+
+    // Experimental: a factory command's body (ctrl::FactoryBody) as print
+    // data, ESC | 00 and a little-endian length, after ESC @. One tool sends
+    // its XP-205 cleaning this way. Unverified on any printer.
+    std::vector<unsigned char> BuildFactoryJob(const std::vector<unsigned char>& factoryBody);
 
 } // namespace remote
 } // namespace ewr

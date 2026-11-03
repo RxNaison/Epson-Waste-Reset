@@ -41,6 +41,10 @@ namespace ewr::ctrl {
     // as they are - they are what every verified reset sent.
     std::vector<unsigned char> FactoryPacket(uint16_t rkey, uint8_t action, const std::vector<unsigned char>& payload);
 
+    // What follows the '||' and the length in FactoryPacket: read key,
+    // action, its two check bytes, payload. No D4 framing.
+    std::vector<unsigned char> FactoryBody(uint16_t rkey, uint8_t action, const std::vector<unsigned char>& payload);
+
     // An EPSON-CTRL command: two letters, a little-endian length, the
     // payload ('vi' + 00 asks for the firmware version).
     std::vector<unsigned char> ControlPacket(char first, char second, const std::vector<unsigned char>& payload);

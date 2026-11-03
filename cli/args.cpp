@@ -157,6 +157,11 @@ namespace ewr::cli {
             {
                 cli.remoteOnly = true;
             }
+            // Not in --help: a one-off hardware experiment (PR #64).
+            else if (arg == "--factory-as-print-data")
+            {
+                cli.factoryAsPrintData = true;
+            }
             else if (arg == "--clean-group")
             {
                 if (i + 1 >= argc)
@@ -320,6 +325,11 @@ namespace ewr::cli {
                 return UsageError(cli, "--clean-group goes with --head-clean or --power-clean.");
             if (cli.remoteOnly && !maintenance)
                 return UsageError(cli, "--print-data goes with --nozzle-check, --head-clean or --power-clean.");
+            if (cli.factoryAsPrintData && !(cli.headClean || cli.powerClean))
+                return UsageError(cli, "--factory-as-print-data goes with --head-clean or --power-clean.");
+            if (cli.factoryAsPrintData && cli.remoteOnly)
+                return UsageError(cli, "--factory-as-print-data and --print-data are two different ways to send it;"
+                                       " pick one.");
             if (cli.info && cli.dryRun)
                 return UsageError(cli, "--info only reads; it has no dry run.");
             // It would run its head cleanings all the same.

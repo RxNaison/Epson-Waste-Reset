@@ -352,6 +352,8 @@ namespace ewr {
         out["pads_after"] = (model && outcome.after.available) ? json::PadUsage(*model, outcome.after.values)
                                                                : nlohmann::json::array();
         out["overrides"] = Overrides(outcome.overrides);
+        out["fallback_from"] = orNull(outcome.fallbackFrom);
+        out["silent_while_working"] = outcome.silentWhileWorking;
         return out;
     }
 

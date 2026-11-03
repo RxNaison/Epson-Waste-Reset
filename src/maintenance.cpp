@@ -168,15 +168,40 @@ namespace ewr {
 
     std::string Maintenance::Route(const MaintenanceRequest& request, std::string& why) const
     {
-        if (request.action != MaintenanceAction::NozzleCheck && !request.remoteOnly
-            && !FactoryPayload(request).empty())
+        const bool cleaning = request.action != MaintenanceAction::NozzleCheck;
+        const bool listed = cleaning && !FactoryPayload(request).empty();
+
+        if (request.factoryAsPrintData)
+        {
+            if (listed)
+                return "factory_print";
+            why = "Sending the factory command as print data needs this printer's database entry to list a"
+                  " cleaning byte for this request, and it lists none.";
+            return "";
+        }
+
+        if (listed && !request.remoteOnly)
             return "factory";
 
         // The print-data form has no levels: it is the printer's own cleaning.
         if (request.action == MaintenanceAction::HeadClean && request.level != "normal")
         {
-            why = "This printer's database entry lists no \"" + request.level + "\" cleaning; the print-data"
-                  " cleaning has only the printer's own (\"normal\").";
+            const std::string level = "\"" + request.level + "\"";
+            const std::string nozzles = std::string(GroupName(request.group)) + " nozzles";
+            const bool alone = request.group != CleanGroup::All;
+            const bool listedForAll = m_model && m_model->cleaning.clean.count(request.level) > 0;
+
+            if (listed)
+                why = "The print-data cleaning has only the printer's own level (\"normal\"); " + level +
+                      " is a factory command, which the print-data route does not send.";
+            else if (alone && listedForAll)
+                why = "This printer's database entry lists a " + level + " cleaning for all nozzles, but none for"
+                      " the " + nozzles + " alone. Those go only as print data, at the printer's own level"
+                      " (\"normal\").";
+            else
+                why = "This printer's database entry lists no " + level + " cleaning" +
+                      (alone ? " for the " + nozzles : std::string()) +
+                      "; the print-data cleaning has only the printer's own level (\"normal\").";
             return "";
         }
 
@@ -277,18 +302,46 @@ namespace ewr {
             // have run, and the status says.
             if (!out.reply.empty() && out.reply.find(":84:OK") == std::string::npos)
             {
-                m_reporter.Log(log::Level::Error, log::Stage::Write, "maintenance.refused",
+                // NA is a plain no: on an L1800 and an L3060 nothing ran
+                // (PR #64). The print-data cleaning is the printer's own
+                // normal one, so it stands in for that level only.
+                const bool declined = out.reply.find(":84:NA") != std::string::npos;
+                const bool standIn = declined && (request.action == MaintenanceAction::PowerClean ||
+                                                  request.level == "normal");
+
+                m_reporter.Log(standIn ? log::Level::Warning : log::Level::Error, log::Stage::Write,
+                               "maintenance.refused",
                                "[!] The printer refused the command (" + out.reply + ").",
                                { { "reply", out.reply } });
-                out.phase = MaintenancePhase::SendFailed;
-                out.error = "The printer refused the command (" + out.reply + ").";
-                return out;
+
+                if (!standIn)
+                {
+                    out.phase = MaintenancePhase::SendFailed;
+                    out.error = "The printer refused the command (" + out.reply + ").";
+                    if (declined)
+                        out.error += " The print-data cleaning runs only the printer's own level (\"normal\").";
+                    return out;
+                }
+
+                out.fallbackFrom = "factory";
+                out.route = "remote";
+                m_reporter.Log(log::Level::Warning, log::Stage::Write, "maintenance.fallback",
+                               "[!] Nothing ran. Sending the printer's own cleaning as print data instead, once.",
+                               { { "from", "factory" }, { "reply", out.reply } });
             }
         }
-        else
+
+        if (out.route != "factory")
         {
             std::vector<unsigned char> job;
-            if (request.action == MaintenanceAction::NozzleCheck)
+            std::string how = " as print data...";
+            if (out.route == "factory_print")
+            {
+                job = remote::BuildFactoryJob(ctrl::FactoryBody(m_model->rkey, ctrl::CMD_CLEAN, FactoryPayload(request)));
+                how = " as print data, in the form of its own maintenance command (experimental, level " +
+                      (request.action == MaintenanceAction::PowerClean ? std::string("charge") : request.level) + ")...";
+            }
+            else if (request.action == MaintenanceAction::NozzleCheck)
                 job = remote::BuildJob({ remote::NozzleCheck(request.nozzleVariant) });
             else
             {
@@ -297,9 +350,8 @@ namespace ewr {
             }
 
             m_reporter.Log(log::Level::Info, log::Stage::Write, "maintenance.sending",
-                           std::string("[*] Sending the ") + ToString(request.action) +
-                               " to the printer as print data...",
-                           { { "route", "remote" }, { "group", GroupName(request.group) } });
+                           std::string("[*] Sending the ") + ToString(request.action) + " to the printer" + how,
+                           { { "route", out.route }, { "group", GroupName(request.group) } });
 
             const PrintDataResult run = m_gateway.SendPrintData(job, m_options);
             if (!run.supported)
@@ -362,6 +414,11 @@ namespace ewr {
         m_reporter.Log(log::Level::Info, log::Stage::Verify, "maintenance.watching",
                        "[*] Watching the printer's status until it is done...");
 
+        // Print data and the status query share one channel, and the query
+        // waits behind the job: a printer at work on it does not answer at
+        // all (L350, L1800, L3060 in PR #64). There, silence is the work.
+        const bool printData = out.route != "factory";
+
         int silent = 0;
         for (;;)
         {
@@ -373,6 +430,27 @@ namespace ewr {
 
             if (!now.available || !now.status.valid)
             {
+                if (printData && now.deviceFound)
+                {
+                    if (!out.silentWhileWorking)
+                        m_reporter.Log(log::Level::Info, log::Stage::Verify, "maintenance.silent",
+                                       "[*] The printer does not answer while it works through the print data."
+                                       " EWR keeps asking until it is idle again.",
+                                       { { "seconds", std::to_string(out.seconds) } });
+                    out.silentWhileWorking = true;
+                    out.started = true;
+                    silent = 0;
+
+                    if (out.seconds >= timeout)
+                    {
+                        out.phase = MaintenancePhase::TimedOut;
+                        out.error = "The printer was still not answering after " + std::to_string(timeout) + " s.";
+                        m_reporter.Log(log::Level::Warning, log::Stage::Verify, "maintenance.timed_out", "[!] " + out.error);
+                        return;
+                    }
+                    continue;
+                }
+
                 if (++silent >= kSilentPollsAllowed)
                 {
                     out.phase = MaintenancePhase::Error;
@@ -416,7 +494,10 @@ namespace ewr {
                 out.phase = MaintenancePhase::Done;
                 out.success = true;
                 m_reporter.Log(log::Level::Info, log::Stage::Verify, "maintenance.done",
-                               "[SUCCESS] The printer finished after " + std::to_string(out.seconds) + " s.",
+                               out.silentWhileWorking
+                                   ? "[SUCCESS] The printer is idle again after " + std::to_string(out.seconds) +
+                                         " s. It did not answer while it worked, so EWR could not watch it."
+                                   : "[SUCCESS] The printer finished after " + std::to_string(out.seconds) + " s.",
                                { { "seconds", std::to_string(out.seconds) } });
                 return;
             }

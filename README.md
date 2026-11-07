@@ -45,13 +45,13 @@ No internet connection is needed - the database ships in the download. When EWR 
 
 ### Verifying your download
 
-Download EWR only from the [Releases page](https://github.com/RxNaison/Epson-Waste-Reset/releases/latest). Copies passed around elsewhere - in video descriptions, on forums - may not be what they claim to be. From v1.4.1 on, every release archive, including the `EWR-SDK-*` ones, carries a signed build-provenance attestation tying it to this repository and to the exact build that produced it. You can check it with the [GitHub CLI](https://cli.github.com/), signed in (`gh auth login`):
+Download EWR only from the [Releases page](https://github.com/RxNaison/Epson-Waste-Reset/releases/latest). Copies passed around elsewhere - in video descriptions, on forums - may not be what they claim to be. From v1.4.1 on, every release archive, including the `EWR-SDK` one, carries a signed build-provenance attestation tying it to this repository and to the exact build that produced it. You can check it with the [GitHub CLI](https://cli.github.com/), signed in (`gh auth login`):
 
 ```bash
 gh attestation verify EWR-v1.5.1-win.zip -R RxNaison/Epson-Waste-Reset
 ```
 
-The same works for every archive and package: `EWR-<tag>-win.zip`, `-win-arm64.zip`, `-linux.tar.gz`, `-linux-aarch64.tar.gz`, `-linux-armhf.tar.gz`, `-macos-universal.tar.gz`, `-android.apk`, the `.deb` and `.rpm` packages, and the `EWR-SDK-*` archives.
+The same works for every archive and package: `EWR-<tag>-win.zip`, `-win-arm64.zip`, `-linux.tar.gz`, `-linux-aarch64.tar.gz`, `-linux-armhf.tar.gz`, `-macos-universal.tar.gz`, `-android.apk`, the `.deb` and `.rpm` packages, and `EWR-SDK-<tag>.zip` (before v1.6.0, one `EWR-SDK-<tag>-<platform>` archive per platform).
 
 `✓ Verification succeeded!` means the file is byte for byte what this repository's release workflow built, and its `Build workflow` line ends in the tag it was built from (`@refs/tags/v1.5.1`) - check that it is the version you meant to download. A modified file fails with `HTTP 404: Not Found`: no attestation exists for its contents. If an archive from v1.4.1 or later fails, don't run it. Releases before v1.4.1 have no attestation and fail the same way, so the check cannot vouch for them. This is not code signing: Windows may still warn that the app is unrecognized.
 
@@ -162,7 +162,8 @@ the model the printer reports. A run that would need an answer stops with
 To put the reset *inside* your program instead of spawning it - a GUI, a service, a
 language binding - there is a C ABI in `include/ewr/ewr_c.h`, built as `ewrc.dll` /
 `libewrc.so` alongside the CLI, with the same JSON coming back:
-[docs/c-api.md](docs/c-api.md).
+[docs/c-api.md](docs/c-api.md). Every release carries it prebuilt in `EWR-SDK-<tag>.zip`,
+one `lib/<platform>/` folder per platform beside the header and both contracts.
 
 ### Choosing the target: `--cartridge`
 
@@ -239,7 +240,7 @@ the network that goes to the printer's raw print port (TCP 9100).
 * **Linux packages:** `ewr_<version>_<arch>.deb` and `ewr-<version>.<arch>.rpm`
   for `amd64`/`x86_64`, `arm64`/`aarch64` and `armhf`/`armv7hl`. They install
   `/usr/bin/ewr`, the database and a udev rule that lets the logged-in user
-  reach an Epson printer without `sudo`. `ewr-dev`/`ewr-devel` carries the C API.
+  reach an Epson printer without `sudo`.
 * **Raspberry Pi:** the `linux-armhf` (32-bit) or `linux-aarch64` (64-bit)
   archive, or the matching package.
 * **macOS:** one universal binary for Intel and Apple Silicon Macs.

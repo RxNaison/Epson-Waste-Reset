@@ -187,18 +187,21 @@ jobs:
       matrix:
         include:
           - name: linux
+            sdk: linux-x86_64
             os: ubuntu-latest
             container: debian:bullseye
             cmake_args: -DEWR_BUNDLED_LIBUSB=ON
             deb_arch: amd64
             rpm_arch: x86_64
           - name: linux-aarch64
+            sdk: linux-aarch64
             os: ubuntu-24.04-arm
             container: debian:bullseye
             cmake_args: -DEWR_BUNDLED_LIBUSB=ON
             deb_arch: arm64
             rpm_arch: aarch64
           - name: linux-armhf
+            sdk: linux-armhf
             os: ubuntu-latest
             container: debian:bullseye
             cross: armhf
@@ -206,10 +209,13 @@ jobs:
             deb_arch: armhf
             rpm_arch: armv7hl
           - name: win
+            sdk: windows-x64
             os: windows-latest
           - name: win-arm64
+            sdk: windows-arm64
             os: windows-11-arm
           - name: macos-universal
+            sdk: macos-universal
             os: macos-latest
             cmake_args: '"-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"'
 
@@ -263,41 +269,45 @@ jobs:
 
     # The C ABI ships on its own, not beside ewr.exe: a user resetting a
     # printer needs one self-contained binary and would rightly wonder what a
-    # DLL next to it is for. Embedders take this archive instead - the shared
-    # library, the header they include, and the two contracts they code
-    # against.
-    - name: Package the C API SDK
+    # DLL next to it is for. It ships as ONE archive for every platform
+    # (release-sdk, below): the few who embed EWR pick a folder, and the
+    # release page stays short for the many who only want the program. This
+    # leg hands its library on, outside dist/ so it is not published alone.
+    - name: Stage the C API library for the SDK
       shell: bash
       run: |
-        mkdir -p stage/EWR-SDK/include/ewr stage/EWR-SDK/lib stage/EWR-SDK/docs
-        cp include/ewr/ewr_c.h stage/EWR-SDK/include/ewr/
-        cp docs/c-api.md docs/json-output.md stage/EWR-SDK/docs/
-
+        mkdir -p "sdk/${{ matrix.sdk }}"
         case "${{ runner.os }}" in
           Windows)
             # The .lib is the import library a C or C++ caller links against;
             # ctypes and friends need only the DLL.
-            cp build/Release/ewrc.dll build/Release/ewrc.lib stage/EWR-SDK/lib/
-            (cd stage && 7z a "../dist/EWR-SDK-${GITHUB_REF_NAME}-${{ matrix.name }}.zip" EWR-SDK)
+            cp build/Release/ewrc.dll build/Release/ewrc.lib "sdk/${{ matrix.sdk }}/"
             ;;
           macOS)
             # -a keeps the libewrc.dylib -> libewrc.<version>.dylib symlink,
             # which is what a caller opens.
-            cp -a build/libewrc*.dylib stage/EWR-SDK/lib/
-            tar -czf "dist/EWR-SDK-${GITHUB_REF_NAME}-${{ matrix.name }}.tar.gz" -C stage EWR-SDK
+            cp -a build/libewrc*.dylib "sdk/${{ matrix.sdk }}/"
             ;;
           *)
-            cp -a build/libewrc.so* stage/EWR-SDK/lib/
-            tar -czf "dist/EWR-SDK-${GITHUB_REF_NAME}-${{ matrix.name }}.tar.gz" -C stage EWR-SDK
+            cp -a build/libewrc.so* "sdk/${{ matrix.sdk }}/"
             ;;
         esac
-        ls -l dist
+        # A tarball, because an artifact upload would turn those symlinks
+        # into copies.
+        tar -czf "sdk-${{ matrix.sdk }}.tar.gz" -C sdk "${{ matrix.sdk }}"
+
+    - name: Hand the library to the SDK job
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdk-${{ matrix.sdk }}
+        path: sdk-${{ matrix.sdk }}.tar.gz
+        retention-days: 1
 
     - name: Build .deb and .rpm packages (Linux)
       if: runner.os == 'Linux'
       run: |
         version="$(sed -n 's/^project(EWR VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
-        bash packaging/linux/build-packages.sh "$version" "${{ matrix.deb_arch }}" "${{ matrix.rpm_arch }}" build dist
+        bash packaging/linux/build-packages.sh "$version" "${{ matrix.deb_arch }}" "${{ matrix.rpm_arch }}" dist
 
     # A signed SLSA build-provenance claim per archive, binding its digest to
     # this commit and run; `gh attestation verify` checks it (README). Before
@@ -309,6 +319,60 @@ jobs:
         subject-path: 'dist/*'
 
     - name: Upload artifacts to draft release
+      uses: softprops/action-gh-release@v2
+      with:
+        draft: true
+        files: dist/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # EWR-SDK-<tag>.zip: the header, the two contracts, and lib/<platform>/ for
+  # every platform the release legs built. Runs only when all of them passed,
+  # so it never ships with a platform missing.
+  release-sdk:
+    name: Publish draft release (SDK)
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Collect every platform's library
+      uses: actions/download-artifact@v4
+      with:
+        pattern: sdk-*
+        merge-multiple: true
+        path: parts
+
+    - name: Package the C API SDK
+      run: |
+        mkdir -p dist stage/EWR-SDK/include/ewr stage/EWR-SDK/lib stage/EWR-SDK/docs
+        cp include/ewr/ewr_c.h stage/EWR-SDK/include/ewr/
+        cp docs/c-api.md docs/json-output.md stage/EWR-SDK/docs/
+        for part in parts/sdk-*.tar.gz; do
+          tar -xzf "$part" -C stage/EWR-SDK/lib
+        done
+        ls -l stage/EWR-SDK/lib/*
+        if [ "$(ls stage/EWR-SDK/lib | wc -l)" -ne 6 ]; then
+          echo "::error::Expected 6 platforms in the SDK, found: $(ls stage/EWR-SDK/lib | tr '\n' ' ')"
+          exit 1
+        fi
+        # -y stores the .so/.dylib symlinks as links, not as copies.
+        (cd stage && zip -r -y "../dist/EWR-SDK-${GITHUB_REF_NAME}.zip" EWR-SDK)
+        unzip -l "dist/EWR-SDK-${GITHUB_REF_NAME}.zip"
+
+    - name: Attest the SDK
+      uses: actions/attest@v4
+      with:
+        subject-path: 'dist/*'
+
+    - name: Upload the SDK to the draft release
       uses: softprops/action-gh-release@v2
       with:
         draft: true

@@ -394,7 +394,10 @@ namespace ewr {
                                    const std::string& file, const ResetOutcome& outcome)
     {
         nlohmann::json out = json::ResetData(model, plan.touchesInk && !plan.touchesWaste, outcome);
-        for (const auto& item : json::RestorePlanData(source, plan, file).items())
+        // Named, not iterated as a temporary: items() only refers to its
+        // object, which would be gone before the loop body ran.
+        const nlohmann::json planData = json::RestorePlanData(source, plan, file);
+        for (const auto& item : planData.items())
             out[item.key()] = item.value();
         out["unchanged"] = outcome.unchanged;
         return out;

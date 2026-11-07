@@ -372,6 +372,16 @@ void test_restore_plan_keeps_only_mapped_bytes()
     // The dump never held 0x2B.
     CHECK(plan.missing.size() == 1 && plan.missing[0] == 0x2B);
 
+    // The result carries the plan beside the outcome. It once iterated a freed
+    // temporary: no plan keys, and a "" key instead (R220, --restore --json).
+    const nlohmann::json result = ewr::json::RestoreData(model, dump, plan, "dump.json", ewr::ResetOutcome());
+    CHECK(!result.contains(""));
+    CHECK(result["model"] == model.name);
+    CHECK(result["source"]["file"] == "dump.json");
+    CHECK(result["planned_writes"].size() == 2);
+    CHECK(result["skipped"].size() == 3);
+    CHECK(result["missing"].size() == 1);
+
     // Beyond mem_high is not EEPROM at all.
     model.mem_high = 0xFF;
     model.wlen = 2;

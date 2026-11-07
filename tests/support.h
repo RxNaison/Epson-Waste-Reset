@@ -1219,14 +1219,20 @@ namespace snmp_test {
 
     // A printer with an EEPROM: reads answer from it, writes with
     // `acceptedKey` change it, writes with any other keyword come back
-    // ':42:NG;', and `refuse` makes every write come back ':42:NA;'.
-    // `locked` is firmware that shuts the EEPROM over the network: status
-    // still answers, every read and write is refused with a bare block.
+    // `wrongKeyVerdict` - "NG", "NA" (an R220) or "OK" with nothing changed
+    // (an ET-3950, #63) - and `refuse` makes every write come back ':42:NA;'.
+    // `drift` is added to every value a write stores, and with `staleReads`
+    // the reads keep showing the old ones. `locked` is firmware that shuts
+    // the EEPROM over the network: status still answers, every read and write
+    // is refused with a bare block.
     struct EepromPrinter final : ewr::snmp::IDatagramChannel
     {
         ewr::DbPrinterModel model;
         std::map<uint16_t, uint8_t> eeprom;
         std::string acceptedKey;
+        std::string wrongKeyVerdict = "NG";
+        int drift = 0;
+        bool staleReads = false;
         bool refuse = false;
         bool locked = false;
         int writesSeen = 0;
@@ -1285,9 +1291,9 @@ namespace snmp_test {
                         if (refuse || locked)
                             verdict = "NA";
                         else if (key != acceptedKey)
-                            verdict = "NG";
-                        else
-                            cell.second = static_cast<uint8_t>(value);
+                            verdict = wrongKeyVerdict;
+                        else if (!staleReads)
+                            cell.second = static_cast<uint8_t>(value + drift);
 
                         pending.push_back(MakeResponse(id, 0, 0x04, Bytes("@BDC PS\r\n||:42:" + verdict + ";\f")));
                         return true;

@@ -96,6 +96,7 @@ Both come from the first USB session of a run that ends with the printer silent,
 | `session.backup_failed` | `bytes`. The backup could not be kept; the run asks the blocker gate whether to go on |
 | `session.restore_other_printer` | `file_serial`, `printer_serial`: a restore file names another printer |
 | `session.range_reads`, `session.single_reads` | `bytes`, `requests`: whether a long read went by ranges or byte by byte |
+| `session.alternate_key_retry` | `unchanged`: how many bytes kept their old value although every write was acknowledged. The writes go once more with the model's alternate keyword |
 | `maintenance.sending` | `route`: `factory`, `remote` or `factory_print`, `group`: `all`, `black` or `color` |
 | `maintenance.started` | `state`: the printer's state when it was first seen at work |
 | `maintenance.expected` | `seconds`: how long the printer says the cleaning takes, from its status report. Not every printer says; EWR watches at least that long plus a margin |
@@ -292,7 +293,7 @@ machine's networks; `address` is what `--ip` takes. `--list` fails with
 ```json
 {"model": "R220", "target": "waste", "phase": "done",
  "writes": {"verified": 5, "total": 5}, "alternate_key_used": false, "committed": true,
- "verification": {"ran": true, "mismatches": 0, "unread": 0},
+ "verification": {"ran": true, "mismatches": 0, "unread": 0, "unchanged": 0},
  "before": [{"address": 12, "value": 0}], "after": [{"address": 12, "value": 0}],
  "overrides": [{"gate": "blocker", "detected_model": null, "error": "INK OUT", "error_code": 5}]}
 ```
@@ -312,6 +313,19 @@ has the last word: when a byte reads back with anything but the value written,
 the run ends `ok: false` with `error_code: "write_unverified"`, `phase: "done"`
 and the count in `verification.mismatches`. A byte that does not answer the
 read-back (`verification.unread`) leaves the verdict to the writes.
+
+`verification.unchanged` (from 1.6) counts the mismatches that still hold the
+value the preflight read: the printer acknowledged the write and dropped it.
+Some printers answer a write key that is not theirs that way, any key at all
+drawing `||:42:OK;`. When every mismatch is unchanged and the model has an
+alternate keyword, the writes go once more with it and the read-back runs
+again; the result describes that second pass. A printer that refuses the
+alternate keyword there tells keys apart, so the primary one was its own
+(event `session.alternate_key_refused`) and the result stays the first
+pass's. Printers that refuse a key
+instead, with `||:42:NG;` or `||:42:NA;`, get the alternate keyword on that
+write right away. `alternate_key_used` is true when the alternate keyword is
+what worked: the database's primary keyword is wrong for that printer.
 
 `overrides` lists every gate that objected and was told to go ahead anyway -
 by `--force-yes`, a typed yes, or a host callback - in the order they were
@@ -357,7 +371,7 @@ The reset's keys, with `target: "restore"`, and what the file held:
  "planned_writes": [{"address": 12, "value": 0}],
  "skipped": [{"address": 0, "reason": "unmapped"}],
  "missing": [], "unchanged": [62, 63],
- "writes": {"verified": 3, "total": 3}, "verification": {"ran": true, "mismatches": 0, "unread": 0},
+ "writes": {"verified": 3, "total": 3}, "verification": {"ran": true, "mismatches": 0, "unread": 0, "unchanged": 0},
  "before": [...], "after": [...], "backup": {...}, "overrides": []}
 ```
 

@@ -166,6 +166,31 @@ namespace ewr {
         return true;
     }
 
+    bool ctrl::ApplyAlternateKeyFirst(std::vector<unsigned char>& write, const ExecutorOptions& options)
+    {
+        std::vector<unsigned char> alternate;
+        if (!options.alternateKeyFirst
+            || !ctrl::SubstituteTrailingWriteKey(write, options.writeKey, options.alternateWriteKey, alternate))
+            return false;
+
+        write = std::move(alternate);
+        return true;
+    }
+
+    std::string ctrl::WriteRefusalAdvice(const std::vector<unsigned char>& reply, bool bothKeys)
+    {
+        if (ctrl::IsWriteNa(reply))
+            return std::string(bothKeys ? "Both of the database's write keywords for this model were refused,"
+                                          " which is how printers answer a key that is not their own."
+                                        : "Printers answer this to a write key that is not their own.")
+                 + " Check that the selected model is this printer. If the printer shows an error,"
+                   " clear it and run EWR again.";
+
+        return bothKeys ? "Neither of the database's write keywords for this model was accepted:"
+                          " the entry may not match this printer."
+                        : "The write key may not match this model.";
+    }
+
     namespace {
 
         // index/total ride as machine fields so a UI can drive a progress bar
@@ -264,11 +289,11 @@ namespace ewr {
                 return result;
             }
 
-            // Copied, not referenced: a ':42:NG;' may rebuild this packet with
+            // Copied, not referenced: a refusal may rebuild this packet with
             // the model's alternate keyword before the next attempt.
             std::vector<unsigned char> pkt = sequence[i];
             const bool isWrite = ctrl::IsWrite(pkt);
-            bool triedAlternateKey = false;
+            bool triedAlternateKey = isWrite && ctrl::ApplyAlternateKeyFirst(pkt, options);
 
             if (isWrite)
                 result.writesTotal++;
@@ -313,11 +338,14 @@ namespace ewr {
                 if (!sendAndDrain(pkt, i, drainTimeout, ack))
                     return result;
 
-                // The keyword did not match. Models carrying a second,
-                // Caesar-shifted keyword ('wkey1') get one retry with it;
-                // otherwise fatal on every path, replay included.
-                if (isWrite && ctrl::IsWriteNg(ack))
+                // The keyword did not match: NG, or NA on printers like the
+                // R220. Models carrying a second, Caesar-shifted keyword
+                // ('wkey1') get one retry with it; otherwise fatal on every
+                // path, replay included.
+                const bool ng = isWrite && ctrl::IsWriteNg(ack);
+                if (ng || (isWrite && ctrl::IsWriteNa(ack)))
                 {
+                    const std::string token = ng ? "':42:NG;'" : "':42:NA;'";
                     std::vector<unsigned char> alternate;
                     if (!triedAlternateKey
                         && ctrl::SubstituteTrailingWriteKey(pkt, options.writeKey, options.alternateWriteKey, alternate))
@@ -327,38 +355,23 @@ namespace ewr {
 
                         EmitProgress(reporter, log::Stage::Write, "exec.write_key_retry", i + 1, sequence.size(),
                                      "-> Packet " + std::to_string(i + 1) + " / " + std::to_string(sequence.size())
-                                         + " | Key rejected (||:42:NG;) - retrying with the alternate keyword.");
-                        EmitTrace(reporter, "exec.retry", "[RETRY] Write rejected with ':42:NG;' on packet "
+                                         + " | Key refused (" + token + ") - retrying with the alternate keyword.");
+                        EmitTrace(reporter, "exec.retry", "[RETRY] Write refused with " + token + " on packet "
                             + std::to_string(i + 1) + "; retrying with the alternate keyword ('wkey1')");
 
                         continue;
                     }
 
                     result.writesRejected++;
-                    result.error = "Printer REJECTED EEPROM write (packet " + std::to_string(i + 1)
-                                 + ", reply ':42:NG;'). The write key may not match this model.";
-                    EmitProgress(reporter, log::Stage::Write, "exec.write_rejected", i + 1, sequence.size(),
+                    result.error = std::string(ng ? "Printer REJECTED" : "Printer REFUSED") + " EEPROM write (packet "
+                                 + std::to_string(i + 1) + ", reply " + token + "). "
+                                 + ctrl::WriteRefusalAdvice(ack, triedAlternateKey);
+                    EmitProgress(reporter, log::Stage::Write, ng ? "exec.write_rejected" : "exec.write_refused",
+                                 i + 1, sequence.size(),
                                  "-> Packet " + std::to_string(i + 1) + " / " + std::to_string(sequence.size())
-                                     + " | EEPROM write REJECTED (||:42:NG;).");
-                    EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write rejected with ':42:NG;' on packet " + std::to_string(i + 1) + "\n");
-
-                    return result;
-                }
-
-                // Keys accepted, but the firmware will not service the write in
-                // its current state - typically locked by ink-out, paper-jam or
-                // cover-open. Retrying cannot help.
-                if (isWrite && ctrl::IsWriteNa(ack))
-                {
-                    result.writesRejected++;
-                    result.error = "Printer REFUSED EEPROM write (packet " + std::to_string(i + 1)
-                                 + ", reply ':42:NA;'). The printer is likely locked by another error"
-                                   " state (empty cartridge, paper jam, open cover). Clear that error"
-                                   " first, then run EWR again.";
-                    EmitProgress(reporter, log::Stage::Write, "exec.write_refused", i + 1, sequence.size(),
-                                 "-> Packet " + std::to_string(i + 1) + " / " + std::to_string(sequence.size())
-                                     + " | EEPROM write REFUSED (||:42:NA;) - printer locked by another error.");
-                    EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write refused with ':42:NA;' on packet " + std::to_string(i + 1) + "\n");
+                                     + " | EEPROM write " + (ng ? "REJECTED" : "REFUSED") + " (" + token + ").");
+                    EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write refused with " + token + " on packet "
+                        + std::to_string(i + 1) + "\n");
 
                     return result;
                 }
@@ -732,7 +745,7 @@ namespace ewr {
             result.writesTotal++;
             std::vector<unsigned char> command = factoryWriteCommands[i];
             bool confirmed = false;
-            bool triedAlternateKey = false;
+            bool triedAlternateKey = ctrl::ApplyAlternateKeyFirst(command, options);
 
             for (int attempt = 1; attempt <= 2; ++attempt) // original + one alternate-key retry
             {
@@ -782,8 +795,9 @@ namespace ewr {
                     break;
                 }
 
-                if (ctrl::IsWriteNg(reply))
+                if (ctrl::IsWriteNg(reply) || ctrl::IsWriteNa(reply))
                 {
+                    const std::string token = ctrl::IsWriteNg(reply) ? "||:42:NG;" : "||:42:NA;";
                     std::vector<unsigned char> alternate;
                     if (!triedAlternateKey
                         && ctrl::SubstituteTrailingWriteKey(command, options.writeKey, options.alternateWriteKey, alternate))
@@ -791,22 +805,13 @@ namespace ewr {
                         triedAlternateKey = true;
                         command = std::move(alternate);
                         EmitTrace(reporter, "escr.retry", "[ESC/P] write " + std::to_string(i + 1)
-                            + " rejected (||:42:NG;); retrying with the alternate keyword ('wkey1').");
+                            + " refused (" + token + "); retrying with the alternate keyword ('wkey1').");
                         continue;
                     }
 
                     result.writesRejected++;
-                    result.error = "ESC/P Remote: printer rejected EEPROM write " + std::to_string(i + 1)
-                        + " (||:42:NG;). The write key does not match this model.";
-                    EmitTrace(reporter, "escr.fatal", "[ESC/P] " + result.error);
-                    return result;
-                }
-
-                if (ctrl::IsWriteNa(reply))
-                {
-                    result.writesRejected++;
                     result.error = "ESC/P Remote: printer refused EEPROM write " + std::to_string(i + 1)
-                        + " (||:42:NA;). It is likely locked by another error state.";
+                        + " (" + token + "). " + ctrl::WriteRefusalAdvice(reply, triedAlternateKey);
                     EmitTrace(reporter, "escr.fatal", "[ESC/P] " + result.error);
                     return result;
                 }
@@ -948,7 +953,7 @@ namespace ewr {
             result.writesTotal++;
             std::vector<unsigned char> command = factoryWriteCommands[i];
             bool confirmed = false;
-            bool triedAlternateKey = false;
+            bool triedAlternateKey = ctrl::ApplyAlternateKeyFirst(command, options);
 
             for (int attempt = 1; attempt <= 2; ++attempt) // original + one alternate-key retry
             {
@@ -1007,8 +1012,9 @@ namespace ewr {
                     break;
                 }
 
-                if (ctrl::IsWriteNg(reply))
+                if (ctrl::IsWriteNg(reply) || ctrl::IsWriteNa(reply))
                 {
+                    const std::string token = ctrl::IsWriteNg(reply) ? "||:42:NG;" : "||:42:NA;";
                     std::vector<unsigned char> alternate;
                     if (!triedAlternateKey
                         && ctrl::SubstituteTrailingWriteKey(command, options.writeKey, options.alternateWriteKey, alternate))
@@ -1016,22 +1022,13 @@ namespace ewr {
                         triedAlternateKey = true;
                         command = std::move(alternate);
                         EmitTrace(reporter, "end4.retry", "[END4] write " + std::to_string(i + 1)
-                            + " rejected (||:42:NG;); retrying with the alternate keyword ('wkey1').");
+                            + " refused (" + token + "); retrying with the alternate keyword ('wkey1').");
                         continue;
                     }
 
                     result.writesRejected++;
-                    result.error = "END4: printer rejected EEPROM write " + std::to_string(i + 1)
-                        + " (||:42:NG;). The write key does not match this model.";
-                    EmitTrace(reporter, "end4.fatal", "[END4] " + result.error);
-                    return result;
-                }
-
-                if (ctrl::IsWriteNa(reply))
-                {
-                    result.writesRejected++;
                     result.error = "END4: printer refused EEPROM write " + std::to_string(i + 1)
-                        + " (||:42:NA;). It is likely locked by another error state.";
+                        + " (" + token + "). " + ctrl::WriteRefusalAdvice(reply, triedAlternateKey);
                     EmitTrace(reporter, "end4.fatal", "[END4] " + result.error);
                     return result;
                 }

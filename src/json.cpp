@@ -286,6 +286,7 @@ namespace ewr {
             { "ran", outcome.verificationRan },
             { "mismatches", outcome.verifyMismatches },
             { "unread", outcome.verifyUnread },
+            { "unchanged", outcome.verifyUnchanged },
         };
         out["before"] = json::CounterValues(outcome.before.values);
         out["after"] = json::CounterValues(outcome.after.values);

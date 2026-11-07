@@ -881,10 +881,10 @@ namespace ewr {
             const int maxAttempts = verifyThisWrite ? options.maxWriteAttempts : 1;
             bool confirmed = false;
 
-            // Copied, not referenced: a ':42:NG;' may rebuild this payload with
+            // Copied, not referenced: a refusal may rebuild this payload with
             // the model's alternate keyword before the next attempt.
             std::vector<unsigned char> payload = commands[i].payload;
-            bool triedAlternateKey = false;
+            bool triedAlternateKey = isWrite && ctrl::ApplyAlternateKeyFirst(payload, options);
 
             for (int attempt = 1; attempt <= maxAttempts; ++attempt)
             {
@@ -913,8 +913,12 @@ namespace ewr {
                 if (!reply.empty())
                     result.ackCount++;
 
-                if (isWrite && ctrl::IsWriteNg(reply))
+                // NG, or NA on printers like the R220: the keyword is not this
+                // printer's. One retry with the alternate, if the model has one.
+                const bool ng = isWrite && ctrl::IsWriteNg(reply);
+                if (ng || (isWrite && ctrl::IsWriteNa(reply)))
                 {
+                    const std::string token = ng ? "':42:NG;'" : "':42:NA;'";
                     std::vector<unsigned char> alternate;
                     if (!triedAlternateKey
                         && ctrl::SubstituteTrailingWriteKey(payload, options.writeKey, options.alternateWriteKey, alternate))
@@ -924,35 +928,23 @@ namespace ewr {
 
                         EmitProgress(reporter, log::Stage::Write, "exec.write_key_retry", i + 1, commands.size(),
                                      "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
-                                         + " | Key rejected (||:42:NG;) - retrying with the alternate keyword.");
-                        EmitTrace(reporter, "exec.retry", "[RETRY] Write rejected with ':42:NG;' on command "
+                                         + " | Key refused (" + token + ") - retrying with the alternate keyword.");
+                        EmitTrace(reporter, "exec.retry", "[RETRY] Write refused with " + token + " on command "
                             + std::to_string(i + 1) + "; retrying with the alternate keyword ('wkey1')");
 
                         continue;
                     }
 
                     result.writesRejected++;
-                    result.error = "Printer REJECTED EEPROM write (command " + std::to_string(i + 1)
-                                 + ", reply ':42:NG;'). The write key may not match this model.";
-                    EmitProgress(reporter, log::Stage::Write, "exec.write_rejected", i + 1, commands.size(),
+                    result.error = std::string(ng ? "Printer REJECTED" : "Printer REFUSED") + " EEPROM write (command "
+                                 + std::to_string(i + 1) + ", reply " + token + "). "
+                                 + ctrl::WriteRefusalAdvice(reply, triedAlternateKey);
+                    EmitProgress(reporter, log::Stage::Write, ng ? "exec.write_rejected" : "exec.write_refused",
+                                 i + 1, commands.size(),
                                  "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
-                                     + " | EEPROM write REJECTED (||:42:NG;).");
-                    EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write rejected with ':42:NG;' on command " + std::to_string(i + 1) + "\n");
-
-                    return;
-                }
-
-                if (isWrite && ctrl::IsWriteNa(reply))
-                {
-                    result.writesRejected++;
-                    result.error = "Printer REFUSED EEPROM write (command " + std::to_string(i + 1)
-                                 + ", reply ':42:NA;'). The printer is likely locked by another error"
-                                   " state (empty cartridge, paper jam, open cover). Clear that error"
-                                   " first, then run EWR again.";
-                    EmitProgress(reporter, log::Stage::Write, "exec.write_refused", i + 1, commands.size(),
-                                 "-> Command " + std::to_string(i + 1) + " / " + std::to_string(commands.size())
-                                     + " | EEPROM write REFUSED (||:42:NA;) - printer locked by another error.");
-                    EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write refused with ':42:NA;' on command " + std::to_string(i + 1) + "\n");
+                                     + " | EEPROM write " + (ng ? "REJECTED" : "REFUSED") + " (" + token + ").");
+                    EmitTrace(reporter, "exec.trace_fatal", "[FATAL] Write refused with " + token + " on command "
+                        + std::to_string(i + 1) + "\n");
 
                     return;
                 }

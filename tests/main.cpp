@@ -211,6 +211,8 @@ void test_snmp_reset_writes_and_verifies_through_the_session();
 void test_snmp_backup_then_restore_round_trip();
 void test_snmp_reset_falls_back_to_the_alternate_key();
 void test_snmp_reset_stops_at_a_refused_write();
+void test_snmp_reset_takes_the_alternate_key_after_na();
+void test_snmp_reset_writes_again_with_the_alternate_key_when_writes_are_dropped();
 void test_snmp_reset_refuses_a_replay_dump();
 void test_snmp_gateway_waits_for_the_run_lock();
 void test_snmp_directed_broadcast();
@@ -442,6 +444,8 @@ int main()
     test_snmp_backup_then_restore_round_trip();
     test_snmp_reset_falls_back_to_the_alternate_key();
     test_snmp_reset_stops_at_a_refused_write();
+    test_snmp_reset_takes_the_alternate_key_after_na();
+    test_snmp_reset_writes_again_with_the_alternate_key_when_writes_are_dropped();
     test_snmp_reset_refuses_a_replay_dump();
     test_snmp_gateway_waits_for_the_run_lock();
     test_snmp_directed_broadcast();

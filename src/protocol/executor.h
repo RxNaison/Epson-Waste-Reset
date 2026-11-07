@@ -64,7 +64,7 @@ namespace ewr::exec {
         size_t writesTotal = 0;
         size_t writesVerified = 0;
         size_t writesRejected = 0;
-        // A write was retried with the alternate keyword ('wkey1') after ':42:NG;'.
+        // A write took the alternate keyword ('wkey1'), after ':42:NG;' or ':42:NA;' or from its first attempt.
         bool alternateKeyUsed = false;
         std::string error;
     };

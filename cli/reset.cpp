@@ -142,7 +142,8 @@ namespace ewr::cli {
         }
 
         if (!selected.smartModel.wkey1.empty())
-            std::cout << "    (an alternate write keyword is available if the primary is rejected)" << std::endl;
+            std::cout << "    (an alternate write keyword is tried if the printer refuses the primary one\n"
+                         "     or acknowledges its writes and keeps the old values)" << std::endl;
 
         std::cout << "\n[DRY RUN] Nothing was written. Run without --dry-run to perform the reset." << std::endl;
 

@@ -52,8 +52,8 @@ namespace ewr {
         // What the write session acknowledged. Both stay 0 when it never ran.
         size_t writesVerified = 0;
         size_t writesTotal = 0;
-        // The database's primary keyword was rejected and 'wkey1' worked -
-        // a reportable database fix.
+        // The database's primary keyword was refused, or acknowledged with
+        // nothing changed, and 'wkey1' worked - a reportable database fix.
         bool alternateKeyUsed = false;
         // Schema-4 close step: true when it confirmed or none was needed.
         bool committed = true;
@@ -62,6 +62,9 @@ namespace ewr {
         bool verificationRan = false;
         size_t verifyMismatches = 0; // counters differing from their reset value
         size_t verifyUnread = 0;     // counters that did not answer the read-back
+        // Of the mismatches, those still holding their preflight value: the
+        // write was acknowledged and dropped.
+        size_t verifyUnchanged = 0;
 
         StateSnapshot before; // preflight snapshot
         StateSnapshot after;  // read-back snapshot
@@ -190,6 +193,9 @@ namespace ewr {
         // False when the run must stop: a backup that could not be kept, or
         // came back short, and the host declined to go on without it.
         bool KeepBackup(const ResetFlow& flow, const ResetHandlers& handlers, ResetOutcome& out);
+
+        // Reads the written bytes back and sets out's verify* counts afresh.
+        void VerifyReadBack(const ResetFlow& flow, const ResetHandlers& handlers, ResetOutcome& out);
 
         StateSnapshot ReadStateFor(const std::vector<uint16_t>* addressOverride) const;
 

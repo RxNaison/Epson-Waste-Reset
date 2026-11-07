@@ -888,6 +888,37 @@ void test_alternate_write_key_retry_d4()
     CHECK(!bothRejected.success);
     CHECK(!bothRejected.alternateKeyUsed);
     CHECK(bothRejected.writesRejected == 1);
+
+    // NA, which an R220 answers to a key that is not its own, earns it too.
+    FakeTransport naPrinter;
+    naPrinter.replyFor = D4SessionReplier(0x02, [](const std::vector<unsigned char>& sent) -> std::vector<unsigned char> {
+        return EndsWithKey(sent, "Bslbopje") ? OkAck() : NaAck();
+    });
+
+    std::ostringstream naOut;
+    auto na = ewr::exec::RunSequence(naPrinter, legacy::GenerateSequence(MakeTestModel()), naOut, log, options);
+    CHECK(na.success);
+    CHECK(na.alternateKeyUsed);
+    CHECK(na.writesVerified == 2);
+
+    // Asked to start with the alternate (the second pass after dropped
+    // writes), no write goes out with the primary keyword.
+    FakeTransport first;
+    size_t primarySent = 0;
+    first.replyFor = D4SessionReplier(0x02, [&primarySent](const std::vector<unsigned char>& sent) -> std::vector<unsigned char> {
+        if (EndsWithKey(sent, "Arkanoid"))
+            primarySent++;
+        return OkAck();
+    });
+
+    ewr::ExecutorOptions alternateFirst = options;
+    alternateFirst.alternateKeyFirst = true;
+    std::ostringstream firstOut;
+    auto firstRun = ewr::exec::RunSequence(first, legacy::GenerateSequence(MakeTestModel()), firstOut, log, alternateFirst);
+    CHECK(firstRun.success);
+    CHECK(firstRun.alternateKeyUsed);
+    CHECK(firstRun.writesVerified == 2);
+    CHECK(primarySent == 0);
 }
 
 // The D4 framer sees the status line before its resync discards it as junk.

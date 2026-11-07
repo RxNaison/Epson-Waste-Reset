@@ -331,8 +331,10 @@ void test_snmp_reset_stops_at_a_refused_write()
     CHECK(outcome.error.find(":42:NA;") != std::string::npos);
     CHECK(err.str().find(":42:NA;") != std::string::npos);
     CHECK(err.str().find("NOT confirmed as reset") != std::string::npos);
-    // The first refusal ends the run: the second write is never sent.
-    CHECK(script->writesSeen == 1);
+    // Refused, then refused with the alternate keyword: the run ends there,
+    // and the second write is never sent.
+    CHECK(script->writesSeen == 2);
+    CHECK(outcome.error.find("Both of the database's write keywords") != std::string::npos);
     CHECK(script->eeprom[0x30] == 0xCA && script->eeprom[0x1FE] == 0x18);
 
     // Nothing ever answered: session.device_not_found says so, not this.
@@ -352,6 +354,150 @@ void test_snmp_reset_stops_at_a_refused_write()
 
     CHECK(!run.deviceFound);
     CHECK(notConfirmed == 0);
+}
+
+// An R220 answers ':42:NA;' to a key that is not its own, in the same state
+// that takes its own key: NA earns the alternate keyword as NG does.
+void test_snmp_reset_takes_the_alternate_key_after_na()
+{
+    std::cout << "[TEST] test_snmp_reset_takes_the_alternate_key_after_na" << std::endl;
+
+    auto printer = snmp_test::FullPads();
+    snmp_test::EepromPrinter* script = printer.get();
+    script->acceptedKey = script->model.wkey1;
+    script->wrongKeyVerdict = "NA";
+    const ewr::DbPrinterModel model = script->model;
+
+    ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+    ewr::log::Reporter quiet;
+    ewr::Session session(model, gateway, quiet);
+    const ewr::ResetOutcome outcome = session.Reset();
+
+    CHECK(outcome.success);
+    CHECK(outcome.alternateKeyUsed);
+    CHECK(script->eeprom[0x30] == 0x00 && script->eeprom[0x1FE] == 0x00);
+    CHECK(script->writesSeen == 4);
+}
+
+// An ET-3950 (#63) and an XP-950 (epson_print_conf#133) answer ':42:OK;' to
+// any key and keep their old values unless it is their own.
+void test_snmp_reset_writes_again_with_the_alternate_key_when_writes_are_dropped()
+{
+    std::cout << "[TEST] test_snmp_reset_writes_again_with_the_alternate_key_when_writes_are_dropped" << std::endl;
+
+    ewr::log::Reporter reporter;
+
+    // The alternate keyword is this printer's: the second pass sticks.
+    {
+        auto printer = snmp_test::FullPads();
+        snmp_test::EepromPrinter* script = printer.get();
+        script->acceptedKey = script->model.wkey1;
+        script->wrongKeyVerdict = "OK";
+        const ewr::DbPrinterModel model = script->model;
+
+        std::vector<std::string> codes;
+        const int sink = reporter.AddSink([&](const ewr::log::Event& e) { codes.push_back(e.code); });
+
+        ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+        ewr::Session session(model, gateway, reporter);
+        int verified = 0;
+        ewr::ResetHandlers handlers;
+        handlers.onVerify = [&](const ewr::StateSnapshot&) { verified++; };
+        const ewr::ResetOutcome outcome = session.Reset(handlers);
+        reporter.RemoveSink(sink);
+
+        CHECK(outcome.phase == ewr::ResetPhase::Done);
+        CHECK(outcome.success && outcome.error.empty());
+        CHECK(outcome.alternateKeyUsed);
+        CHECK(outcome.verifyMismatches == 0 && outcome.verifyUnchanged == 0);
+        CHECK(outcome.writesVerified == 2 && outcome.writesTotal == 2);
+        CHECK(script->eeprom[0x30] == 0x00 && script->eeprom[0x1FE] == 0x00);
+        CHECK(script->writesSeen == 4); // each write once per keyword
+        CHECK(verified == 2);           // read back after each pass
+        CHECK(std::count(codes.begin(), codes.end(), "session.alternate_key_retry") == 1);
+        CHECK(std::count(codes.begin(), codes.end(), "session.alternate_key") == 1);
+        CHECK(ewr::json::ResetData(model, false, outcome)["alternate_key_used"] == true);
+    }
+
+    // Neither keyword is: both passes dropped, and the error says what that means.
+    {
+        auto printer = snmp_test::FullPads();
+        snmp_test::EepromPrinter* script = printer.get();
+        script->acceptedKey = "Zzzzzzzz";
+        script->wrongKeyVerdict = "OK";
+        const ewr::DbPrinterModel model = script->model;
+
+        ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+        ewr::Session session(model, gateway, reporter);
+        const ewr::ResetOutcome outcome = session.Reset();
+
+        CHECK(outcome.phase == ewr::ResetPhase::Done && !outcome.success);
+        CHECK(!outcome.alternateKeyUsed);
+        CHECK(outcome.verifyMismatches == 2 && outcome.verifyUnchanged == 2);
+        CHECK(outcome.error.find("both of the database's write keywords") != std::string::npos);
+        CHECK(script->writesSeen == 4);
+        CHECK(script->eeprom[0x30] == 0xCA && script->eeprom[0x1FE] == 0x18);
+        CHECK(ewr::json::ResetData(model, false, outcome)["verification"]["unchanged"] == 2);
+    }
+
+    // No alternate keyword: one pass, and the key is named as the suspect.
+    {
+        auto printer = snmp_test::FullPads();
+        snmp_test::EepromPrinter* script = printer.get();
+        script->model.wkey1.clear();
+        script->acceptedKey = "Zzzzzzzz";
+        script->wrongKeyVerdict = "OK";
+        const ewr::DbPrinterModel model = script->model;
+
+        ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+        ewr::Session session(model, gateway, reporter);
+        const ewr::ResetOutcome outcome = session.Reset();
+
+        CHECK(!outcome.success && outcome.verifyUnchanged == 2);
+        CHECK(outcome.error.find("may not be this printer's") != std::string::npos);
+        CHECK(script->writesSeen == 2);
+    }
+
+    // The primary keyword was taken and the read-back only looks dropped: the
+    // printer refuses the alternate, which clears the key of suspicion.
+    {
+        auto printer = snmp_test::FullPads();
+        snmp_test::EepromPrinter* script = printer.get();
+        script->staleReads = true;
+        const ewr::DbPrinterModel model = script->model;
+
+        std::vector<std::string> codes;
+        const int sink = reporter.AddSink([&](const ewr::log::Event& e) { codes.push_back(e.code); });
+
+        ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+        ewr::Session session(model, gateway, reporter);
+        const ewr::ResetOutcome outcome = session.Reset();
+        reporter.RemoveSink(sink);
+
+        CHECK(outcome.phase == ewr::ResetPhase::Done && !outcome.success);
+        CHECK(outcome.verifyMismatches == 2 && outcome.verifyUnchanged == 2);
+        CHECK(!outcome.alternateKeyUsed);
+        CHECK(outcome.error.find("kept their old values") == std::string::npos);
+        CHECK(std::count(codes.begin(), codes.end(), "session.alternate_key_refused") == 1);
+        CHECK(script->writesSeen == 3); // two taken, then the alternate refused at once
+    }
+
+    // A byte that moved to a third value is not a dropped write: no second pass.
+    {
+        auto printer = snmp_test::FullPads();
+        snmp_test::EepromPrinter* script = printer.get();
+        script->drift = 3;
+        const ewr::DbPrinterModel model = script->model;
+
+        ewr::SnmpDeviceGateway gateway("192.0.2.1", std::move(printer));
+        ewr::Session session(model, gateway, reporter);
+        const ewr::ResetOutcome outcome = session.Reset();
+
+        CHECK(!outcome.success && outcome.verifyMismatches == 2 && outcome.verifyUnchanged == 0);
+        CHECK(!outcome.alternateKeyUsed);
+        CHECK(outcome.error.find("kept their old values") == std::string::npos);
+        CHECK(script->writesSeen == 2);
+    }
 }
 
 void test_snmp_reset_refuses_a_replay_dump()

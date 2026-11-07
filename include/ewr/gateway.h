@@ -66,12 +66,17 @@ namespace ewr {
         // run's first device session only. A diagnostic switch, off by default.
         bool usbSoftReset = false;
 
-        // Some models carry a second write keyword ('wkey1'). ':42:NG;' means
-        // the keyword did not match, so the executor retries that one write
-        // with the alternate. The retry is a tail substitution and is skipped
-        // when the keywords differ in length.
+        // Some models carry a second write keyword ('wkey1'). A write turned
+        // down with ':42:NG;' or ':42:NA;' is retried once with it: an R220
+        // answers NA to a key that is not its own. The retry is a tail
+        // substitution and is skipped when the keywords differ in length.
         std::string writeKey;
         std::string alternateWriteKey;
+        // Every write goes out with alternateWriteKey from its first attempt:
+        // the second pass after a printer acknowledged the primary keyword
+        // and kept its old values, which is how an ET-3950 (#63) and an
+        // XP-950 (epson_print_conf#133) answer a key that is not theirs.
+        bool alternateKeyFirst = false;
 
         // Which printer and database entry this run is about, printed in the
         // banner of every ewr_trace.log session. A trace sent in by email
@@ -113,10 +118,11 @@ namespace ewr {
         bool d4Answered = false;
         // At least one write drew replies, but ':42:OK;' never arrived.
         bool writesUnverified = false;
-        // A write was retried with the alternate keyword ('wkey1') after
-        // ':42:NG;' AND that retry was confirmed. Worth surfacing: the
-        // database's primary keyword is wrong here. False when both keywords
-        // were rejected - that is a bad database entry, not a fixed one.
+        // A write went with the alternate keyword ('wkey1'), after a refusal
+        // or from the start (alternateKeyFirst), AND it was confirmed. Worth
+        // surfacing: the database's primary keyword is wrong here. False when
+        // both keywords were refused - that is a bad database entry, not a
+        // fixed one.
         bool alternateKeyUsed = false;
         std::string error;
     };

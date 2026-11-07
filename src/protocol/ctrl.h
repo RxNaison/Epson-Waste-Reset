@@ -32,7 +32,7 @@ namespace ewr::ctrl {
     std::vector<unsigned char> ReadPacket(uint16_t rkey, uint16_t address, uint8_t addressLength = 2);
 
     // Action 0x42; `addressLength` follows the model's 'wlen'. Public so
-    // a caller can rebuild one write with 'wkey1' after a ':42:NG;'.
+    // a caller can rebuild one write with 'wkey1' after ':42:NG;' or ':42:NA;'.
     std::vector<unsigned char> WritePacket(uint16_t rkey, uint16_t address, uint8_t value,
                                            const std::string& wkey, uint8_t addressLength = 2);
 
@@ -75,6 +75,11 @@ namespace ewr::ctrl {
                                     const std::string& to,
                                     std::vector<unsigned char>& out);
 
+    // `write` with options.alternateWriteKey in place of the primary one, in
+    // place, when options.alternateKeyFirst asks for it and the substitution
+    // is legal. True when it was swapped.
+    bool ApplyAlternateKeyFirst(std::vector<unsigned char>& write, const ExecutorOptions& options);
+
     // Strips the 6-byte D4 data header d4::DataPacket prepends to every
     // write packet. Handshake and credit packets mean nothing over END4 and
     // are dropped.
@@ -94,9 +99,15 @@ namespace ewr::ctrl {
 
     bool IsWriteOk(const std::vector<unsigned char>& ackData);
     bool IsWriteNg(const std::vector<unsigned char>& ackData);
-    // ':42:NA;' - the firmware understood the write but refuses to apply it
-    // in its current state (locked by a foreign error). Retrying is pointless.
+    // ':42:NA;' - the write was refused. An R220 answers it to a key that is
+    // not its own, in the same INK OUT state that takes its own key, and #59's
+    // SC-P600 to a malformed one. That a printer error alone draws it has not
+    // been seen.
     bool IsWriteNa(const std::vector<unsigned char>& ackData);
+
+    // Why a write was turned down with `reply` (NG or NA), for the run's
+    // error; `bothKeys` when the alternate keyword was refused as well.
+    std::string WriteRefusalAdvice(const std::vector<unsigned char>& reply, bool bothKeys);
 
     // valid=false when the stream holds no parseable status. A report whose
     // fields run past the end of the payload parses what arrived and sets
@@ -139,8 +150,9 @@ namespace ewr::ctrl {
 
     // The one write loop, whatever carries it. With options.verifyWrites
     // every write must come back ':42:OK;': an unconfirmed one is sent again
-    // (a write is idempotent), ':42:NG;' earns one retry with the alternate
-    // keyword, and ':42:NA;' ends the run. Fills `result` past the handshake.
+    // (a write is idempotent), ':42:NG;' or ':42:NA;' earns one retry with
+    // the alternate keyword, and a second refusal ends the run. Fills
+    // `result` past the handshake.
     void RunCommands(const Exchange& exchange,
                      const std::vector<Command>& commands,
                      log::Reporter& reporter,

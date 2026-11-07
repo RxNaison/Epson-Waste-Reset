@@ -19,8 +19,8 @@ namespace ewr {
     namespace {
 
         // These are the states EWR exists to fix and they still accept EEPROM
-        // writes. Foreign locks (ink out, jam, open cover) are the ones the
-        // firmware answers with ':42:NA;'.
+        // writes. Foreign errors (ink out, jam, open cover) are gated on
+        // caution: an R220 in INK OUT took its own key's writes.
         constexpr int kServiceRequest = 0x10;
         constexpr int kCartridgeOverflow = 0x2C;
 
@@ -954,8 +954,8 @@ namespace ewr {
             return out;
         }
 
-        // ---- Preflight. A printer locked by a foreign error refuses writes
-        // with ':42:NA;', so surface that up front rather than failing halfway.
+        // ---- Preflight. A foreign error is surfaced up front rather than
+        // found halfway through the writes.
         m_reporter.Log(log::Level::Info, log::Stage::Read, "session.preflight",
                        "\n[*] Preflight: reading printer status before writing (read-only)...");
 
@@ -1105,13 +1105,14 @@ namespace ewr {
         out.writesTotal = run.exec.writesTotal;
 
         // Surfacing this turns a silent recovery into a reportable DB fix.
-        if (run.exec.alternateKeyUsed)
-        {
+        auto reportAlternateKey = [&]() {
             m_reporter.Log(log::Level::Info, log::Stage::Write, "session.alternate_key",
-                           "\n[i] This printer rejected the database's primary write keyword and accepted the\n"
+                           "\n[i] This printer did not take the database's primary write keyword and took the\n"
                            "    alternate one ('wkey1'). Please report this model at:\n"
                            "    https://github.com/RxNaison/Epson-Waste-Reset/issues");
-        }
+        };
+        if (run.exec.alternateKeyUsed)
+            reportAlternateKey();
 
         if (!run.exec.success)
         {
@@ -1129,74 +1130,160 @@ namespace ewr {
 
         // ---- Read-back verification.
         if (preflightRan)
+            VerifyReadBack(flow, handlers, out);
+
+        // Acknowledged is not applied. An ET-3950 (#63) and an XP-950
+        // (epson_print_conf#133) answer ':42:OK;' to any key, a made-up one
+        // included, and keep their old values unless it is their own. So when
+        // every byte that disagrees still holds what the preflight read, a
+        // model with a second keyword gets the same writes once more with it.
+        // A byte that moved to a third value is not a dropped write.
+        bool triedAlternateKey = run.exec.alternateKeyUsed;
+        bool primaryKeyTaken = false;
+        if (out.verifyMismatches > 0 && out.verifyUnchanged == out.verifyMismatches && !triedAlternateKey
+            && !m_model.wkey1.empty() && m_model.wkey1.size() == m_model.wkey.size())
         {
-            m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verifying",
-                           "\n[*] Verifying the " + flow.runNoun + " by reading the " + flow.counterNoun + "s back...");
+            m_reporter.Log(log::Level::Warning, log::Stage::Write, "session.alternate_key_retry",
+                           "\n[!] The printer acknowledged every write, but " + std::to_string(out.verifyUnchanged) + " " +
+                               flow.counterNoun + "(s) kept their old value. Some printers answer\n"
+                               "    a write key that is not theirs this way, so EWR sends the writes once more\n"
+                               "    with the model's alternate keyword ('wkey1').",
+                           { { "unchanged", std::to_string(out.verifyUnchanged) } });
 
-            out.after = flow.readAddresses.has_value() ? ReadStateFor(&flow.readAddresses.value())
-                                                       : ReadState();
+            ExecutorOptions alternateOptions = writeOptions;
+            alternateOptions.alternateKeyFirst = true;
+            const ResetRunResult second = m_gateway.RunReset(flow.sequence, alternateOptions);
+            triedAlternateKey = true;
 
-            if (out.after.available && !out.after.values.empty())
+            if (second.deviceFound && second.exec.writesRejected > 0)
             {
-                out.verificationRan = true;
-
-                if (handlers.onVerify)
-                    handlers.onVerify(out.after);
-
-                const std::vector<uint16_t>& addrs = flow.verifyAddresses;
-                const std::vector<uint8_t>& resets = flow.verifyValues;
-
-                for (const auto& entry : out.after.values)
-                {
-                    int expected = -1;
-                    for (size_t k = 0; k < addrs.size() && k < resets.size(); ++k)
-                    {
-                        if (addrs[k] == entry.first)
-                        {
-                            expected = resets[k];
-                            break;
-                        }
-                    }
-
-                    if (entry.second < 0)
-                        out.verifyUnread++;
-                    else if (expected >= 0 && entry.second != expected)
-                        out.verifyMismatches++;
-                }
-
-                if (out.verifyMismatches == 0 && out.verifyUnread == 0)
-                    m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verified",
-                                   "[SUCCESS] Read-back verification: every " + flow.counterNoun +
-                                       " now holds its " + flow.expectedValueNoun + ".");
-                else if (out.verifyMismatches > 0)
-                    m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_mismatch",
-                                   "[!] Read-back verification: " + std::to_string(out.verifyMismatches) +
-                                       " " + flow.counterNoun + "(s) do not match their " + flow.expectedValueNoun + ". Power-cycle the printer and run " +
-                                       flow.recheckCommand + " to re-check.");
-                else
-                    m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_incomplete",
-                                   "[i] Read-back verification incomplete: " + std::to_string(out.verifyUnread) +
-                                       " " + flow.counterNoun + "(s) did not answer.");
+                // A printer that refuses the alternate keyword tells keys
+                // apart, so its ':42:OK;' to the primary one was real and the
+                // read-back disagrees for another reason.
+                primaryKeyTaken = true;
+                m_reporter.Log(log::Level::Info, log::Stage::Write, "session.alternate_key_refused",
+                               "[i] The printer refused the alternate keyword, so the primary one was its own:\n"
+                               "    the " + flow.counterNoun + "s disagree for another reason.");
+            }
+            else if (!second.deviceFound || !second.exec.success)
+            {
+                out.success = false;
+                out.phase = ResetPhase::WriteFailed;
+                out.error = second.deviceFound && !second.exec.error.empty()
+                    ? second.exec.error
+                    : "The printer stopped answering before the writes with the alternate keyword.";
+                return out;
             }
             else
             {
-                m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_unavailable",
-                               "[i] Read-back verification unavailable (the printer did not answer the read queries).");
+                out.writesVerified = second.exec.writesVerified;
+                out.writesTotal = second.exec.writesTotal;
+
+                if (flow.commit)
+                    out.committed = RunCommit(alternateOptions);
+
+                VerifyReadBack(flow, handlers, out);
+
+                // Every write is acknowledged either way here: only the
+                // read-back says the alternate keyword worked.
+                if (out.verificationRan && out.verifyMismatches == 0 && out.verifyUnread == 0)
+                {
+                    out.alternateKeyUsed = true;
+                    reportAlternateKey();
+                }
             }
         }
 
-        // Acknowledged is not applied. A printer can answer ':42:OK;' to every
-        // write and keep its old values (#18, #63); the read-back is what says
-        // so, and a run it contradicts did not do what it was asked.
         if (out.verifyMismatches > 0)
         {
             out.success = false;
             out.error = "The printer acknowledged the writes, but " + std::to_string(out.verifyMismatches) + " " +
                         flow.counterNoun + "(s) read back without their " + flow.expectedValueNoun + ".";
+
+            if (out.verifyUnchanged == out.verifyMismatches && !primaryKeyTaken)
+                out.error += triedAlternateKey && !m_model.wkey1.empty()
+                    ? " They kept their old values with both of the database's write keywords for this"
+                      " model: neither is this printer's, or its firmware takes no EEPROM writes."
+                    : " They kept their old values, which is how some printers answer a write key that"
+                      " is not theirs: the database's key for this model may not be this printer's.";
         }
 
         out.phase = ResetPhase::Done;
         return out;
+    }
+
+    void Session::VerifyReadBack(const ResetFlow& flow, const ResetHandlers& handlers, ResetOutcome& out)
+    {
+        out.verificationRan = false;
+        out.verifyMismatches = 0;
+        out.verifyUnread = 0;
+        out.verifyUnchanged = 0;
+
+        m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verifying",
+                       "\n[*] Verifying the " + flow.runNoun + " by reading the " + flow.counterNoun + "s back...");
+
+        out.after = flow.readAddresses.has_value() ? ReadStateFor(&flow.readAddresses.value())
+                                                   : ReadState();
+
+        if (!out.after.available || out.after.values.empty())
+        {
+            m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_unavailable",
+                           "[i] Read-back verification unavailable (the printer did not answer the read queries).");
+            return;
+        }
+
+        out.verificationRan = true;
+
+        if (handlers.onVerify)
+            handlers.onVerify(out.after);
+
+        const std::vector<uint16_t>& addrs = flow.verifyAddresses;
+        const std::vector<uint8_t>& resets = flow.verifyValues;
+
+        for (const auto& entry : out.after.values)
+        {
+            int expected = -1;
+            for (size_t k = 0; k < addrs.size() && k < resets.size(); ++k)
+            {
+                if (addrs[k] == entry.first)
+                {
+                    expected = resets[k];
+                    break;
+                }
+            }
+
+            if (entry.second < 0)
+            {
+                out.verifyUnread++;
+            }
+            else if (expected >= 0 && entry.second != expected)
+            {
+                out.verifyMismatches++;
+                for (const auto& was : out.before.values)
+                {
+                    if (was.first == entry.first)
+                    {
+                        if (was.second == entry.second)
+                            out.verifyUnchanged++;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (out.verifyMismatches == 0 && out.verifyUnread == 0)
+            m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verified",
+                           "[SUCCESS] Read-back verification: every " + flow.counterNoun +
+                               " now holds its " + flow.expectedValueNoun + ".");
+        else if (out.verifyMismatches > 0)
+            m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_mismatch",
+                           "[!] Read-back verification: " + std::to_string(out.verifyMismatches) +
+                               " " + flow.counterNoun + "(s) do not match their " + flow.expectedValueNoun + ". Power-cycle the printer and run " +
+                               flow.recheckCommand + " to re-check.");
+        else
+            m_reporter.Log(log::Level::Info, log::Stage::Verify, "session.verify_incomplete",
+                           "[i] Read-back verification incomplete: " + std::to_string(out.verifyUnread) +
+                               " " + flow.counterNoun + "(s) did not answer.");
     }
 
 } // namespace ewr

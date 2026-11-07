@@ -481,7 +481,8 @@ void test_executor_na_refusal_fails_without_retry()
     auto seq = ewr::ctrl::ResetSequence(MakeTestModel());
 
     // The printer answers the handshake normally but refuses every EEPROM
-    // write with ':42:NA;' (locked by another error, e.g. empty cartridge).
+    // write with ':42:NA;', as an R220 does a key that is not its own. With
+    // no alternate keyword there is nothing to retry with.
     FakeTransport t;
     t.replyFor = [](const std::vector<unsigned char>& pkt) {
         return ewr::ctrl::IsWrite(pkt) ? NaAck() : HandshakeAck();
@@ -497,7 +498,7 @@ void test_executor_na_refusal_fails_without_retry()
     // first write (5 handshake packets + 1 refused write).
     CHECK(t.sent.size() == 6);
     CHECK(result.error.find(":42:NA;") != std::string::npos);
-    CHECK(result.error.find("locked") != std::string::npos);
+    CHECK(result.error.find("key that is not their own") != std::string::npos);
 }
 
 void test_executor_na_refusal_fatal_in_replay_mode()
@@ -551,6 +552,20 @@ void test_alternate_write_key_retry()
     CHECK(result.writesTotal == 2);
     CHECK(result.writesVerified == 2);
     CHECK(result.writesRejected == 0);
+
+    // ':42:NA;' earns the same retry.
+    FakeTransport na;
+    na.replyFor = [](const std::vector<unsigned char>& pkt) -> std::vector<unsigned char> {
+        if (!ewr::ctrl::IsWrite(pkt))
+            return HandshakeAck();
+        return EndsWithKey(pkt, "Bslbopje") ? OkAck() : NaAck();
+    };
+
+    std::ostringstream naOut;
+    auto refusedOnce = ewr::exec::RunSequence(na, legacy::GenerateSequence(MakeTestModel()), naOut, log, options);
+    CHECK(refusedOnce.success);
+    CHECK(refusedOnce.alternateKeyUsed);
+    CHECK(refusedOnce.writesVerified == 2);
 
     // Without an alternate keyword, ':42:NG;' stays fatal on the first write.
     FakeTransport plain;

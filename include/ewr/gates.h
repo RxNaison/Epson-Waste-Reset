@@ -8,7 +8,8 @@
 namespace ewr {
 
     // A foreign printer error (empty cartridge, paper jam, open cover, ...).
-    // Firmware locked by one usually refuses factory writes with ':42:NA;'.
+    // Gated on caution, not evidence: an R220 in INK OUT took writes with its
+    // own key, and its ':42:NA;' meant a key that was not its own.
     struct Blocker
     {
         std::string errorName;   // ST2 error name, e.g. "INK OUT"

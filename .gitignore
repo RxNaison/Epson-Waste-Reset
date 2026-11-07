@@ -12,6 +12,7 @@ database.json.tmp
 
 __pycache__/
 ewr_dump_*.txt
+backups/
 dump-console-log*.txt
 
 ewr.zip

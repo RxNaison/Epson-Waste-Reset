@@ -62,10 +62,13 @@ namespace ewr {
 
     // flock, not a lock file's existence: the kernel drops it when the process
     // dies, so a killed run leaves nothing to clean up. The file itself stays
-    // behind and is meant to.
+    // behind and is meant to. Read-only is all flock needs, and it lets a user's
+    // run lock the root-owned 0644 file a `sudo ewr` left: read-write, that open
+    // failed and the run went ahead unlocked. No link is followed in a /tmp
+    // everyone can write to.
     RunLock::RunLock()
     {
-        const int fd = ::open(LockPath().c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+        const int fd = ::open(LockPath().c_str(), O_RDONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0666);
         if (fd < 0)
         {
             m_held = true; // read-only /tmp, a sandbox - not a reason to stop

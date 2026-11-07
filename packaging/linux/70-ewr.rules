@@ -1,0 +1,3 @@
+# EWR: the logged-in user may open Epson USB printers without sudo.
+# uaccess grants the seat's user, and only that user - no world-writable mode.
+SUBSYSTEM=="usb", ATTR{idVendor}=="04b8", TAG+="uaccess"

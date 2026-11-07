@@ -56,6 +56,16 @@ namespace snmp {
         virtual std::vector<unsigned char> Receive(int timeoutMs) = 0;
     };
 
+    // The port a network Epson takes raw print data on.
+    constexpr uint16_t kRawPrintPort = 9100;
+
+    // Print data to a printer's raw port: connect within `timeoutMs`, send
+    // every byte, close. Nothing is read back - the port answers nothing. A
+    // nozzle check or a remote-mode cleaning travels this way, because SNMP
+    // carries control commands but not print data.
+    bool SendRawTcp(const std::string& host, uint16_t port, const std::vector<unsigned char>& data,
+                    int timeoutMs, std::string& error);
+
     // UDP to host:port, `host` a name or an address. nullptr with `error` set
     // when the name does not resolve or no socket can be opened; a printer
     // that is merely absent still yields a channel, and silence on it.

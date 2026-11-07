@@ -57,7 +57,7 @@ Every line carries these:
 | --- | --- | --- |
 | `ewr` | string | EWR version, e.g. `"1.5.1"`. |
 | `platform` | string | `windows`, `linux` or `macos`. |
-| `command` | string | `status`, `dump`, `list`, `dry-run`, `reset`, `find-addresses` or `find-key`. |
+| `command` | string | `status`, `dump`, `list`, `dry-run`, `reset`, `find-addresses`, `find-key`, `restore`, `restore-all`, `info`, `nozzle-check`, `head-clean` or `power-clean`. |
 | `model` | string/null | What `--model` named, before matching. `null` when not given. |
 | `flags` | object | The switches that change behavior: `no_update`, `yes`, `force_yes`, `cartridge`, `usb_soft_reset`, `interface` (int, 0 = automatic), `ip` (string, the `--ip` address, or `auto`; `null` on a USB run). |
 
@@ -74,7 +74,8 @@ Every line carries these:
 | `fields` | object | String to string. Keys are as stable as `code`. |
 
 Codes are namespaced by layer (`db.`, `usb.`, `snmp.`, `exec.`, `d4.`,
-`end4.`, `update.`). A release can add codes; it will not repurpose one.
+`end4.`, `update.`, `session.`, `maintenance.`). A release can add codes; it
+will not repurpose one.
 
 Events that carry `fields` so far (every value is a string; numbers are decimal):
 
@@ -87,6 +88,24 @@ Events that carry `fields` so far (every value is a string; numbers are decimal)
 | `usb.ready_print_driver` | `queue`, `port`. Warning: the printer did not answer, and the queue on its port uses Windows Ready Print's "Microsoft IPP Class Driver" |
 
 Both come from the first USB session of a run that ends with the printer silent, one event per queue; a later silent session in the same run repeats neither.
+
+| Code | Fields |
+| --- | --- |
+| `session.backup_saved` | `file`: where the backup went (empty when a C API host kept it), `bytes`: how many bytes it holds |
+| `session.backup_incomplete` | `answered`, `total`: the preflight left bytes unread, so the backup could not undo all of the write |
+| `session.backup_failed` | `bytes`. The backup could not be kept; the run asks the blocker gate whether to go on |
+| `session.restore_other_printer` | `file_serial`, `printer_serial`: a restore file names another printer |
+| `session.range_reads`, `session.single_reads` | `bytes`, `requests`: whether a long read went by ranges or byte by byte |
+| `session.alternate_key_retry` | `unchanged`: how many bytes kept their old value although every write was acknowledged. The writes go once more with the model's alternate keyword |
+| `maintenance.sending` | `route`: `factory`, `remote` or `factory_print`, `group`: `all`, `black` or `color` |
+| `maintenance.started` | `state`: the printer's state when it was first seen at work |
+| `maintenance.expected` | `seconds`: how long the printer says the cleaning takes, from its status report. Not every printer says; EWR watches at least that long plus a margin |
+| `maintenance.silent` | `seconds`: when the printer first left a status query unanswered after print data, which it does while it works on the job |
+| `maintenance.fallback` | `from`: `factory`, `to`: `remote` or `factory_print`, `reply`: the refusal (`\|\|:84:NA;`). The cleaning is sent as print data instead, once |
+| `maintenance.done` | `seconds`: from the send until the printer was idle again |
+| `maintenance.error` | `error`, `error_code`: what the printer reported while at it |
+| `maintenance.refused` | `reply`: the printer's answer to the maintenance command |
+| `maintenance.pad_delta` | `counter`, `before`, `after`, `max`: what a cleaning did to one waste counter |
 
 ## `result`
 
@@ -112,13 +131,18 @@ Both come from the first USB session of a run that ends with the printer silent,
 | `model_unknown` | `--model` matched nothing usable. |
 | `model_ambiguous` | `--model` matched several models. |
 | `model_mismatch` | `--model` names something other than the printer that answered. |
-| `not_supported` | The model cannot do this (a Replay dump has no read key, no ink map for `--cartridge`), or cannot over this connection (a printer that locks its EEPROM over the network). |
+| `not_supported` | The model cannot do this (a Replay dump has no read key, no ink map for `--cartridge`, an entry with no reset addresses yet, a JIG-mode model's reset), or cannot over this connection (a printer that locks its EEPROM over the network). |
 | `read_failed` | The printer did not answer the read. |
 | `incomplete_dump` | Some addresses went unread; the file is not a backup. |
 | `blocked` | A gate stopped the run: a printer error, a database conflict, or a confirmation that was not given. Nothing was written. |
 | `write_failed` | The write session failed. Some writes may have been applied. |
 | `write_unverified` | Writes were acknowledged but the read-back did not confirm them. |
 | `io_error` | A file could not be written. |
+| `bad_backup` | The `--restore` file is not a backup or dump EWR can use, names another model, or holds none of the model's bytes. Nothing was written. |
+| `send_failed` | A maintenance command could not be sent, or the printer refused it. |
+| `not_started` | The printer took a maintenance command but never set to work. |
+| `printer_error` | The printer reported an error while it worked on a maintenance command. |
+| `timed_out` | The printer was still at work when EWR stopped watching. |
 | `failed` | The run stopped for a reason with no more specific code. Read `error`. A release may replace it with a narrower code, so treat it as "something went wrong", never as a particular thing. |
 
 Every way a run can stop names one of these. `failed` is the last resort, not
@@ -243,6 +267,12 @@ it is sent.
  "values": [{"address": 0, "value": 0}]}
 ```
 
+From 1.6 a dump reads the low page (up to `0xFF`) plus every byte the database
+names above it, so it holds everything `--restore` may need; `--dump --full`
+reads all of `0..mem_high`. The file's header names the printer (`# serial:`,
+`# device_id:`, `# address_length:`); the body is unchanged, so two dumps still
+diff line for line.
+
 **list**
 
 ```json
@@ -263,15 +293,39 @@ machine's networks; `address` is what `--ip` takes. `--list` fails with
 ```json
 {"model": "R220", "target": "waste", "phase": "done",
  "writes": {"verified": 5, "total": 5}, "alternate_key_used": false, "committed": true,
- "verification": {"ran": true, "mismatches": 0, "unread": 0},
+ "verification": {"ran": true, "mismatches": 0, "unread": 0, "unchanged": 0},
  "before": [{"address": 12, "value": 0}], "after": [{"address": 12, "value": 0}],
  "overrides": [{"gate": "blocker", "detected_model": null, "error": "INK OUT", "error_code": 5}]}
 ```
 
 `target` is `waste` or `ink`. `phase` is `not_started`, `aborted`,
-`device_not_found`, `write_failed`, `done` or `not_supported`: the way the run
+`device_not_found`, `write_failed`, `done` or `not_supported`. `not_supported`
+means nothing was written because EWR cannot do this reset: the way the run
 reached the printer cannot reach its EEPROM (over the network, the printer
-refused every EEPROM read), so nothing was written.
+refused every EEPROM read), or the model has nothing EWR can write (no reset
+addresses yet, a JIG-mode model). `not_started` with `read_failed` is a reset
+that does not run blind - the cartridge ink reset, a restore - finding the
+printer silent at its preflight read.
+
+**`done` is not `ok`.** `done` says the writes were acknowledged. A printer can
+acknowledge every write and keep its old values, so the read-back that follows
+has the last word: when a byte reads back with anything but the value written,
+the run ends `ok: false` with `error_code: "write_unverified"`, `phase: "done"`
+and the count in `verification.mismatches`. A byte that does not answer the
+read-back (`verification.unread`) leaves the verdict to the writes.
+
+`verification.unchanged` (from 1.6) counts the mismatches that still hold the
+value the preflight read: the printer acknowledged the write and dropped it.
+Some printers answer a write key that is not theirs that way, any key at all
+drawing `||:42:OK;`. When every mismatch is unchanged and the model has an
+alternate keyword, the writes go once more with it and the read-back runs
+again; the result describes that second pass. A printer that refuses the
+alternate keyword there tells keys apart, so the primary one was its own
+(event `session.alternate_key_refused`) and the result stays the first
+pass's. Printers that refuse a key
+instead, with `||:42:NG;` or `||:42:NA;`, get the alternate keyword on that
+write right away. `alternate_key_used` is true when the alternate keyword is
+what worked: the database's primary keyword is wrong for that printer.
 
 `overrides` lists every gate that objected and was told to go ahead anyway -
 by `--force-yes`, a typed yes, or a host callback - in the order they were
@@ -284,15 +338,135 @@ says so here, not only in the events:
   objection was not a printer error.
 - `"gate": "db_conflict"` - the database's sources disagree about this model.
 
-Every entry has all four keys, `null` where one does not apply.
+- `"gate": "backup"` - the backup of what the write overwrites could not be kept
+  (`detail`: `"not_saved"`) or came back short (`"incomplete"`).
+- `"gate": "unit_mismatch"` - a restore file names another printer's serial,
+  given in `detail`.
+
+Every entry has all five keys - `gate`, `detected_model`, `error`, `error_code`
+and `detail` - `null` where one does not apply.
+
+`backup` is what EWR kept before the first write: every byte the write
+overwrites, as the preflight read it.
+
+```json
+"backup": {"file": "backups/R220_unknown_20261024T183651Z.json", "bytes": 5, "complete": true,
+           "values": [{"address": 12, "value": 0}]}
+```
+
+`file` is `null` when a C API host kept the backup itself. `backup` is `null`
+when the printer did not answer the preflight, so there was nothing to keep.
+A backup file is JSON: `{"format": "ewr-backup", "version": 1, "created",
+"ewr", "model", "target", "printer": {"transport", "address", "device_id",
+"serial"}, "address_length", "bytes": [{"address", "value"}], "complete"}`.
+
+**restore** and **restore-all**
+
+The reset's keys, with `target: "restore"`, and what the file held:
+
+```json
+{"model": "R220", "target": "restore", "phase": "done",
+ "source": {"file": "backups/R220_unknown_20261024T183651Z.json", "kind": "backup",
+            "model": "R220", "created": "2026-10-24T18:36:51Z", "serial": null},
+ "planned_writes": [{"address": 12, "value": 0}],
+ "skipped": [{"address": 0, "reason": "unmapped"}],
+ "missing": [], "unchanged": [62, 63],
+ "writes": {"verified": 3, "total": 3}, "verification": {"ran": true, "mismatches": 0, "unread": 0, "unchanged": 0},
+ "before": [...], "after": [...], "backup": {...}, "overrides": []}
+```
+
+- `source.kind` is `backup` or `dump`.
+- `skipped` reasons: `unmapped` (not a byte a reset of this model writes),
+  `unread` (the file has no value for it), `above_limit`, `unencodable`, and for
+  `restore-all` `identity` (a serial, head-ID, USB-ID or network byte, never
+  written).
+- `missing` lists the model's counter bytes the file does not hold at all - a
+  dump made before 1.6 stopped at `0xFF`.
+- `unchanged` lists the bytes that already held the file's value and were not
+  written. A restore where every byte matched is `ok: true` with
+  `writes.total: 0`.
+
+`restore-all` writes every byte of the dump that differs, not only the mapped
+ones, and runs only on the unit the dump came from; it is in builds made with
+`EWR_RESTORE_ALL` only, and answers to the typed word `restore-all`, never to
+`--json` or `--yes`.
+
+**info**
+
+```json
+{"model": "L3150", "printer": {...}, "firmware": null, "serial": "X5NA012345",
+ "serial_source": "eeprom",
+ "counters": [{"key": "total_print_page_counter", "value": 2214}],
+ "first_use": 6012,
+ "fatal_errors": [{"kind": "printer", "slot": 1, "code": 0}]}
+```
+
+`counters` are the printer's own: pages, passes, cleanings, ink changes. `key`
+is stable; a host names it in its own words. `serial_source` is `status` (the
+printer's status report) or `eeprom`. `first_use` is the raw value of the date
+the printer was first used; its encoding is not known yet. A `fatal_errors`
+`code` of 0 means nothing was logged in that slot.
+
+**nozzle-check**, **head-clean** and **power-clean**
+
+```json
+{"model": "R220", "action": "head-clean", "level": "normal", "group": "all",
+ "phase": "done", "route": "factory", "sent": true, "reply": "||:84:OK;",
+ "started": true, "seconds": 41,
+ "printer_before": {...}, "printer_after": {...},
+ "pads_before": [...], "pads_after": [...], "overrides": [],
+ "fallback_from": null, "silent_while_working": false, "expected_seconds": null}
+```
+
+- `route` is `factory` (the model's own maintenance command, from its database
+  entry), `remote` (ESC/P2 remote mode, sent as print data) or
+  `factory_print` (the factory command sent as print data, `ESC |`). The last
+  comes from `fallback_from`, or from a flag the CLI does not document.
+- `phase` is `not_started`, `aborted`, `not_supported`, `device_not_found`,
+  `send_failed`, `never_started`, `error`, `timed_out` or `done`. Only `done`
+  is `ok: true`: the printer was seen at work, or stopped answering after
+  print data, and then idle again.
+- `silent_while_working` (from 1.6) is true when the printer did not answer
+  while it worked on print data. Print data and the status query share one
+  channel, and the query waits behind the job, so the printer is not watched
+  at work there. `started` is true in that case too. For a cleaning,
+  `pads_before` against `pads_after` shows whether it ran. A printer that
+  sends its status by itself during the job is watched from that instead,
+  and this stays false.
+- `fallback_from` (from 1.6) is `factory` when the printer refused the
+  factory command with `||:84:NA;`, which means nothing ran. Then the
+  cleaning was sent as print data instead, once, and `reply` keeps the
+  refusal. At level `normal` and for `power-clean` that is the printer's own
+  cleaning (`route` is `remote`); at any other level, the same factory
+  command inside a print job (`route` is `factory_print`).
+- `expected_seconds` (from 1.6) is how long the printer said the cleaning
+  takes, or null when it did not say (most printers say nothing while they
+  work on print data). A `timed_out` cleaning was still running when EWR
+  stopped watching, and the printer finishes it on its own.
+- `pads_before` and `pads_after` are the waste counters before and after, as in
+  `status`'s `pads`, so a caller can see what a cleaning used.
+- `overrides` has the reset's shape: five keys per entry, `detected_model` for a
+  `model_mismatch`, `error` and `error_code` for a `blocker`.
 
 **find-addresses**
 
 ```json
 {"model": "R220", "file": "R220-found-addresses.json", "passes": 3, "short_passes": 0,
+ "cleanings": "ewr",
  "trends": [{"addresses": [12, 13], "pair": true, "values": [0, 40, 91],
              "deltas": [40, 51], "direction": "rising"}]}
 ```
+
+From 1.6 EWR can run the two head cleanings itself (`cleanings: "ewr"`), which
+is what lets this command run under `--json` at all: it needs `--yes`, the
+consent to the ink the cleanings use. `"panel"` means a person started them.
+EWR sends the model's own cleaning command only when the printer matched the
+entry; on any other printer - one `--find-key` found a borrowed key for - it
+sends the printer's own normal cleaning as print data, since one model's
+cleaning byte can be another model's ink charge. `--find-addresses` has no
+`--dry-run`. A cleaning that does not complete ends the run with the code a
+maintenance command would give it: `send_failed`, `not_started`,
+`printer_error`, `timed_out`.
 
 **find-key**
 
@@ -308,6 +482,15 @@ counts how the reads were answered, one read per key: `value` (the key works),
 in three tries, each in a fresh session) and `other`. `keys` lists only the keys that returned a value, with the byte read
 at address 0 and the database entries that use the key; it is `[]` when none did.
 
+With `--all-keys`, and only when no database key fits and the printer answered
+them with something other than a bare `||:;`, the same payload instead reports
+the full 2-byte sweep: `tried` then counts the keys the sweep reached, which is
+every candidate on a miss and only the keys up to the hit on a match, since the
+sweep stops there. **`models` is `[]` for a key no entry carries** - the sweep's
+whole purpose is finding one - so a caller must not assume `models[0]` exists.
+`completed` is still the difference between a sweep that ran its course,
+whether or not it found anything, and one cut short by an error.
+
 A search that ran to the end is `ok: true` whether or not it found a key - read
 `keys`. `completed` is `false`, with `read_failed` or `device_not_found`, when it
 stopped early; `tried` and `answers` then cover the keys it got to.
@@ -316,7 +499,8 @@ stopped early; `tried` and `answers` then cover the keys it got to.
 
 `--json` never prompts: there is no one to ask. A run that would need an answer
 stops with `error_code: "blocked"` and writes nothing. Give the answers on the
-command line instead - `--yes` for the reset confirmation, `--force-yes` to
+command line instead - `--yes` for the reset, restore or maintenance
+confirmation, `--force-yes` to
 overrule a printer error or a database conflict as well. Without `--model`,
 `--json` uses the model the printer reports, as `--yes` does, and stops with
 `model_required` when it reports none the database knows. `--force-yes` is the

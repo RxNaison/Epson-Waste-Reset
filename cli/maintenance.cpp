@@ -232,6 +232,10 @@ namespace ewr::cli {
                 std::cout << "\n[!] A power cleaning (ink charge) uses a large amount of ink - on some models a\n"
                              "    good part of a cartridge - and fills the waste ink pads quickly. Run it only\n"
                              "    when normal cleanings did not clear the nozzles." << std::endl;
+            else if (request.level == "strong")
+                std::cout << "\n[!] A strong cleaning uses several times the ink of a normal one, and that ink\n"
+                             "    goes into the waste ink pads: on an L3060 one strong cleaning added as much\n"
+                             "    to the pad counter as nine normal ones. Try a normal cleaning first." << std::endl;
             else
                 std::cout << "\n[i] A cleaning uses ink, and the ink it uses goes into the waste ink pads." << std::endl;
 
@@ -265,7 +269,10 @@ namespace ewr::cli {
         {
             if (!animate)
                 return;
-            std::cout << "\r[*] " << seconds << " s: " << status.stateName << "          " << std::flush;
+            std::cout << "\r[*] " << seconds << " s";
+            if (status.cleaningSeconds > 0)
+                std::cout << " of about " << status.cleaningSeconds << " s";
+            std::cout << ": " << status.stateName << "          " << std::flush;
             lineOpen = true;
         };
 
@@ -286,6 +293,10 @@ namespace ewr::cli {
                 std::cout << "\n[i] Print a nozzle check (ewr --nozzle-check) to see whether it helped." << std::endl;
             return FinishRun(0);
         }
+
+        if (outcome.phase == ewr::MaintenancePhase::TimedOut)
+            std::cout << "\n[i] EWR stopped watching, but the printer carries on by itself. Wait until its\n"
+                         "    power light stops flashing before you print or switch it off." << std::endl;
 
         JsonFail(MaintenanceErrorCode(outcome.phase), outcome.error);
         return FinishRun(1);

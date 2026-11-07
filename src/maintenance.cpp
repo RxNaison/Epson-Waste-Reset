@@ -5,6 +5,7 @@
 #include "protocol/d4session.h"
 #include "protocol/remote_mode.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <thread>
@@ -51,6 +52,14 @@ namespace ewr {
             snprintf(text, sizeof(text), "%.1f%%",
                      reading.max_value ? (100.0 * reading.value) / reading.max_value : 0.0);
             return text;
+        }
+
+        // "45 s", "5 min 23 s".
+        std::string Duration(int seconds)
+        {
+            if (seconds < 60)
+                return std::to_string(seconds) + " s";
+            return std::to_string(seconds / 60) + " min " + std::to_string(seconds % 60) + " s";
         }
 
     } // namespace
@@ -402,9 +411,9 @@ namespace ewr {
     void Maintenance::Watch(const MaintenanceRequest& request, const MaintenanceHandlers& handlers,
                             MaintenanceOutcome& out)
     {
-        const int timeout = request.action == MaintenanceAction::PowerClean ? chargeTimeoutSeconds
-                          : request.action == MaintenanceAction::NozzleCheck ? nozzleTimeoutSeconds
-                          : cleanTimeoutSeconds;
+        int timeout = request.action == MaintenanceAction::PowerClean ? chargeTimeoutSeconds
+                    : request.action == MaintenanceAction::NozzleCheck ? nozzleTimeoutSeconds
+                    : cleanTimeoutSeconds;
 
         const auto sentAt = std::chrono::steady_clock::now();
         auto elapsed = [&]() {
@@ -493,6 +502,17 @@ namespace ewr {
                                    "[*] The printer is at it (" + now.status.stateName + ").",
                                    { { "state", now.status.stateName } });
                 out.started = true;
+
+                // Reported from the first CLEANING report on, which may follow
+                // a WAITING one, so it gets its own event.
+                if (out.expectedSeconds == 0 && now.status.cleaningSeconds > 0)
+                {
+                    out.expectedSeconds = now.status.cleaningSeconds;
+                    timeout = std::max(timeout, out.seconds + out.expectedSeconds + expectedMarginSeconds);
+                    m_reporter.Log(log::Level::Info, log::Stage::Verify, "maintenance.expected",
+                                   "[*] The printer says this takes about " + Duration(out.expectedSeconds) + ".",
+                                   { { "seconds", std::to_string(out.expectedSeconds) } });
+                }
             }
             else if (out.started)
             {

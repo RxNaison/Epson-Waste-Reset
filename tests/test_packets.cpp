@@ -289,6 +289,16 @@ void test_status_reply_parsing()
     CHECK(ewr::status::Describe(st).find("INK OUT") != std::string::npos);
 
     CHECK(!st.truncated);
+    CHECK(st.cleaningSeconds == -1);
+
+    // Field 0x0C, little-endian seconds: what an L3060 sent while cleaning.
+    const auto l3060 = ewr::ctrl::ParseStatusReply(
+        WrapD4DataOnSocket(L3060PlainCleaningReport(), ewr::d4::SOCKET_EPSON_CTRL));
+    CHECK(l3060.valid && l3060.stateCode == 0x07);
+    CHECK(l3060.cleaningSeconds == 213);
+    CHECK(ewr::ctrl::ParseStatusReply(WrapSt2Body({ 0x01, 0x01, 0x07, 0x0C, 0x02, 0x43, 0x01 })).cleaningSeconds == 323);
+    // Too short to hold it: nothing decoded, so no evidence on its own.
+    CHECK(!ewr::ctrl::ParseStatusReply(WrapSt2Body({ 0x0C, 0x01, 0x43 })).valid);
 
     // Streams that never contain '@BDC ST2' parse to valid == false.
     CHECK(!ewr::ctrl::ParseStatusReply(HandshakeAck()).valid);

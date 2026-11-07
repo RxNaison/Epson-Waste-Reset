@@ -33,6 +33,11 @@ namespace ewr {
         std::string maintenanceBoxText;
         std::string serial;
         std::vector<InkReading> inks;
+        // How long the running cleaning takes, by the printer's own count;
+        // -1 when not reported. Field 0x0C, sent only while CLEANING and the
+        // same from start to end: an L3060 said 213 and took 207 s, said 97
+        // and took 91 s (PR #64).
+        int cleaningSeconds = -1;
     };
 
     // How a printer answered one EEPROM read. The refusals are kept apart

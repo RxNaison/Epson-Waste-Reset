@@ -354,6 +354,8 @@ namespace ewr {
         out["overrides"] = Overrides(outcome.overrides);
         out["fallback_from"] = orNull(outcome.fallbackFrom);
         out["silent_while_working"] = outcome.silentWhileWorking;
+        out["expected_seconds"] = outcome.expectedSeconds > 0 ? nlohmann::json(outcome.expectedSeconds)
+                                                              : nlohmann::json(nullptr);
         return out;
     }
 

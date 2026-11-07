@@ -232,6 +232,13 @@ namespace ewr {
                     }
                     break;
 
+                case 0x0C: // cleaning time, seconds, little-endian
+                    if (fieldLen >= 2)
+                        status.cleaningSeconds = field[0] | (field[1] << 8);
+                    else
+                        recognized = false;
+                    break;
+
                 case 0x0D: // maintenance box level
                     if (fieldLen >= 1)
                         DecodeConsumableLevel(field[0], status.maintenanceBoxLevel, status.maintenanceBoxText);

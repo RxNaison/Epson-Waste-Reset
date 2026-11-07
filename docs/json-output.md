@@ -98,6 +98,7 @@ Both come from the first USB session of a run that ends with the printer silent,
 | `session.range_reads`, `session.single_reads` | `bytes`, `requests`: whether a long read went by ranges or byte by byte |
 | `maintenance.sending` | `route`: `factory`, `remote` or `factory_print`, `group`: `all`, `black` or `color` |
 | `maintenance.started` | `state`: the printer's state when it was first seen at work |
+| `maintenance.expected` | `seconds`: how long the printer says the cleaning takes, from its status report. Not every printer says; EWR watches at least that long plus a margin |
 | `maintenance.silent` | `seconds`: when the printer first left a status query unanswered after print data, which it does while it works on the job |
 | `maintenance.fallback` | `from`: `factory`, `to`: `remote` or `factory_print`, `reply`: the refusal (`\|\|:84:NA;`). The cleaning is sent as print data instead, once |
 | `maintenance.done` | `seconds`: from the send until the printer was idle again |
@@ -400,7 +401,7 @@ the printer was first used; its encoding is not known yet. A `fatal_errors`
  "started": true, "seconds": 41,
  "printer_before": {...}, "printer_after": {...},
  "pads_before": [...], "pads_after": [...], "overrides": [],
- "fallback_from": null, "silent_while_working": false}
+ "fallback_from": null, "silent_while_working": false, "expected_seconds": null}
 ```
 
 - `route` is `factory` (the model's own maintenance command, from its database
@@ -424,6 +425,10 @@ the printer was first used; its encoding is not known yet. A `fatal_errors`
   refusal. At level `normal` and for `power-clean` that is the printer's own
   cleaning (`route` is `remote`); at any other level, the same factory
   command inside a print job (`route` is `factory_print`).
+- `expected_seconds` (from 1.6) is how long the printer said the cleaning
+  takes, or null when it did not say (most printers say nothing while they
+  work on print data). A `timed_out` cleaning was still running when EWR
+  stopped watching, and the printer finishes it on its own.
 - `pads_before` and `pads_after` are the waste counters before and after, as in
   `status`'s `pads`, so a caller can see what a cleaning used.
 - `overrides` has the reset's shape: five keys per entry, `detected_model` for a

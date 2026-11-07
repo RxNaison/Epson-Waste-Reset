@@ -418,6 +418,58 @@ void test_maintenance_watches_a_printer_out_of_packet_mode()
         CHECK(started != events.end() && started->fields.at("state") == "CLEANING");
     }
 
+    // A strong cleaning outran the timeout on an L3060, which had said how
+    // long it would take: the watch waits for the printer's own duration.
+    {
+        MaintenanceGateway gw;
+        gw.statuses = { MakeSt2State(0x04), MakeSt2State(0x03),
+                        WrapSt2Body({ 0x01, 0x01, 0x07, 0x0C, 0x02, 0x02, 0x00 }) }; // CLEANING, 2 s
+        gw.outOfPacketMode = { 1, 2 };
+        ewr::Maintenance maintenance(gw, nullptr, reporter);
+        maintenance.pollIntervalMs = 20;
+        maintenance.cleanTimeoutSeconds = 1;
+        maintenance.expectedMarginSeconds = 0;
+
+        std::vector<ewr::log::Event> events;
+        const int sink = reporter.AddSink([&](const ewr::log::Event& e) { events.push_back(e); });
+
+        ewr::MaintenanceRequest request;
+        request.remoteOnly = true;
+        const ewr::MaintenanceOutcome out = maintenance.Run(request);
+        reporter.RemoveSink(sink);
+        CHECK(out.phase == ewr::MaintenancePhase::TimedOut);
+        CHECK(out.expectedSeconds == 2);
+        CHECK(out.seconds >= 2); // past the 1 s timeout
+        CHECK(gw.nextStatus > 3);
+        CHECK(ewr::json::MaintenanceData(nullptr, request, out)["expected_seconds"] == 2);
+
+        // Started on WAITING; the duration came with the CLEANING after it.
+        const auto expected = std::find_if(events.begin(), events.end(), [](const ewr::log::Event& e) {
+            return e.code == "maintenance.expected";
+        });
+        CHECK(expected != events.end() && expected->fields.at("seconds") == "2");
+        CHECK(std::count_if(events.begin(), events.end(), [](const ewr::log::Event& e) {
+            return e.code == "maintenance.expected";
+        }) == 1);
+    }
+
+    // Without it, the timeout stands.
+    {
+        MaintenanceGateway gw;
+        gw.statuses = { MakeSt2State(0x04), MakeSt2State(0x07) };
+        gw.outOfPacketMode = { 1 };
+        ewr::Maintenance maintenance(gw, nullptr, reporter);
+        maintenance.pollIntervalMs = 0;
+        maintenance.cleanTimeoutSeconds = 0;
+
+        ewr::MaintenanceRequest request;
+        request.remoteOnly = true;
+        const ewr::MaintenanceOutcome out = maintenance.Run(request);
+        CHECK(out.phase == ewr::MaintenancePhase::TimedOut);
+        CHECK(out.expectedSeconds == 0 && gw.nextStatus == 2);
+        CHECK(ewr::json::MaintenanceData(nullptr, request, out)["expected_seconds"].is_null());
+    }
+
     // Over EPSON-CTRL the printer stays in packet mode: no poll takes one.
     {
         MaintenanceGateway gw;

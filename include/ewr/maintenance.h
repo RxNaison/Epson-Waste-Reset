@@ -39,9 +39,9 @@ namespace ewr {
         int nozzleVariant = 0;        // 1: the alternate pattern
         // The print-data route even where the model has a factory level.
         bool remoteOnly = false;
-        // Experimental, route "factory_print": the factory command with the
-        // model's level, sent as print data (ESC |) rather than over
-        // EPSON-CTRL. Unverified on any printer.
+        // Route "factory_print": the factory command with the model's level,
+        // sent as print data (ESC |) rather than over EPSON-CTRL. It cleaned
+        // an L3060 at levels normal and strong (PR #64); no other printer yet.
         bool factoryAsPrintData = false;
     };
 
@@ -63,7 +63,7 @@ namespace ewr {
         MaintenancePhase phase = MaintenancePhase::NotStarted;
         bool success = false;
         // "factory" (the keyed command 0x84), "remote" (print data) or
-        // "factory_print" (0x84 as print data, experimental).
+        // "factory_print" (0x84 as print data).
         std::string route;
         // "factory" when the printer refused 0x84 outright (NA) and the
         // cleaning went as print data instead; `reply` keeps that refusal.
@@ -76,6 +76,9 @@ namespace ewr {
         bool silentWhileWorking = false; // the second case
 
         int seconds = 0;       // from the send to the last status read
+        // How long the printer said the cleaning takes
+        // (PrinterStatus::cleaningSeconds), 0 when it did not say.
+        int expectedSeconds = 0;
         StateSnapshot before;  // status, and the counters when the model is known
         StateSnapshot after;
         PrinterStatus last;    // the last status read while watching
@@ -116,9 +119,14 @@ namespace ewr {
         // How the printer is watched once the command is out. Tests shorten them.
         int pollIntervalMs = 2000;
         int startWindowSeconds = 45;   // to leave IDLE at all
-        int cleanTimeoutSeconds = 240;
+        // A strong cleaning ran past 240 s on an L3060 (PR #64), and an L350
+        // or L1800 says nothing while it works.
+        int cleanTimeoutSeconds = 600;
         int chargeTimeoutSeconds = 600;
         int nozzleTimeoutSeconds = 180;
+        // Past the printer's own duration, when it gives one and that ends
+        // later than the timeout.
+        int expectedMarginSeconds = 60;
 
     private:
         // The factory payload for `request`, empty when the model has none.

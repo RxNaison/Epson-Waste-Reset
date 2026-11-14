@@ -45,16 +45,23 @@ namespace ewr::keysearch {
     // shared first: a key many entries use is the likeliest to fit a sibling.
     std::vector<Candidate> CollectCandidates(const std::vector<DbPrinterModel>& models);
 
-    // Every 2-byte read key the database does not already carry, ordered so
-    // the likeliest fit comes first. The key's low byte is sent first and
-    // marks a platform family (every modern ET/L/WF key shares one of a few
-    // low bytes), so the low bytes `known` uses lead, most models first, then
-    // their byte-neighbours - a new family sits beside the last one (0x404C
-    // followed 0x???B keys) - then the rest. Width 2 only: every key the
-    // brute-force case needs is 2-byte, and a 1-byte address cannot reach a
-    // counter past 0xFF. For a printer no entry matches and whose own key the
-    // 131-key `CollectCandidates` sweep did not find; read-only, like `Search`.
-    std::vector<Candidate> AllKeyCandidates(const std::vector<DbPrinterModel>& known);
+    // Every 2-byte read key the database does not already carry at
+    // `addressLength`, ordered so the likeliest fit comes first. The key's low
+    // byte is sent first and marks a platform family (every modern ET/L/WF key
+    // shares one of a few low bytes), so the low bytes `known` uses lead, most
+    // models first, then their byte-neighbours - a new family sits beside the
+    // last one (0x404C followed 0x???B keys) - then the rest. For a printer no
+    // entry matches and whose own key the 131-key `CollectCandidates` sweep
+    // did not find; read-only, like `Search`.
+    //
+    // `addressLength` is the address field's width, not the key's - the key is
+    // always 2 bytes. Both widths need a pass: a 1-byte model refuses every
+    // 2-byte-address read whatever key it holds, so a width-2-only sweep can
+    // never find its key (#73). Discovery reads address 0, which both widths
+    // encode; the narrow field only limits which counters a later reset could
+    // reach.
+    std::vector<Candidate> AllKeyCandidates(const std::vector<DbPrinterModel>& known,
+                                            uint8_t addressLength = 2);
 
     // Reads address 0 once with each candidate's key. Read commands only: a
     // key gates access, it cannot turn a read into a write. `progress` is

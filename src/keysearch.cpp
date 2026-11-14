@@ -44,12 +44,13 @@ namespace ewr {
         return out;
     }
 
-    std::vector<keysearch::Candidate> keysearch::AllKeyCandidates(const std::vector<DbPrinterModel>& known)
+    std::vector<keysearch::Candidate> keysearch::AllKeyCandidates(const std::vector<DbPrinterModel>& known,
+                                                                  uint8_t addressLength)
     {
-        constexpr uint8_t kWidth = 2;
-
         // How many models share each low byte, and which (key, width) pairs the
-        // database already holds - those were tried by the 131-key sweep.
+        // database already holds - those were tried by the 131-key sweep. The
+        // low byte marks a platform family whatever the address width, so the
+        // weights come from every entry, not just this width's.
         std::array<size_t, 256> weight{};
         std::set<std::pair<uint16_t, uint8_t>> inDb;
         for (const DbPrinterModel& model : known)
@@ -98,11 +99,11 @@ namespace ewr {
             for (int hi = 0; hi < 256; ++hi)
             {
                 const uint16_t rkey = static_cast<uint16_t>((hi << 8) | lo);
-                if (inDb.count({ rkey, kWidth }) > 0)
+                if (inDb.count({ rkey, addressLength }) > 0)
                     continue;
                 keysearch::Candidate candidate;
                 candidate.rkey = rkey;
-                candidate.addressLength = kWidth;
+                candidate.addressLength = addressLength;
                 out.push_back(std::move(candidate));
             }
 

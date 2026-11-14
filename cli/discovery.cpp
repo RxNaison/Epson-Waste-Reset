@@ -175,57 +175,88 @@ namespace ewr::cli {
         // the command. Everything below is read-only, like the search above.
         if (cli.allKeys && takesCommand)
         {
-            const std::vector<ewr::keysearch::Candidate> all = ewr::keysearch::AllKeyCandidates(models);
+            // One pass per address width, the wide one first: 1381 of the 1450
+            // entries are 2-byte. The narrow width needs its own pass rather
+            // than being skipped - a 1-byte model refuses every
+            // 2-byte-address read whatever key it holds, so the first pass
+            // cannot find its key however far it runs (#73).
+            ewr::keysearch::Result combined;
+            bool hit = false;
 
-            std::cout << "\n[*] --all-keys: sweeping every 2-byte key, likeliest platform families\n"
-                         "    first, stopping at the first that answers. " << all.size() << " keys to try.\n"
-                         "    A key from a family close to a known one usually turns up in the first\n"
-                         "    thousand or so, a few minutes in; going the whole way takes hours.\n"
-                         "    Read-only throughout, and Ctrl-C is safe at any point." << std::endl;
+            for (const uint8_t width : { static_cast<uint8_t>(2), static_cast<uint8_t>(1) })
+            {
+                const std::vector<ewr::keysearch::Candidate> all =
+                    ewr::keysearch::AllKeyCandidates(models, width);
 
-            const ewr::keysearch::Result sweep = ewr::keysearch::Search(gateway, all, options,
-                [animate](size_t tried, size_t total)
+                std::cout << "\n[*] --all-keys: sweeping every 2-byte key with a " << static_cast<int>(width)
+                          << "-byte address,\n"
+                             "    likeliest platform families first, stopping at the first that answers.\n"
+                          << "    " << all.size() << " keys to try.\n"
+                             "    A key from a family close to a known one usually turns up in the first\n"
+                             "    thousand or so, a few minutes in; going the whole way takes hours.\n"
+                             "    Read-only throughout, and Ctrl-C is safe at any point." << std::endl;
+
+                const ewr::keysearch::Result sweep = ewr::keysearch::Search(gateway, all, options,
+                    [animate, width](size_t tried, size_t total)
+                    {
+                        if (animate)
+                            std::cout << "\r[*] Sweeping read keys (" << static_cast<int>(width)
+                                      << "-byte address)... " << tried << "/" << total << std::flush;
+                    },
+                    /*stopAtFirstValue=*/true);
+
+                if (animate)
+                    std::cout << std::endl;
+
+                // Both passes report as one search: a found key carries its own
+                // address_length, so a caller can tell which width answered.
+                combined.probes.insert(combined.probes.end(), sweep.probes.begin(), sweep.probes.end());
+                combined.deviceFound = sweep.deviceFound;
+                combined.completed = sweep.completed;
+                combined.error = sweep.error;
+                g_jsonData = ewr::json::KeySearchData(detectedMdl, combined);
+
+                if (!sweep.deviceFound)
                 {
-                    if (animate)
-                        std::cout << "\r[*] Sweeping read keys... " << tried << "/" << total << std::flush;
-                },
-                /*stopAtFirstValue=*/true);
+                    std::cerr << "\n[ERROR] The printer stopped answering during the sweep." << std::endl;
+                    JsonFail("device_not_found", sweep.error);
+                    return FinishRun(1);
+                }
 
-            if (animate)
-                std::cout << std::endl;
+                // completed is false only when the sweep was cut short by an
+                // error; running to the end with no hit is completed and
+                // found == 0.
+                if (!sweep.completed)
+                {
+                    std::cerr << "\n[ERROR] The sweep stopped after " << sweep.probes.size() << " of "
+                              << all.size() << " keys: " << sweep.error << std::endl;
+                    std::cerr << "        Check ewr_trace.log for the hardware trace." << std::endl;
+                    JsonFail("read_failed", sweep.error);
+                    return FinishRun(1);
+                }
 
-            g_jsonData = ewr::json::KeySearchData(detectedMdl, sweep);
+                if (sweep.Count(ewr::ReadAnswer::Value) > 0)
+                {
+                    for (const ewr::keysearch::Probe& probe : sweep.probes)
+                        if (probe.answer == ewr::ReadAnswer::Value)
+                            PrintFoundKey(probe, detectedMatch);
 
-            if (!sweep.deviceFound)
-            {
-                std::cerr << "\n[ERROR] The printer stopped answering during the sweep." << std::endl;
-                JsonFail("device_not_found", sweep.error);
-                return FinishRun(1);
+                    hit = true;
+                    break;
+                }
+
+                std::cout << "\n[RESULT] Swept " << sweep.probes.size() << " keys at a "
+                          << static_cast<int>(width) << "-byte address; none answered with data."
+                          << std::endl;
             }
 
-            // completed is false only when the sweep was cut short by an error;
-            // running to the end with no hit is completed and found == 0.
-            if (!sweep.completed)
-            {
-                std::cerr << "\n[ERROR] The sweep stopped after " << sweep.probes.size() << " of "
-                          << all.size() << " keys: " << sweep.error << std::endl;
-                std::cerr << "        Check ewr_trace.log for the hardware trace." << std::endl;
-                JsonFail("read_failed", sweep.error);
-                return FinishRun(1);
-            }
-
-            if (sweep.Count(ewr::ReadAnswer::Value) > 0)
-            {
-                for (const ewr::keysearch::Probe& probe : sweep.probes)
-                    if (probe.answer == ewr::ReadAnswer::Value)
-                        PrintFoundKey(probe, detectedMatch);
-
+            if (hit)
                 return FinishRun(0);
-            }
 
-            std::cout << "\n[RESULT] Swept " << sweep.probes.size() << " keys; none answered with data. This\n"
-                         "    printer does not take any 2-byte read key, or its key is 1-byte (the old\n"
-                         "    R220 generation, all of which the database already carries)." << std::endl;
+            std::cout << "\n[RESULT] Both address widths swept, " << combined.probes.size()
+                      << " keys in all, and none\n"
+                         "    answered with data. This printer does not take the keyed read EWR uses\n"
+                         "    with any key it can form." << std::endl;
             // A sweep traces every exchange, so its log runs to tens of
             // megabytes - too big to attach anywhere. The counts above are
             // what a report needs; the 131-key search's log is the small one.

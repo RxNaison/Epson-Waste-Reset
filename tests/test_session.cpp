@@ -667,6 +667,27 @@ void test_all_key_candidates()
     CHECK(firstLowByte(0x4C) < firstLowByte(0x10));
     CHECK(firstLowByte(0x10) < firstLowByte(0x20));
 
+    // The same key space at a 1-byte address. A width is a property of the
+    // candidate, not of the key, so only the one width-1 entry (E, 0x3B10) is
+    // left out here - the five width-2 keys are untried at this width and stay
+    // in. Without this pass a 1-byte model's key is unreachable: it refuses
+    // every 2-byte-address read whatever key it holds (#73).
+    const std::vector<ewr::keysearch::Candidate> narrow =
+        ewr::keysearch::AllKeyCandidates(known, 1);
+    CHECK(narrow.size() == 65536u - 1u);
+    std::set<uint16_t> seenNarrow;
+    for (const auto& c : narrow)
+    {
+        CHECK(c.addressLength == 1);
+        seenNarrow.insert(c.rkey);
+    }
+    CHECK(seenNarrow.size() == narrow.size());
+    CHECK(seenNarrow.count(0x3B10) == 0);
+    CHECK(seenNarrow.count(0x364A) == 1 && seenNarrow.count(0x574B) == 1);
+    // The low byte marks a platform family whatever the address width, so both
+    // passes walk the families in the same order.
+    CHECK((narrow.front().rkey & 0xFF) == 0x4A);
+
     // The real database: the sweep leaves out exactly its distinct width-2
     // keys, and leads with the low byte the most models share.
     ewr::Database gen;
@@ -674,15 +695,24 @@ void test_all_key_candidates()
     const auto models = gen.Models();
 
     std::set<uint16_t> dbWidth2;
+    std::set<uint16_t> dbWidth1;
     std::array<size_t, 256> weight{};
     for (const auto& m : models)
     {
         if (m.jig) continue;
         weight[m.rkey & 0xFF]++;
         if (m.ReadAddressLength() == 2) dbWidth2.insert(m.rkey);
+        else dbWidth1.insert(m.rkey);
     }
     const auto realAll = ewr::keysearch::AllKeyCandidates(models);
     CHECK(realAll.size() == 65536u - dbWidth2.size());
+
+    // The narrow pass leaves out only the handful of 1-byte entries, so it is
+    // very nearly the whole space - the 131-key search eliminates far less of
+    // it than the width-2 pass does.
+    const auto realNarrow = ewr::keysearch::AllKeyCandidates(models, 1);
+    CHECK(realNarrow.size() == 65536u - dbWidth1.size());
+    CHECK(dbWidth1.size() < dbWidth2.size());
 
     const uint8_t heaviest = static_cast<uint8_t>(
         std::max_element(weight.begin(), weight.end()) - weight.begin());

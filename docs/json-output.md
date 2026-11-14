@@ -491,6 +491,13 @@ whole purpose is finding one - so a caller must not assume `models[0]` exists.
 `completed` is still the difference between a sweep that ran its course,
 whether or not it found anything, and one cut short by an error.
 
+The sweep runs one pass per address width, 2-byte then 1-byte, and reports both
+as a single search: `tried` and `answers` cover every key either pass reached,
+so a complete miss counts close to twice 65,536. Each entry in `keys` carries
+its own `address_length`, which is how a caller tells which width answered - the
+key itself is 2 bytes at both widths. The payload is emitted after each pass, so
+a run stopped partway still reports what the finished passes found.
+
 A search that ran to the end is `ok: true` whether or not it found a key - read
 `keys`. `completed` is `false`, with `read_failed` or `device_not_found`, when it
 stopped early; `tried` and `answers` then cover the keys it got to.

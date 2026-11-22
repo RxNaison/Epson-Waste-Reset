@@ -24,6 +24,7 @@
 #include <array>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <set>
 #include <thread>
 #include "ewr/replay.h"
@@ -641,24 +642,42 @@ inline int CountAnsweredReads(const ewr::QuerySessionResult& result)
 }
 
 // Answers like the SX110 did: D4 replies until the packet-mode exit, then
-// plain "JGPG" replies with the bytes WIC read.
-inline FakeTransport MakeJigPrinter(std::map<int, uint8_t> memory, bool takesJigMode = true)
+// plain "JGPG" replies from `memory`. A "JGPS" write goes into it and draws
+// no reply, as on that SX110; with takesWrites false it is dropped.
+inline FakeTransport MakeJigPrinterOver(std::shared_ptr<std::map<int, uint8_t>> memory, bool takesJigMode = true,
+                                        bool takesWrites = true)
 {
     FakeTransport t;
-    t.replyFor = [memory, takesJigMode](const std::vector<unsigned char>& sent) -> std::vector<unsigned char> {
+    t.replyFor = [memory, takesJigMode, takesWrites](const std::vector<unsigned char>& sent) -> std::vector<unsigned char> {
         if (sent.size() == 27 && sent[5] == '@')                                  // EJL enter or leave
             return { 0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0xc5, 0x00 };
         if (sent == std::vector<unsigned char>({ 0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00, 0x10 }))
             return { 0x00, 0x00, 0x00, 0x09, 0x01, 0x00, 0x80, 0x00, 0x10 };     // D4 Init
+        uint16_t written = 0;
+        uint8_t value = 0;
+        if (takesJigMode && takesWrites && ewr::jig::ParseWritePacket(sent, written, value))
+            (*memory)[written] = value;
         const int address = ewr::jig::ReadPacketAddress(sent);
         if (address >= 0 && takesJigMode)
         {
-            auto it = memory.find(address);
-            return { 'J', 'G', 'P', 'G', 0x01, 0x00, it == memory.end() ? uint8_t(0) : it->second };
+            auto it = memory->find(address);
+            return { 'J', 'G', 'P', 'G', 0x01, 0x00, it == memory->end() ? uint8_t(0) : it->second };
         }
         return {};
     };
     return t;
+}
+
+inline FakeTransport MakeJigPrinter(std::map<int, uint8_t> memory, bool takesJigMode = true)
+{
+    return MakeJigPrinterOver(std::make_shared<std::map<int, uint8_t>>(std::move(memory)), takesJigMode);
+}
+
+// The SX110's six reset bytes as its owner's script read them on 2026-11-20,
+// counter 2 at 38968 of 38900 (discussion #48).
+inline std::map<int, uint8_t> Sx110LockedMemory()
+{
+    return { { 0x214, 0x75 }, { 0x215, 0x02 }, { 0x216, 0x38 }, { 0x217, 0x98 }, { 0x218, 0x5a }, { 0x219, 0x05 } };
 }
 
 // L3260-style reply: models with rlen == 2 echo a 2-byte address.
@@ -718,12 +737,19 @@ inline ewr::DbPrinterModel MakeJigModel()
     return model;
 }
 
-// A status over D4, then the JIG read: what the SX110 answered WIC.
+// A status over D4, then the JIG read: what the SX110 answered WIC. A reset
+// is applied to `memory` when every packet is a JIG write sent in JIG mode.
 struct JigGateway : ewr::IDeviceGateway
 {
     std::vector<ewr::ExecutorOptions> queryOptions;
     std::vector<std::vector<std::vector<unsigned char>>> queries;
+    std::map<int, uint8_t> memory = { { 0x214, 0xe0 }, { 0x215, 0x01 }, { 0x216, 0x00 }, { 0x217, 0x94 } };
+    std::vector<ewr::ExecutorOptions> resetOptions;
+    std::vector<std::vector<std::vector<unsigned char>>> resetSequences;
+    bool network = false;
     int resets = 0;
+
+    bool OverNetwork() const override { return network; }
 
     ewr::QueryRunResult RunQuery(const std::vector<std::vector<unsigned char>>&,
                                  const std::vector<std::vector<unsigned char>>& sent,
@@ -742,7 +768,6 @@ struct JigGateway : ewr::IDeviceGateway
             return run;
         }
 
-        const std::map<int, uint8_t> memory = { { 0x214, 0xe0 }, { 0x215, 0x01 }, { 0x216, 0x00 }, { 0x217, 0x94 } };
         for (const auto& packet : sent)
         {
             const auto it = memory.find(ewr::jig::ReadPacketAddress(packet));
@@ -751,11 +776,31 @@ struct JigGateway : ewr::IDeviceGateway
         return run;
     }
 
-    ewr::ResetRunResult RunReset(const std::vector<std::vector<unsigned char>>&,
-                                 const ewr::ExecutorOptions&) override
+    ewr::ResetRunResult RunReset(const std::vector<std::vector<unsigned char>>& sequence,
+                                 const ewr::ExecutorOptions& options) override
     {
         resets++;
-        return {};
+        resetOptions.push_back(options);
+        resetSequences.push_back(sequence);
+
+        ewr::ResetRunResult run;
+        run.deviceFound = true;
+        run.exec.handshakeConfirmed = true;
+        for (const auto& packet : sequence)
+        {
+            uint16_t address = 0;
+            uint8_t value = 0;
+            if (!options.jigMode || !ewr::jig::ParseWritePacket(packet, address, value))
+            {
+                run.exec.error = "not a JIG write";
+                return run;
+            }
+            memory[address] = value;
+            run.exec.writesTotal++;
+            run.exec.writesVerified++;
+        }
+        run.exec.success = true;
+        return run;
     }
 };
 

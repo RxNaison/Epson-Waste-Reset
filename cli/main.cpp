@@ -227,7 +227,7 @@ namespace ewr::cli {
             // No addresses yet, but the read key is enough to dump the EEPROM and
             // go looking for them, so the entry is offered rather than hidden.
             const bool resettable = sm.HasResettableCounters() || sm.HasInkReset();
-            const char* label = sm.jig     ? " (JIG mode - read-only for now)"
+            const char* label = sm.jig     ? " (JIG mode - keyless)"
                               : resettable ? " (Smart Protocol - Recommended)"
                                            : " (no reset addresses yet - read-only)";
 

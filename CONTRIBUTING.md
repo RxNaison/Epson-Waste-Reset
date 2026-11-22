@@ -104,6 +104,11 @@ against the real printer showing:
 - a read-back of the reset addresses returning the expected values,
 - the printer leaving the error state.
 
+A JIG-mode printer (`"access": "jig"`) answers no write at all, so for those
+the read-back is the only acknowledgement there is: EWR reads every byte back
+as it writes it. Show the read-back, then the printer leaving its error state
+after a power cycle.
+
 Paste the console output into the PR - it stays archived there, attached to
 the exact diff it proves.
 

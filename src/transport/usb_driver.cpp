@@ -741,7 +741,10 @@ namespace ewr {
             {
                 fallbackAttempted = true;
 
-                if (pacer.D4Answered())
+                // Both carry keyed '||' writes; a JIG write has no form in either.
+                if (options.jigMode)
+                    trace << "[i] END4 and ESC/P Remote skipped: JIG writes have no form in either.\n";
+                else if (pacer.D4Answered())
                     trace << "[i] END4 and ESC/P Remote skipped: this interface answered in IEEE 1284.4 framing.\n";
                 else if (RunNonD4Fallbacks(backend, cand, sequence, options, trace, run.exec))
                     break;

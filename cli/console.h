@@ -38,6 +38,7 @@ namespace ewr::cli
             // carries the reason.
             "exec.handshake_failed",
             "exec.write_retry", "exec.write_key_retry", "exec.write_rejected", "exec.write_refused",
+            "jig.write_retry",
             "escr.success", "end4.success",
             "session.commit", "session.commit_noop", "session.committed",
             // Logged from the update worker while the CLI's own update line is
@@ -47,7 +48,7 @@ namespace ewr::cli
 
         static const char* const kProgress[] = {
             "exec.packet_sent", "exec.packet_acked", "exec.write_verified",
-            "escr.write_verified", "end4.write_verified",
+            "escr.write_verified", "end4.write_verified", "jig.write_verified",
         };
 
         for (const char* hidden : kHidden)

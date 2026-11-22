@@ -407,6 +407,7 @@ namespace ewr {
         options.resendCreditOnRetry = true;
         options.verifyWrites = true;
         options.useSessionLayer = true;
+        options.jigMode = m_model.jig;
         options.writeKey = m_model.wkey;
         options.alternateWriteKey = m_model.wkey1;
 
@@ -417,6 +418,15 @@ namespace ewr {
     std::vector<std::vector<unsigned char>> Session::BuildWriteSession(
         const std::vector<std::pair<uint16_t, uint8_t>>& writes) const
     {
+        // The JIG session makes its own way in; it is handed the writes alone.
+        if (m_model.jig)
+        {
+            std::vector<std::vector<unsigned char>> packets;
+            for (const auto& w : writes)
+                packets.push_back(jig::BuildWritePacket(w.first, w.second));
+            return packets;
+        }
+
         auto sequence = d4::Handshake();
 
         for (const auto& w : writes)
@@ -533,15 +543,23 @@ namespace ewr {
                        "[*] Generating safe Smart Protocol R/W sequence for " + m_model.name + "...");
 
         ResetFlow flow;
-        flow.sequence = ctrl::ResetSequence(m_model);
         flow.target = "waste";
 
         // What ctrl::ResetSequence writes: the same two guards, the same order.
-        for (uint16_t addr : m_model.GetAllAddresses())
+        const std::vector<uint16_t> addresses = m_model.GetAllAddresses();
+        const std::vector<uint8_t> values = m_model.GetAllResetValues();
+        std::vector<std::pair<uint16_t, uint8_t>> writes;
+        for (size_t i = 0; i < addresses.size(); ++i)
         {
-            if (addr <= m_model.mem_high && m_model.CanEncodeWriteAddress(addr))
-                flow.writeAddresses.push_back(addr);
+            if (addresses[i] <= m_model.mem_high && m_model.CanEncodeWriteAddress(addresses[i]))
+            {
+                flow.writeAddresses.push_back(addresses[i]);
+                if (i < values.size())
+                    writes.push_back({ addresses[i], values[i] });
+            }
         }
+
+        flow.sequence = m_model.jig ? BuildWriteSession(writes) : ctrl::ResetSequence(m_model);
 
         if (flow.writeAddresses.empty())
         {
@@ -942,15 +960,13 @@ namespace ewr {
     {
         ResetOutcome out;
 
-        // No JIG write command is known. Refused before anything is read or
-        // sent, so no host can carry a keyless model into the keyed writes.
-        if (m_model.jig)
+        // JIG mode is raw USB bytes; no network transport carries it.
+        if (m_model.jig && m_gateway.OverNetwork())
         {
-            m_reporter.Log(log::Level::Error, log::Stage::Write, "session.jig_reset_unsupported",
-                           "[!] " + m_model.name + " is read in JIG mode, and EWR cannot reset it yet:"
-                           " its write command is not known. Nothing was sent.");
+            m_reporter.Log(log::Level::Error, log::Stage::Write, "session.jig_needs_usb",
+                           "[!] " + m_model.name + " is written in JIG mode, which needs USB. Nothing was sent.");
             out.phase = ResetPhase::NotSupported;
-            out.error = m_model.name + " cannot be reset yet: no JIG write command is known.";
+            out.error = m_model.name + " is written in JIG mode, which needs USB.";
             return out;
         }
 
@@ -1197,10 +1213,13 @@ namespace ewr {
         if (out.verifyMismatches > 0)
         {
             out.success = false;
-            out.error = "The printer acknowledged the writes, but " + std::to_string(out.verifyMismatches) + " " +
+            out.error = std::string(m_model.jig ? "Every write read back as written in its session, but "
+                                                : "The printer acknowledged the writes, but ")
+                        + std::to_string(out.verifyMismatches) + " " +
                         flow.counterNoun + "(s) read back without their " + flow.expectedValueNoun + ".";
 
-            if (out.verifyUnchanged == out.verifyMismatches && !primaryKeyTaken)
+            // A JIG write has no key to blame.
+            if (out.verifyUnchanged == out.verifyMismatches && !primaryKeyTaken && !m_model.jig)
                 out.error += triedAlternateKey && !m_model.wkey1.empty()
                     ? " They kept their old values with both of the database's write keywords for this"
                       " model: neither is this printer's, or its firmware takes no EEPROM writes."

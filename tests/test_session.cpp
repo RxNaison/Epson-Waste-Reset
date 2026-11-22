@@ -330,37 +330,92 @@ void test_session_reads_a_jig_model()
     CHECK(gw.resets == 0);
 }
 
-// No JIG write command is known, so a reset must not get as far as reading -
-// let alone hand a keyless model to the keyed write path.
-void test_session_refuses_to_reset_a_jig_model()
+// The one write path, with JIG packets: preflight and backup in JIG mode, the
+// six reset bytes as JIG writes and nothing keyed, then the read-back.
+void test_session_resets_a_jig_model()
 {
-    std::cout << "[TEST] test_session_refuses_to_reset_a_jig_model" << std::endl;
+    std::cout << "[TEST] test_session_resets_a_jig_model" << std::endl;
 
     const ewr::DbPrinterModel model = MakeJigModel();
-    CHECK(model.HasResettableCounters());
-    CHECK(!model.CanReset());
+    CHECK(model.CanReset());
 
     JigGateway gw;
     ewr::Session session(model, gw, ewr::log::Default(), ewr::ExecutorOptions::ForQueries());
+
+    ewr::Backup kept;
+    ewr::ResetHandlers handlers;
+    handlers.onBlocker = [](const ewr::Blocker&) { return true; };
+    handlers.confirmWrite = [](const ewr::StateSnapshot&) { return true; };
+    handlers.saveBackup = [&kept](const ewr::Backup& backup, std::string& location) {
+        kept = backup;
+        location = "memory";
+        return true;
+    };
+
+    const ewr::ResetOutcome outcome = session.Reset(handlers);
+    CHECK(outcome.success);
+    CHECK(outcome.phase == ewr::ResetPhase::Done);
+    // The fake's ST2 says INK OUT: the gates run for a JIG model as for any.
+    CHECK(outcome.overrides.size() == 1);
+    if (!outcome.overrides.empty())
+        CHECK(outcome.overrides[0].gate == "blocker" && outcome.overrides[0].detail == "INK OUT");
+    CHECK(outcome.writesVerified == 6 && outcome.writesTotal == 6);
+    CHECK(outcome.verificationRan);
+    CHECK(outcome.verifyMismatches == 0 && outcome.verifyUnread == 0);
+
+    CHECK(gw.resets == 1);
+    if (gw.resets == 1)
+    {
+        CHECK(gw.resetOptions[0].jigMode);
+        const auto& sent = gw.resetSequences[0];
+        CHECK(sent.size() == 6);
+        for (size_t i = 0; i < sent.size(); ++i)
+            CHECK(sent[i] == ewr::jig::BuildWritePacket(static_cast<uint16_t>(0x214 + i), 0x00));
+    }
+
+    // Every read of the run, the preflight's and the read-back's, in JIG mode.
+    size_t jigReads = 0;
+    for (const auto& options : gw.queryOptions)
+        jigReads += options.jigMode ? 1 : 0;
+    CHECK(jigReads == 2);
+
+    // The backup holds what the preflight read of each byte the reset writes.
+    CHECK(outcome.backupTaken);
+    CHECK(kept.Complete());
+    CHECK(kept.bytes.size() == 6);
+    if (kept.bytes.size() == 6)
+    {
+        CHECK(kept.bytes[0] == std::make_pair(uint16_t(0x214), 0xe0));
+        CHECK(kept.bytes[3] == std::make_pair(uint16_t(0x217), 0x94));
+    }
+
+    for (int address = 0x214; address <= 0x219; ++address)
+        CHECK(gw.memory[address] == 0);
+
+    // No ink map, so still no ink reset.
+    CHECK(session.ResetInk(handlers).phase == ewr::ResetPhase::NotSupported);
+    CHECK(gw.resets == 1);
+}
+
+// JIG mode is raw USB bytes: over the network a reset stops before any I/O.
+void test_session_refuses_a_jig_reset_over_the_network()
+{
+    std::cout << "[TEST] test_session_refuses_a_jig_reset_over_the_network" << std::endl;
+
+    JigGateway gw;
+    gw.network = true;
+    ewr::Session session(MakeJigModel(), gw, ewr::log::Default(), ewr::ExecutorOptions::ForQueries());
 
     ewr::ResetHandlers handlers;
     handlers.onBlocker = [](const ewr::Blocker&) { return true; };
     handlers.confirmWrite = [](const ewr::StateSnapshot&) { return true; };
 
-    // NotSupported, not NotStarted: a host maps the phase to its answer, and
-    // this one is "cannot", which nothing about the printer will change.
     const ewr::ResetOutcome outcome = session.Reset(handlers);
     CHECK(outcome.phase == ewr::ResetPhase::NotSupported);
+    CHECK(!outcome.success);
     CHECK(!outcome.error.empty());
     CHECK(gw.resets == 0);
     CHECK(gw.queryOptions.empty());
-
-    const ewr::ResetOutcome ink = session.ResetInk(handlers);
-    CHECK(ink.phase == ewr::ResetPhase::NotSupported);
-    CHECK(gw.resets == 0);
-
-    // An ordinary model is unaffected.
-    CHECK(MakeSessionModel().CanReset());
 }
 
 void test_collect_read_key_candidates()

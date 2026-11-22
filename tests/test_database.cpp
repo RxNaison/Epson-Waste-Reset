@@ -235,7 +235,7 @@ void test_database_integrity()
     bool keysOk = true;
     bool keyBytesOk = true;
     bool arraysOk = true;
-    bool jigResettable = false;
+    bool jigUnresettable = false;
 
     for (const auto& m : models)
     {
@@ -262,15 +262,15 @@ void test_database_integrity()
             keysOk = false;
         if (m.GetAllAddresses().size() != m.GetAllResetValues().size())
             arraysOk = false;
-        if (m.jig && m.CanReset())
-            jigResettable = true;
+        if (m.jig && !m.CanReset())
+            jigUnresettable = true;
     }
 
     CHECK(namesOk);
     CHECK(keysOk);
     CHECK(keyBytesOk);
     CHECK(arraysOk);
-    CHECK(!jigResettable);
+    CHECK(!jigUnresettable);
     CHECK(withCounters > 1000);
 
     std::cout << "  " << withCounters << " models with resettable counters, "
@@ -797,7 +797,7 @@ void test_jig_models_load_and_stay_out_of_the_key_search()
         {
             sawJig = true;
             CHECK(model.jig);
-            CHECK(!model.CanReset());
+            CHECK(model.CanReset());
         }
         if (model.name == "R220")
         {
@@ -815,7 +815,7 @@ void test_jig_models_load_and_stay_out_of_the_key_search()
             CHECK(name != "SX110");
 
     // The real database: the SX110 names itself "Epson Stylus SX110" in its
-    // device ID, and that has to land on the JIG entry, read-only.
+    // device ID, and that has to land on the JIG entry.
     ewr::Database real;
     CHECK(real.Load("database.json"));
     std::vector<ewr::deviceid::ModelNameEntry> entries;
@@ -825,7 +825,7 @@ void test_jig_models_load_and_stay_out_of_the_key_search()
         if (model.name == "SX110")
         {
             CHECK(model.jig);
-            CHECK(!model.CanReset());
+            CHECK(model.CanReset());
             CHECK(model.GetReadAddresses().size() == 6);
         }
     }

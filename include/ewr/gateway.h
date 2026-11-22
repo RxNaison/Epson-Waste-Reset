@@ -34,8 +34,9 @@ namespace ewr {
         // of the raw drain-window loop. Replay dumps must keep it off.
         bool useSessionLayer = false;
 
-        // Queries are JIG reads (jig.h), sent outside packet mode in the
-        // keyless JIG mode. Takes precedence over useSessionLayer.
+        // Queries are JIG reads and a sequence is JIG writes (jig.h), sent
+        // outside packet mode in the keyless JIG mode. Takes precedence over
+        // useSessionLayer.
         bool jigMode = false;
 
         // A status poll while the printer works on print data: when the D4

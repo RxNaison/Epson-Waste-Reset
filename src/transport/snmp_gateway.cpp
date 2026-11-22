@@ -689,6 +689,13 @@ namespace ewr {
             return finish();
         }
 
+        // JIG mode is raw USB bytes outside any command an SNMP GET can carry.
+        if (options.jigMode)
+        {
+            result.error = "JIG-mode writes cannot be sent over the network: they need USB.";
+            return finish();
+        }
+
         // The loop's retries and verdicts, into this run's trace as on USB.
         struct SinkGuard
         {

@@ -4,7 +4,10 @@
 #include "ewr/database.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <string>
+#include <thread>
 
 namespace ewr {
 namespace jig {
@@ -28,6 +31,14 @@ namespace jig {
                  0x01, 0x00 };
     }
 
+    std::vector<unsigned char> BuildWritePacket(uint16_t address, uint8_t value)
+    {
+        return { 'J', 'G', 'P', 'S', 0x06, 0x00,
+                 static_cast<unsigned char>(address >> 8),
+                 static_cast<unsigned char>(address & 0xFF), 0x00,
+                 0x01, 0x00, value };
+    }
+
     std::vector<unsigned char> BuildExit()
     {
         return { 'J', 'G', 0x1b, 0x00, 0x00, 0x00 };
@@ -39,6 +50,18 @@ namespace jig {
             return -1;
 
         return (packet[6] << 8) + (packet[7] | (packet[8] << 8));
+    }
+
+    bool ParseWritePacket(const std::vector<unsigned char>& packet, uint16_t& address, uint8_t& value)
+    {
+        static const unsigned char kHead[] = { 'J', 'G', 'P', 'S', 0x06, 0x00 };
+        if (packet.size() != 12 || !std::equal(kHead, kHead + 6, packet.begin())
+            || packet[8] != 0x00 || packet[9] != 0x01 || packet[10] != 0x00)
+            return false;
+
+        address = static_cast<uint16_t>((packet[6] << 8) | packet[7]);
+        value = packet[11];
+        return true;
     }
 
     bool ParseReadReply(const std::vector<unsigned char>& raw, uint8_t& value)
@@ -67,6 +90,19 @@ namespace jig {
         void EmitTrace(log::Reporter& reporter, const char* code, const std::string& message)
         {
             reporter.Log(log::Level::Trace, log::Stage::General, code, message);
+        }
+
+        void EmitProgress(log::Reporter& reporter, const char* code, size_t index, size_t total,
+                          const std::string& message)
+        {
+            log::Event event;
+            event.level = log::Level::Info;
+            event.stage = log::Stage::Write;
+            event.code = code;
+            event.message = message;
+            event.index = static_cast<int>(index);
+            event.total = static_cast<int>(total);
+            reporter.Emit(event);
         }
 
         // D4 Init (revision 0x10), the same packet the session core sends.
@@ -101,6 +137,63 @@ namespace jig {
             return reply;
         }
 
+        struct Entry
+        {
+            bool entered = false;   // JIGMODE went out behind an answered handshake
+            bool answered = false;  // something came back before it
+            bool silent = false;    // nothing did: the driver moves to the next interface
+            std::string error;
+        };
+
+        Entry Enter(ITransport& transport, log::Reporter& reporter, const ExecutorOptions& options)
+        {
+            Entry entry;
+            bool sent = false;
+
+            // Into packet mode first, as WIC does: the leave packet below is a
+            // D4 transaction, so it only means "leave" to a printer in D4 mode.
+            const std::vector<unsigned char> ejlReply =
+                Exchange(transport, reporter, d4::Handshake()[0], "EJL enter", options.handshakeDrainTimeoutMs, sent);
+            if (!sent)
+            {
+                entry.error = "Transport failure while entering IEEE 1284.4 mode";
+                return entry;
+            }
+
+            const std::vector<unsigned char> initReply =
+                Exchange(transport, reporter, kD4Init, "D4 Init", options.handshakeDrainTimeoutMs, sent);
+            const std::vector<unsigned char> leaveReply = sent
+                ? Exchange(transport, reporter, jig::kLeavePacketMode, "leave packet mode", options.handshakeDrainTimeoutMs, sent)
+                : std::vector<unsigned char>{};
+
+            if (!sent)
+            {
+                entry.error = "Transport failure while leaving IEEE 1284.4 mode";
+                return entry;
+            }
+
+            if (ejlReply.empty() && initReply.empty() && leaveReply.empty())
+            {
+                entry.silent = true;
+                entry.error = "Printer is not responding on this interface (no reply to EJL, D4 Init or the"
+                              " packet-mode exit).";
+                return entry;
+            }
+
+            entry.answered = true;
+
+            // WIC sends the first read straight behind this; nothing answers it.
+            Exchange(transport, reporter, jig::BuildEnter(), "enter JIGMODE", -1, sent);
+            if (!sent)
+            {
+                entry.error = "Transport failure while entering JIG mode";
+                return entry;
+            }
+
+            entry.entered = true;
+            return entry;
+        }
+
     } // namespace
 
     QuerySessionResult jig::RunReadSession(ITransport& transport,
@@ -113,44 +206,12 @@ namespace jig {
 
         EmitTrace(reporter, "jig.banner", "=== JIG MODE SESSION (read-only) ===\n");
 
-        // Into packet mode first, as WIC does: the leave packet below is a
-        // D4 transaction, so it only means "leave" to a printer in D4 mode.
-        const std::vector<unsigned char> ejl = d4::Handshake()[0];
-        const std::vector<unsigned char> ejlReply =
-            Exchange(transport, reporter, ejl, "EJL enter", options.handshakeDrainTimeoutMs, sent);
-        if (!sent)
+        const Entry entry = Enter(transport, reporter, options);
+        result.handshakeConfirmed = entry.answered;
+        result.handshakeFailed = entry.silent;
+        if (!entry.entered)
         {
-            result.error = "Transport failure while entering IEEE 1284.4 mode";
-            return result;
-        }
-
-        const std::vector<unsigned char> initReply =
-            Exchange(transport, reporter, kD4Init, "D4 Init", options.handshakeDrainTimeoutMs, sent);
-        const std::vector<unsigned char> leaveReply = sent
-            ? Exchange(transport, reporter, jig::kLeavePacketMode, "leave packet mode", options.handshakeDrainTimeoutMs, sent)
-            : std::vector<unsigned char>{};
-
-        if (!sent)
-        {
-            result.error = "Transport failure while leaving IEEE 1284.4 mode";
-            return result;
-        }
-
-        if (ejlReply.empty() && initReply.empty() && leaveReply.empty())
-        {
-            result.handshakeFailed = true;
-            result.error = "Printer is not responding on this interface (no reply to EJL, D4 Init or the"
-                           " packet-mode exit).";
-            return result;
-        }
-
-        result.handshakeConfirmed = true;
-
-        // WIC sends the first read straight behind this; nothing answers it.
-        Exchange(transport, reporter, jig::BuildEnter(), "enter JIGMODE", -1, sent);
-        if (!sent)
-        {
-            result.error = "Transport failure while entering JIG mode";
+            result.error = entry.error;
             return result;
         }
 
@@ -202,6 +263,145 @@ namespace jig {
         if (!allAnswered && result.error.empty())
             result.error = "Some JIG reads drew no reply.";
 
+        return result;
+    }
+
+    ExecutionResult jig::RunWriteSession(ITransport& transport,
+                                         const std::vector<std::vector<unsigned char>>& writes,
+                                         log::Reporter& reporter,
+                                         const ExecutorOptions& options)
+    {
+        ExecutionResult result;
+
+        std::vector<std::pair<uint16_t, uint8_t>> planned;
+        for (const auto& packet : writes)
+        {
+            uint16_t address = 0;
+            uint8_t value = 0;
+            if (!jig::ParseWritePacket(packet, address, value))
+            {
+                result.error = "A JIG write session was handed a packet that is not a JIG write; nothing was sent.";
+                reporter.Log(log::Level::Error, log::Stage::Write, "jig.write_not_jig", "[ERROR] " + result.error);
+                return result;
+            }
+            planned.push_back({ address, value });
+        }
+
+        if (planned.empty())
+        {
+            result.error = "A JIG write session was handed no writes; nothing was sent.";
+            return result;
+        }
+
+        EmitTrace(reporter, "jig.banner", "=== JIG MODE SESSION (writes) ===\n");
+
+        const Entry entry = Enter(transport, reporter, options);
+        result.handshakeConfirmed = entry.answered;
+        result.handshakeFailed = entry.silent;
+        if (!entry.entered)
+        {
+            result.error = entry.error;
+            return result;
+        }
+
+        bool sent = false;
+        const auto leave = [&]() { Exchange(transport, reporter, jig::BuildExit(), "exit", -1, sent); };
+
+        // A printer that did not enter JIG mode takes these bytes as print
+        // data, so a read has to answer before the first write goes out.
+        uint8_t current = 0;
+        const std::vector<unsigned char> probe =
+            Exchange(transport, reporter, jig::BuildReadPacket(planned[0].first), "read", options.writeAckTimeoutMs, sent);
+        if (sent)
+            result.packetsSent++;
+        if (!sent || !jig::ParseReadReply(probe, current))
+        {
+            result.error = sent ? "The printer did not answer a JIG read: it does not seem to take JIG mode."
+                                  " Nothing was written."
+                                : "Transport failure during the JIG read before the writes. Nothing was written.";
+            leave();
+            return result;
+        }
+
+        result.writesTotal = planned.size();
+        const int maxAttempts = std::max(options.maxWriteAttempts, 1);
+
+        for (size_t i = 0; i < planned.size(); ++i)
+        {
+            const uint16_t address = planned[i].first;
+            const uint8_t value = planned[i].second;
+            const std::string step = "-> Write " + std::to_string(i + 1) + " / " + std::to_string(planned.size());
+
+            char target[32];
+            snprintf(target, sizeof(target), "0x%04X <- 0x%02X", address, value);
+
+            bool verified = false;
+            int lastRead = -1;
+            for (int attempt = 1; attempt <= maxAttempts && !verified; ++attempt)
+            {
+                if (attempt > 1)
+                {
+                    EmitProgress(reporter, "jig.write_retry", i + 1, planned.size(),
+                                 step + " | Retrying (attempt " + std::to_string(attempt) + "/" + std::to_string(maxAttempts) + ")...");
+                    if (options.retryDelayMs > 0)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(options.retryDelayMs));
+                }
+
+                // Nothing answers a write; anything that does arrive is in the trace.
+                Exchange(transport, reporter, jig::BuildWritePacket(address, value), "write", options.drainTimeoutMs, sent);
+                if (sent)
+                {
+                    result.packetsSent++;
+                    const std::vector<unsigned char> reply =
+                        Exchange(transport, reporter, jig::BuildReadPacket(address), "read back", options.writeAckTimeoutMs, sent);
+                    if (sent)
+                        result.packetsSent++;
+
+                    uint8_t readBack = 0;
+                    if (sent && jig::ParseReadReply(reply, readBack))
+                    {
+                        result.ackCount++;
+                        lastRead = readBack;
+                        verified = readBack == value;
+                    }
+                }
+
+                if (!sent)
+                {
+                    result.error = "Transport failure during JIG write " + std::to_string(i + 1);
+                    leave();
+                    return result;
+                }
+
+                if (!verified)
+                    EmitTrace(reporter, "jig.write_unconfirmed", std::string("[WARNING] JIG write ") + target
+                        + (lastRead < 0 ? ": the read-back went unanswered" : ": it reads back another value"));
+            }
+
+            if (!verified)
+            {
+                result.writesUnverified = true;
+
+                char found[64];
+                if (lastRead < 0)
+                    snprintf(found, sizeof(found), "its read-back went unanswered");
+                else
+                    snprintf(found, sizeof(found), "it reads back 0x%02X", lastRead);
+
+                result.error = "EEPROM write not confirmed after " + std::to_string(maxAttempts) + " attempts (write "
+                             + std::to_string(i + 1) + ", " + target + "): " + found + ".";
+                EmitTrace(reporter, "jig.trace_fatal", "[FATAL] " + result.error + "\n");
+                leave();
+                return result;
+            }
+
+            result.writesVerified++;
+            EmitProgress(reporter, "jig.write_verified", i + 1, planned.size(),
+                         step + " | EEPROM " + target + " verified by read-back.");
+        }
+
+        leave();
+        result.success = true;
         return result;
     }
 

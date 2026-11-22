@@ -675,6 +675,21 @@ void test_jig_packets_match_the_wic_capture()
     CHECK(ewr::jig::ReadPacketAddress(ewr::jig::BuildExit()) == -1);
     CHECK(ewr::jig::ReadPacketAddress(OkAck()) == -1);
 
+    // The writes of the SX110 owner's reset, byte for byte (discussion #48).
+    CHECK(ewr::jig::BuildWritePacket(0x214, 0x00) == bytes({ 'J', 'G', 'P', 'S', 0x06, 0x00, 0x02, 0x14, 0x00, 0x01, 0x00, 0x00 }));
+    CHECK(ewr::jig::BuildWritePacket(0x214, 0x75) == bytes({ 'J', 'G', 'P', 'S', 0x06, 0x00, 0x02, 0x14, 0x00, 0x01, 0x00, 0x75 }));
+    CHECK(ewr::jig::BuildWritePacket(0x219, 0x00) == bytes({ 'J', 'G', 'P', 'S', 0x06, 0x00, 0x02, 0x19, 0x00, 0x01, 0x00, 0x00 }));
+
+    uint16_t written = 0;
+    uint8_t byte = 0;
+    CHECK(ewr::jig::ParseWritePacket(ewr::jig::BuildWritePacket(0x138, 0xab), written, byte));
+    CHECK(written == 0x138 && byte == 0xab);
+    CHECK(ewr::jig::ReadPacketAddress(ewr::jig::BuildWritePacket(0x214, 0x00)) == -1);
+    CHECK(!ewr::jig::ParseWritePacket(ewr::jig::BuildReadPacket(0x214), written, byte));
+    CHECK(!ewr::jig::ParseWritePacket(ewr::jig::BuildExit(), written, byte));
+    CHECK(!ewr::jig::ParseWritePacket(bytes({ 'J', 'G', 'P', 'S', 0x07, 0x00, 0x02, 0x14, 0x00, 0x02, 0x00, 0x00, 0x00 }),
+                                      written, byte)); // two bytes: never seen
+
     uint8_t value = 0;
     CHECK(ewr::jig::ParseReadReply({ 'J', 'G', 'P', 'G', 0x01, 0x00, 0xe0 }, value));
     CHECK(value == 0xe0);
@@ -770,6 +785,148 @@ void test_jig_read_session_refuses_cleanly()
         CHECK(result.packetsSent == 0);
         for (const auto& packet : t.sent)
             CHECK(ewr::jig::ReadPacketAddress(packet) < 0);
+    }
+}
+
+namespace {
+
+    std::vector<std::vector<unsigned char>> Sx110ResetWrites()
+    {
+        std::vector<std::vector<unsigned char>> writes;
+        for (uint16_t address = 0x214; address <= 0x219; ++address)
+            writes.push_back(ewr::jig::BuildWritePacket(address, 0x00));
+        return writes;
+    }
+
+    size_t CountJigWrites(const std::vector<std::vector<unsigned char>>& sent)
+    {
+        uint16_t address = 0;
+        uint8_t value = 0;
+        return static_cast<size_t>(std::count_if(sent.begin(), sent.end(), [&](const std::vector<unsigned char>& p) {
+            return ewr::jig::ParseWritePacket(p, address, value);
+        }));
+    }
+
+} // namespace
+
+// The owner's reset of the locked SX110, replayed: the printer answers no
+// write, and every byte reads back 0.
+void test_jig_write_session_replays_the_sx110_reset()
+{
+    std::cout << "[TEST] test_jig_write_session_replays_the_sx110_reset" << std::endl;
+
+    auto memory = std::make_shared<std::map<int, uint8_t>>(Sx110LockedMemory());
+    FakeTransport t = MakeJigPrinterOver(memory);
+    const auto writes = Sx110ResetWrites();
+
+    // Through the entry point a reset uses.
+    ewr::ExecutorOptions options = FastOptions();
+    options.jigMode = true;
+    options.useSessionLayer = true; // jigMode wins
+    options.validateHandshake = true;
+    ewr::log::Reporter reporter;
+    const ewr::ExecutionResult result = ewr::exec::RunSequence(t, writes, reporter, options);
+
+    CHECK(result.success);
+    CHECK(result.handshakeConfirmed);
+    CHECK(result.writesTotal == 6);
+    CHECK(result.writesVerified == 6);
+    CHECK(!result.writesUnverified);
+    for (int address = 0x214; address <= 0x219; ++address)
+        CHECK(memory->at(address) == 0);
+
+    // Entry as for a read, one read before any write, then each write read
+    // straight back, then the exit.
+    CHECK(t.sent.size() == 18);
+    if (t.sent.size() == 18)
+    {
+        CHECK(t.sent[0] == ewr::d4::Handshake()[0]);
+        CHECK(t.sent[2] == ewr::jig::kLeavePacketMode);
+        CHECK(t.sent[3] == ewr::jig::BuildEnter());
+        CHECK(t.sent[4] == ewr::jig::BuildReadPacket(0x214));
+        for (size_t i = 0; i < writes.size(); ++i)
+        {
+            CHECK(t.sent[5 + 2 * i] == writes[i]);
+            CHECK(t.sent[6 + 2 * i] == ewr::jig::BuildReadPacket(static_cast<uint16_t>(0x214 + i)));
+        }
+        CHECK(t.sent[17] == ewr::jig::BuildExit());
+    }
+
+    const unsigned char bars[] = { '|', '|' };
+    for (const auto& packet : t.sent)
+        CHECK(std::search(packet.begin(), packet.end(), bars, bars + 2) == packet.end());
+
+    // Nothing keyed for the driver's END4 / ESC/P Remote fallbacks to resend.
+    CHECK(ewr::ctrl::ExtractWriteCommands(writes).empty());
+}
+
+void test_jig_write_session_refuses_cleanly()
+{
+    std::cout << "[TEST] test_jig_write_session_refuses_cleanly" << std::endl;
+
+    const auto writes = Sx110ResetWrites();
+    const ewr::ExecutorOptions options = FastOptions();
+
+    // A write that does not stick is sent maxWriteAttempts times, and nothing
+    // after it goes out.
+    {
+        auto memory = std::make_shared<std::map<int, uint8_t>>(Sx110LockedMemory());
+        FakeTransport t = MakeJigPrinterOver(memory, /*takesJigMode=*/true, /*takesWrites=*/false);
+        ewr::log::Reporter reporter;
+        const ewr::ExecutionResult result = ewr::jig::RunWriteSession(t, writes, reporter, options);
+        CHECK(!result.success);
+        CHECK(result.writesUnverified);
+        CHECK(result.writesVerified == 0);
+        CHECK(result.writesTotal == 6);
+        CHECK(!result.error.empty());
+        CHECK(CountJigWrites(t.sent) == static_cast<size_t>(options.maxWriteAttempts));
+        for (const auto& packet : t.sent)
+        {
+            uint16_t address = 0;
+            uint8_t value = 0;
+            if (ewr::jig::ParseWritePacket(packet, address, value))
+                CHECK(address == 0x214);
+        }
+        CHECK(!t.sent.empty() && t.sent.back() == ewr::jig::BuildExit());
+    }
+
+    // A D4 printer of another platform: the read ahead of the writes goes
+    // unanswered, so no write is sent at all.
+    {
+        FakeTransport t = MakeJigPrinter({}, /*takesJigMode=*/false);
+        ewr::log::Reporter reporter;
+        const ewr::ExecutionResult result = ewr::jig::RunWriteSession(t, writes, reporter, options);
+        CHECK(!result.success);
+        CHECK(!result.handshakeFailed);
+        CHECK(result.writesTotal == 0);
+        CHECK(CountJigWrites(t.sent) == 0);
+        CHECK(!t.sent.empty() && t.sent.back() == ewr::jig::BuildExit());
+    }
+
+    // Silence on the interface: a handshake failure, nothing written.
+    {
+        FakeTransport t;
+        ewr::log::Reporter reporter;
+        const ewr::ExecutionResult result = ewr::jig::RunWriteSession(t, writes, reporter, options);
+        CHECK(result.handshakeFailed);
+        CHECK(!result.success);
+        CHECK(CountJigWrites(t.sent) == 0);
+    }
+
+    // Anything but a JIG write in the sequence, and nothing is sent at all.
+    {
+        FakeTransport t = MakeJigPrinter(Sx110LockedMemory());
+        std::vector<std::vector<unsigned char>> mixed = writes;
+        mixed.insert(mixed.begin(), ewr::jig::BuildReadPacket(0x214));
+        ewr::log::Reporter reporter;
+        const ewr::ExecutionResult result = ewr::jig::RunWriteSession(t, mixed, reporter, options);
+        CHECK(!result.success);
+        CHECK(!result.error.empty());
+        CHECK(t.sent.empty());
+
+        const ewr::ExecutionResult none = ewr::jig::RunWriteSession(t, {}, reporter, options);
+        CHECK(!none.success);
+        CHECK(t.sent.empty());
     }
 }
 

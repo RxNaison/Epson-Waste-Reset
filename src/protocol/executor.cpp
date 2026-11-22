@@ -220,6 +220,8 @@ namespace ewr {
                                     log::Reporter& reporter,
                                     const ExecutorOptions& options)
     {
+        if (options.jigMode)
+            return jig::RunWriteSession(transport, sequence, reporter, options);
         if (options.useSessionLayer)
             return d4::RunSequence(transport, sequence, reporter, options);
 

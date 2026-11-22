@@ -131,7 +131,7 @@ Both come from the first USB session of a run that ends with the printer silent,
 | `model_unknown` | `--model` matched nothing usable. |
 | `model_ambiguous` | `--model` matched several models. |
 | `model_mismatch` | `--model` names something other than the printer that answered. |
-| `not_supported` | The model cannot do this (a Replay dump has no read key, no ink map for `--cartridge`, an entry with no reset addresses yet, a JIG-mode model's reset), or cannot over this connection (a printer that locks its EEPROM over the network). |
+| `not_supported` | The model cannot do this (a Replay dump has no read key, no ink map for `--cartridge`, an entry with no reset addresses yet, a JIG-mode model's dump), or cannot over this connection (a printer that locks its EEPROM over the network, a JIG-mode model, whose writes need USB). |
 | `read_failed` | The printer did not answer the read. |
 | `incomplete_dump` | Some addresses went unread; the file is not a backup. |
 | `blocked` | A gate stopped the run: a printer error, a database conflict, or a confirmation that was not given. Nothing was written. |
@@ -302,10 +302,10 @@ machine's networks; `address` is what `--ip` takes. `--list` fails with
 `device_not_found`, `write_failed`, `done` or `not_supported`. `not_supported`
 means nothing was written because EWR cannot do this reset: the way the run
 reached the printer cannot reach its EEPROM (over the network, the printer
-refused every EEPROM read), or the model has nothing EWR can write (no reset
-addresses yet, a JIG-mode model). `not_started` with `read_failed` is a reset
-that does not run blind - the cartridge ink reset, a restore - finding the
-printer silent at its preflight read.
+refused every EEPROM read; a JIG-mode model, written only over USB), or the
+model has nothing EWR can write (no reset addresses yet). `not_started` with
+`read_failed` is a reset that does not run blind - the cartridge ink reset, a
+restore - finding the printer silent at its preflight read.
 
 **`done` is not `ok`.** `done` says the writes were acknowledged. A printer can
 acknowledge every write and keep its old values, so the read-back that follows

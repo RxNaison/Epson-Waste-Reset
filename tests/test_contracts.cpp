@@ -789,12 +789,12 @@ void test_c_abi_event_levels_use_the_header_numbers()
     ewr_session_close(session);
 }
 
-// What the CLI refuses for a JIG model, the C ABI refuses too: no plan for a
-// reset ewr_reset will not run, no dump walking memory JIG mode was never seen
-// to serve, and no "resettable" in the model list. None of it touches USB.
-void test_c_abi_refuses_what_a_jig_model_cannot_do()
+// What the CLI offers a JIG model, the C ABI offers too: a reset plan and
+// "resettable" in the model list, but no dump walking memory JIG mode was
+// never seen to serve. None of it touches USB.
+void test_c_abi_offers_what_a_jig_model_can_do()
 {
-    std::cout << "[TEST] test_c_abi_refuses_what_a_jig_model_cannot_do" << std::endl;
+    std::cout << "[TEST] test_c_abi_offers_what_a_jig_model_can_do" << std::endl;
 
     ewr_session* session = nullptr;
     if (ewr_session_open("database.json", &session) == EWR_ERR_ANOTHER_RUN)
@@ -815,7 +815,7 @@ void test_c_abi_refuses_what_a_jig_model_cannot_do()
         if (entry["name"] == "SX110")
         {
             ++seen;
-            CHECK(entry["resettable"] == false);
+            CHECK(entry["resettable"] == true);
             CHECK(entry["has_ink_reset"] == false);
         }
         if (entry["name"] == "R220")
@@ -824,8 +824,17 @@ void test_c_abi_refuses_what_a_jig_model_cannot_do()
     CHECK(seen == 1);
 
     json = nullptr;
-    CHECK(ewr_plan(session, "SX110", 0, &json) == EWR_ERR_NOT_SUPPORTED);
-    CHECK(json == nullptr);
+    CHECK(ewr_plan(session, "SX110", 0, &json) == EWR_OK);
+    CHECK(json != nullptr);
+    if (json)
+    {
+        const nlohmann::json plan = nlohmann::json::parse(json);
+        ewr_string_free(json);
+        CHECK(plan["planned_writes"].size() == 6);
+    }
+    CHECK(ewr_plan(session, "SX110", 1, &json) == EWR_ERR_NOT_SUPPORTED); // no ink map
+
+    json = nullptr;
     CHECK(ewr_dump(session, "SX110", &json) == EWR_ERR_NOT_SUPPORTED);
     CHECK(json == nullptr);
     CHECK(!std::string(ewr_session_last_error(session)).empty());

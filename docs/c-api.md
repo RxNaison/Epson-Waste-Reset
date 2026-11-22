@@ -59,10 +59,12 @@ The point of this API is that a newer EWR does not mean a rewrite.
   `EWR_ERR_WRITE_UNVERIFIED` (`phase` `done`, `verification.mismatches` above
   0), not `EWR_OK`.
 - **What EWR cannot reset, it refuses before any I/O.** A model with no reset
-  addresses yet, or one read in JIG mode, answers `EWR_ERR_NOT_SUPPORTED` from
-  `ewr_reset`, `ewr_plan` and (JIG) `ewr_dump`, and `ewr_list_models` gives it
-  `"resettable": false`. A reset that needs its preflight read - the ink reset,
-  a restore - and finds the printer silent answers `EWR_ERR_READ_FAILED`.
+  addresses yet answers `EWR_ERR_NOT_SUPPORTED` from `ewr_reset` and
+  `ewr_plan`, and `ewr_list_models` gives it `"resettable": false`. A model
+  read in JIG mode resets over USB only (`ewr_reset` on a network session
+  answers `EWR_ERR_NOT_SUPPORTED`), and `ewr_dump` refuses it. A reset that
+  needs its preflight read - the ink reset, a restore - and finds the printer
+  silent answers `EWR_ERR_READ_FAILED`.
 
 ## A printer on the network (ABI 2)
 

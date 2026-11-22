@@ -97,15 +97,6 @@ namespace ewr::cli {
                       << std::endl;
         }
 
-        if (selected.smartModel.jig)
-        {
-            PrintResetCoverage(selected.smartModel);
-            std::cerr << "\n[!] " << selected.smartModel.name << " is read in JIG mode. EWR cannot reset it yet:\n"
-                         "    its write command is not known. Nothing was written." << std::endl;
-            JsonFail("not_supported", selected.smartModel.name + " cannot be reset yet: no JIG write command is known.");
-            return FinishRun(1);
-        }
-
         // The plan has to be the plan of the run --cartridge would perform,
         // or the dry run describes a reset nobody asked for.
         const std::vector<uint16_t> planAddresses = cli.cartridge
@@ -260,14 +251,21 @@ namespace ewr::cli {
             std::cout << "================================================================================\n" << std::endl;
         }
 
-        // The Session refuses too; this says so before any prompt.
         if (selected.smartModel.jig)
         {
-            std::cerr << "\n[!] " << selected.smartModel.name << " is read in JIG mode, and EWR cannot reset it yet:\n"
-                         "    its write command is not known. Nothing was written. Use --status to read\n"
-                         "    its waste counters." << std::endl;
-            JsonFail("not_supported", selected.smartModel.name + " cannot be reset yet: no JIG write command is known.");
-            return FinishRun(1);
+            // The Session refuses too; this says so before any prompt.
+            if (ctx.overNetwork)
+            {
+                const std::string why = selected.smartModel.name + " is written in JIG mode, which needs USB.";
+                std::cerr << "\n[!] " << why << " Nothing was written." << std::endl;
+                JsonFail("not_supported", why);
+                return FinishRun(1);
+            }
+
+            std::cout << "\n[i] " << selected.smartModel.name << " is written in JIG mode, Epson's keyless factory mode." << std::endl;
+            std::cout << "    The printer does not answer a JIG write, so EWR reads every byte back as it" << std::endl;
+            std::cout << "    writes it. JIG resets are new in EWR: please tell us how this one went at" << std::endl;
+            std::cout << "    https://github.com/RxNaison/Epson-Waste-Reset/discussions/48" << std::endl;
         }
 
         // No addresses and no ink map: the entry carries a working read key and

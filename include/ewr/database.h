@@ -224,9 +224,8 @@ namespace ewr {
         // never silently picks a winner; a host must warn before writing.
         bool conflict{false};
 
-        // "access": "jig" - read in the keyless JIG mode (jig.h), not with
-        // the keyed '||' commands. rkey/wkey mean nothing here, and no write
-        // command is known yet, so these models are read-only.
+        // "access": "jig" - read and written in the keyless JIG mode (jig.h),
+        // not with the keyed '||' commands. rkey/wkey mean nothing here.
         bool jig{false};
 
         // 'rlen'/'wlen' are the byte length of the ADDRESS field in factory
@@ -323,10 +322,8 @@ namespace ewr {
 
         bool HasCloseOps() const { return !close_ops.empty(); }
 
-        // What a reset can actually be run for. A JIG model keeps its pad
-        // groups, so its counters can be read and its coverage shown, but
-        // EWR has no JIG write command to run a reset with.
-        bool CanReset() const { return !jig && (HasResettableCounters() || HasInkReset()); }
+        // What a reset can actually be run for.
+        bool CanReset() const { return HasResettableCounters() || HasInkReset(); }
 
         std::vector<CounterSpec> GetAllCounters() const
         {

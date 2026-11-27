@@ -526,15 +526,14 @@ def extract_ezreset(raw_bytes):
             spec["serial"] = serial
 
         # Bytes that make this unit this unit: a full restore never writes
-        # them. A head ID row reads as "<start> <length> ..."; the list is
-        # one of bytes never to write, so the wider reading is the one kept.
+        # them. A head ID row is "<address> <a> <b> <c>" and names one byte.
+        # The second field is not a length: neighbouring addresses each get a
+        # row of their own (0x69-0x6D on the L8050, each with a 05), and read
+        # as one it reaches 0x70, a byte the platen reset writes (#78).
         identity = {}
         head, _ = parse_hex_tokens(el.findtext("headid"))
         if head and len(head) % 4 == 0:
-            ids = set()
-            for start, length in zip(head[0::4], head[1::4]):
-                ids.update(range(start, start + length) if 1 <= length <= 16 else [start])
-            identity["head_id"] = sorted(ids)
+            identity["head_id"] = sorted(set(head[0::4]))
         for tag, key in (("usb-id", "usb_id"), ("net-id", "net_id")):
             ids = _addresses(el.find(tag))
             if ids:

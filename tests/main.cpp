@@ -20,6 +20,7 @@ void test_database_carries_no_recovery_channel();
 void test_generator_local_db();
 void test_database_integrity();
 void test_database_maintenance_facts();
+void test_database_identity_bytes_are_never_reset_bytes();
 void test_database_keeps_keyless_models_from_old_loaders();
 void test_packet_structure_integrity();
 void test_byte_parity();
@@ -256,6 +257,7 @@ int main()
     test_generator_local_db();
     test_database_integrity();
     test_database_maintenance_facts();
+    test_database_identity_bytes_are_never_reset_bytes();
     test_database_keeps_keyless_models_from_old_loaders();
     test_packet_structure_integrity();
     test_byte_parity();

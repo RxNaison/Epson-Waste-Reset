@@ -1386,6 +1386,60 @@ void test_database_maintenance_facts()
     }
 }
 
+// A byte the reset writes is never one a full restore refuses to write as the
+// unit's own. ez-reset's head ID rows name one address each; read as
+// "<start> <length>" they reached 0x70 on the L8050, ET-8500 and XP-970
+// families, which their platen reset writes (#78).
+void test_database_identity_bytes_are_never_reset_bytes()
+{
+    std::cout << "[TEST] test_database_identity_bytes_are_never_reset_bytes" << std::endl;
+
+    ewr::Database generator;
+    CHECK(generator.Load("database.json"));
+    const std::vector<ewr::DbPrinterModel> models = generator.Models();
+    CHECK(models.size() >= 1450);
+
+    size_t withIdentity = 0;
+    size_t overlapping = 0;
+    for (const auto& model : models)
+    {
+        if (!model.identity_addresses.empty())
+            withIdentity++;
+
+        std::vector<uint16_t> unit = model.identity_addresses;
+        unit.insert(unit.end(), model.serial_addresses.begin(), model.serial_addresses.end());
+
+        std::vector<uint16_t> written = model.GetAllAddresses();
+        const std::vector<uint16_t> ink = model.GetInkAddresses();
+        written.insert(written.end(), ink.begin(), ink.end());
+
+        for (uint16_t address : unit)
+        {
+            if (std::find(written.begin(), written.end(), address) != written.end())
+            {
+                std::cout << "    " << model.name << ": byte " << address
+                          << " is both the unit's own and a reset byte" << std::endl;
+                overlapping++;
+            }
+        }
+
+        if (model.name == "L8050" || model.name == "ET-8500" || model.name == "XP-970")
+        {
+            // One address per row: 0x6F ends the low block, 0xC7 the high one.
+            CHECK(std::find(written.begin(), written.end(), 0x70) != written.end());
+            CHECK(std::find(model.identity_addresses.begin(), model.identity_addresses.end(), 0x70)
+                  == model.identity_addresses.end());
+            CHECK(std::find(model.identity_addresses.begin(), model.identity_addresses.end(), 0x6F)
+                  != model.identity_addresses.end());
+            CHECK(std::find(model.identity_addresses.begin(), model.identity_addresses.end(), 0xC8)
+                  == model.identity_addresses.end());
+        }
+    }
+
+    CHECK(withIdentity >= 700);
+    CHECK(overlapping == 0);
+}
+
 // JIG models live under "keyless_models": a pre-1.6 loader, which reads
 // database.json from main and only its "models", must never see one there
 // and take it for a keyed model with key 0. This build sees all of them.

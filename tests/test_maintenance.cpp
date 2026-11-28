@@ -94,6 +94,170 @@ void test_maintenance_blocker_policy()
     busy.stateName = "CLEANING";
     const auto working = ewr::gates::EvaluateMaintenance(busy, A::HeadClean);
     CHECK(working.has_value() && working->errorName == "PRINTER BUSY" && working->errorCode == -1);
+
+    // The box level is its free space (#79): 0 is a full box. Only a power
+    // cleaning, the one that fills it fast, stops on that.
+    ewr::PrinterStatus fullBox = idle;
+    fullBox.maintenanceBoxLevel = 0;
+    fullBox.maintenanceBoxText = "EMPTY";
+    const auto noRoom = ewr::gates::EvaluateMaintenance(fullBox, A::PowerClean);
+    CHECK(noRoom.has_value() && noRoom->errorName == "MAINTENANCE BOX FULL" && noRoom->errorCode == -1);
+    CHECK(!ewr::gates::EvaluateMaintenance(fullBox, A::HeadClean).has_value());
+    CHECK(!ewr::gates::EvaluateMaintenance(fullBox, A::NozzleCheck).has_value());
+
+    // A host that fills in the level alone is read the same way.
+    ewr::PrinterStatus zeroOnly = idle;
+    zeroOnly.maintenanceBoxLevel = 0;
+    const auto zero = ewr::gates::EvaluateMaintenance(zeroOnly, A::PowerClean);
+    CHECK(zero.has_value() && zero->errorName == "MAINTENANCE BOX FULL");
+
+    // The printer's own error comes first; Run asks about the box after it.
+    ewr::PrinterStatus padsAndBox = fullBox;
+    padsAndBox.hasError = true;
+    padsAndBox.errorCode = 0x10;
+    padsAndBox.errorName = "SERVICE REQUEST";
+    const auto both = ewr::gates::EvaluateMaintenance(padsAndBox, A::PowerClean);
+    CHECK(both.has_value() && both->errorName == "SERVICE REQUEST" && both->errorCode == 0x10);
+
+    ewr::PrinterStatus noBox = idle;
+    noBox.maintenanceBoxText = "MISSING";
+    const auto missing = ewr::gates::EvaluateMaintenance(noBox, A::PowerClean);
+    CHECK(missing.has_value() && missing->errorName == "NO MAINTENANCE BOX");
+
+    // Any room at all is not EWR's to judge: Epson's limit is not published.
+    ewr::PrinterStatus someRoom = idle;
+    someRoom.maintenanceBoxLevel = 43;
+    someRoom.maintenanceBoxText = "OK";
+    CHECK(!ewr::gates::EvaluateMaintenance(someRoom, A::PowerClean).has_value());
+}
+
+// The ET-7750 in #79 reported its box at 43, and Epson's utility refused a
+// power cleaning for lack of space. EWR says how much room is left before it
+// asks, and sends nothing to a box with none.
+void test_maintenance_power_clean_and_the_maintenance_box()
+{
+    std::cout << "[TEST] test_maintenance_power_clean_and_the_maintenance_box" << std::endl;
+
+    ewr::DbPrinterModel model = MakeSessionModel();
+    auto idleWithBox = [](unsigned char freeSpace) {
+        return WrapSt2Body({ 0x01, 0x01, 0x04, 0x0D, 0x01, freeSpace });
+    };
+
+    ewr::MaintenanceRequest charge;
+    charge.action = ewr::MaintenanceAction::PowerClean;
+    charge.remoteOnly = true;
+
+    {
+        MaintenanceGateway gw;
+        gw.statuses = { idleWithBox(43), MakeSt2State(0x07), idleWithBox(40) };
+        ewr::log::Reporter reporter;
+        std::string reported;
+        reporter.AddSink([&](const ewr::log::Event& e) {
+            if (e.code == "maintenance.box_free" && e.fields.count("free"))
+                reported = e.fields.at("free");
+        });
+        ewr::Maintenance maintenance(gw, &model, reporter);
+        maintenance.pollIntervalMs = 0;
+
+        // Told before the person decides, not after.
+        std::string seenAtConfirm;
+        ewr::MaintenanceHandlers handlers;
+        handlers.confirm = [&](const ewr::StateSnapshot&, const std::string&) {
+            seenAtConfirm = reported;
+            return true;
+        };
+
+        const ewr::MaintenanceOutcome out = maintenance.Run(charge, handlers);
+        CHECK(out.phase == ewr::MaintenancePhase::Done);
+        CHECK(reported == "43");
+        CHECK(seenAtConfirm == "43");
+        CHECK(out.before.status.maintenanceBoxLevel == 43);
+        CHECK(gw.jobs.size() == 1);
+    }
+
+    {
+        MaintenanceGateway gw;
+        gw.statuses = { idleWithBox(0) };
+        ewr::log::Reporter reporter;
+        ewr::Maintenance maintenance(gw, &model, reporter);
+        maintenance.pollIntervalMs = 0;
+        std::string stoppedOn;
+        ewr::MaintenanceHandlers handlers;
+        handlers.onBlocker = [&](const ewr::Blocker& b) { stoppedOn = b.errorName; return false; };
+
+        const ewr::MaintenanceOutcome out = maintenance.Run(charge, handlers);
+        CHECK(out.phase == ewr::MaintenancePhase::Aborted);
+        CHECK(stoppedOn == "MAINTENANCE BOX FULL");
+        CHECK(gw.jobs.empty() && gw.commands.empty());
+    }
+
+    // Behind the printer's own error the full box is a question of its own:
+    // letting the error go is not letting the box go.
+    const std::vector<unsigned char> padsFullBoxFull =
+        WrapSt2Body({ 0x01, 0x01, 0x00, 0x02, 0x01, 0x10, 0x0D, 0x01, 0x00 });
+    {
+        MaintenanceGateway gw;
+        gw.statuses = { padsFullBoxFull };
+        ewr::log::Reporter reporter;
+        ewr::Maintenance maintenance(gw, &model, reporter);
+        maintenance.pollIntervalMs = 0;
+        std::vector<std::string> asked;
+        ewr::MaintenanceHandlers handlers;
+        handlers.onBlocker = [&](const ewr::Blocker& b) { asked.push_back(b.errorName); return b.errorCode == 0x10; };
+        handlers.confirm = [](const ewr::StateSnapshot&, const std::string&) { return true; };
+
+        const ewr::MaintenanceOutcome out = maintenance.Run(charge, handlers);
+        CHECK(out.phase == ewr::MaintenancePhase::Aborted);
+        CHECK((asked == std::vector<std::string>{ "SERVICE REQUEST", "MAINTENANCE BOX FULL" }));
+        CHECK(gw.jobs.empty() && gw.commands.empty());
+    }
+    {
+        MaintenanceGateway gw;
+        gw.statuses = { padsFullBoxFull, MakeSt2State(0x07), MakeSt2State(0x04) };
+        ewr::log::Reporter reporter;
+        ewr::Maintenance maintenance(gw, &model, reporter);
+        maintenance.pollIntervalMs = 0;
+        ewr::MaintenanceHandlers handlers;
+        handlers.onBlocker = [](const ewr::Blocker&) { return true; };
+        handlers.confirm = [](const ewr::StateSnapshot&, const std::string&) { return true; };
+
+        const ewr::MaintenanceOutcome out = maintenance.Run(charge, handlers);
+        CHECK(out.phase == ewr::MaintenancePhase::Done);
+        CHECK(out.overrides.size() == 2);
+        if (out.overrides.size() == 2)
+        {
+            CHECK(out.overrides[0].detail == "SERVICE REQUEST" && out.overrides[0].errorCode == 0x10);
+            CHECK(out.overrides[1].detail == "MAINTENANCE BOX FULL" && out.overrides[1].errorCode == -1);
+        }
+        CHECK(gw.jobs.size() == 1);
+    }
+
+    // A printer that names the missing box in its own error is asked once.
+    {
+        MaintenanceGateway gw;
+        gw.statuses = { WrapSt2Body({ 0x01, 0x01, 0x00, 0x02, 0x01, 0x22, 0x0D, 0x01, 110 }) };
+        ewr::log::Reporter reporter;
+        ewr::Maintenance maintenance(gw, &model, reporter);
+        maintenance.pollIntervalMs = 0;
+        std::vector<std::string> asked;
+        ewr::MaintenanceHandlers handlers;
+        handlers.onBlocker = [&](const ewr::Blocker& b) { asked.push_back(b.errorName); return false; };
+
+        const ewr::MaintenanceOutcome out = maintenance.Run(charge, handlers);
+        CHECK(out.phase == ewr::MaintenancePhase::Aborted);
+        CHECK((asked == std::vector<std::string>{ "NO MAINTENANCE BOX" }));
+    }
+
+    // From the wire: a box with no room is 0 / "EMPTY" in the JSON, as it
+    // always was, and a new one near 100.
+    {
+        const nlohmann::json full = ewr::json::Status(ewr::ctrl::ParseStatusReply(idleWithBox(0)));
+        CHECK(full["maintenance_box"] == 0);
+        CHECK(full["maintenance_box_status"] == "EMPTY");
+        const nlohmann::json fresh = ewr::json::Status(ewr::ctrl::ParseStatusReply(idleWithBox(100)));
+        CHECK(fresh["maintenance_box"] == 100);
+        CHECK(fresh["maintenance_box_status"] == "OK");
+    }
 }
 
 void test_maintenance_routes()

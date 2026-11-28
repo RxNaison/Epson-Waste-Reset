@@ -154,6 +154,7 @@ void test_session_range_reads();
 void test_dump_addresses_reach_the_mapped_bytes();
 void test_remote_mode_job_bytes();
 void test_maintenance_blocker_policy();
+void test_maintenance_power_clean_and_the_maintenance_box();
 void test_maintenance_routes();
 void test_maintenance_factory_clean_runs_once_and_is_watched();
 void test_maintenance_print_data_watch_and_fallback();
@@ -391,6 +392,7 @@ int main()
     test_dump_addresses_reach_the_mapped_bytes();
     test_remote_mode_job_bytes();
     test_maintenance_blocker_policy();
+    test_maintenance_power_clean_and_the_maintenance_box();
     test_maintenance_routes();
     test_maintenance_factory_clean_runs_once_and_is_watched();
     test_maintenance_print_data_watch_and_fallback();

@@ -23,6 +23,27 @@ namespace ewr {
         // Three silent polls in a row: the printer is gone, not busy.
         constexpr int kSilentPollsAllowed = 3;
 
+        // What stops a power cleaning in the maintenance box itself, whatever
+        // else the printer reports. The level is the box's free space (#79);
+        // how much a power cleaning needs is not published, so only a box with
+        // none left, or none fitted, counts. Empty when the box allows it.
+        Blocker BoxObjection(const PrinterStatus& status)
+        {
+            Blocker box;
+            if (status.maintenanceBoxLevel == 0 || status.maintenanceBoxText == "EMPTY")
+            {
+                box.errorName = "MAINTENANCE BOX FULL";
+                box.explanation = "The maintenance box reports no free space. A power cleaning would send its\n"
+                                  "    ink into a full box. Replace the maintenance box first.";
+            }
+            else if (status.maintenanceBoxText == "MISSING")
+            {
+                box.errorName = "NO MAINTENANCE BOX";
+                box.explanation = "The printer reports no maintenance box. Fit one before a power cleaning.";
+            }
+            return box;
+        }
+
         std::string ReplyText(const std::vector<unsigned char>& raw)
         {
             const std::vector<unsigned char> payload = d4::ExtractPayload(raw);
@@ -130,6 +151,16 @@ namespace ewr {
             blocker.errorName = "PRINTER BUSY";
             blocker.explanation = "The printer is " + status.stateName + ". Wait until it is idle and run EWR again.";
             return blocker;
+        }
+
+        // A power cleaning sends far more ink into the maintenance box than a
+        // normal one, and Epson's own utility refuses one on a box short of
+        // space (#79). Behind another objection, Run asks about it on its own.
+        if (action == MaintenanceAction::PowerClean)
+        {
+            const Blocker box = BoxObjection(status);
+            if (!box.errorName.empty())
+                return box;
         }
 
         return std::nullopt;
@@ -259,7 +290,8 @@ namespace ewr {
             handlers.onPreflight(out.before);
 
         // ---- Gate: the same policy as a reset's - nobody to ask is a no.
-        if (const std::optional<Blocker> blocker = gates::EvaluateMaintenance(out.before.status, request.action))
+        const std::optional<Blocker> blocker = gates::EvaluateMaintenance(out.before.status, request.action);
+        if (blocker)
         {
             if (!(handlers.onBlocker && handlers.onBlocker(*blocker)))
             {
@@ -271,6 +303,38 @@ namespace ewr {
             }
 
             out.overrides.push_back({ "blocker", blocker->errorName, blocker->errorCode });
+        }
+
+        // A full or missing box behind another objection is its own question:
+        // going past the printer's error must not go past the box unasked. A
+        // printer that names the box in its own error was asked about it already.
+        if (blocker && request.action == MaintenanceAction::PowerClean)
+        {
+            const Blocker box = BoxObjection(out.before.status);
+            if (!box.errorName.empty() && box.errorName != blocker->errorName)
+            {
+                if (!(handlers.onBlocker && handlers.onBlocker(box)))
+                {
+                    m_reporter.Log(log::Level::Info, log::Stage::Read, "maintenance.aborted",
+                                   "[i] Stopped before sending anything. Nothing was changed.");
+                    out.phase = MaintenancePhase::Aborted;
+                    out.error = "Stopped on " + box.errorName + ".";
+                    return out;
+                }
+
+                out.overrides.push_back({ "blocker", box.errorName, box.errorCode });
+            }
+        }
+
+        // How much room the box has left, before the person is asked: the
+        // limit Epson's utility applies to a power cleaning is not known here.
+        if (request.action == MaintenanceAction::PowerClean && out.before.status.maintenanceBoxLevel > 0)
+        {
+            const std::string freePercent = std::to_string(out.before.status.maintenanceBoxLevel);
+            m_reporter.Log(log::Level::Info, log::Stage::Read, "maintenance.box_free",
+                           "[i] The maintenance box reports " + freePercent + "% free space. A power cleaning sends a\n"
+                           "    lot of ink into it. If Epson's utility asked for a new box, fit one first.",
+                           { { "free", freePercent } });
         }
 
         if (handlers.confirm && !handlers.confirm(out.before, out.route))

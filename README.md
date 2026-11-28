@@ -73,7 +73,7 @@ Running with no options is the supported path. These exist for diagnosis and for
 | `--info` | Read-only: firmware version, serial number, the printer's own counters (pages printed, cleanings, ink changes, scans) and the codes of its last fatal errors, where the database knows them. |
 | `--nozzle-check` | Print the nozzle check pattern. Load plain paper. `--nozzle-check alt` asks for the alternate pattern some models print. |
 | `--head-clean [level]` | A head cleaning: `gentle`, `normal` (the default), `medium` or `strong`, as far as the model lists them. `--clean-group black` or `color` cleans only those nozzles. Uses ink, and the ink goes into the waste pads. |
-| `--power-clean` | The ink charge: a much stronger cleaning that uses a lot of ink. Only when normal cleanings did not clear the nozzles. Asks you to type `charge`. |
+| `--power-clean` | The ink charge: a much stronger cleaning that uses a lot of ink. Only when normal cleanings did not clear the nozzles. Asks you to type `charge`. Stops and asks if the maintenance box reports no free space or none fitted (`--force-yes` goes past it), and otherwise says how much room the box reports before you confirm. |
 | `--print-data` | Send a cleaning as print data (ESC/P2 remote mode) even where the model has its own maintenance command - for a printer that refuses that one. |
 | `--find-addresses` | For a model with no reset addresses yet: read the EEPROM three times with a head cleaning between reads - EWR runs them, or you do from the panel - and report the bytes that rise every time. No EEPROM byte is written. |
 | `--find-key` | For a printer the database has no entry for: try every read key in the database and report which one, if any, the printer answers. Takes no `--model`. Read-only. |

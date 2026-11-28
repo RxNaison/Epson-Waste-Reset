@@ -305,7 +305,7 @@ far it got, and the status code says what to tell the user.
 
 | Callback | `json` |
 | --- | --- |
-| blocker | `{"error", "error_code", "explanation"}`: `error` names the objection (`INK OUT`, `PRINTER BUSY`, `DATABASE CONFLICT`, ...), `error_code` is the printer's error code and `null` when the objection is not a printer error, `explanation` is English for a dialog |
+| blocker | `{"error", "error_code", "explanation"}`: `error` names the objection (`INK OUT`, `PRINTER BUSY`, `DATABASE CONFLICT`, ...), `error_code` is the printer's error code and `null` when the objection is not a printer error, `explanation` is English for a dialog. A power cleaning can ask twice: the printer's error or busy state, then a full or missing maintenance box (`MAINTENANCE BOX FULL`, `NO MAINTENANCE BOX`) |
 | confirm | what `ewr_read_status` answers for the preflight, plus `"target"`: `waste`, `ink`, `restore`, `head-clean`, `power-clean` or `nozzle-check`; maintenance adds `"route"` |
 | backup | a whole backup file: `{"format": "ewr-backup", "version", "created", "model", "target", "printer", "address_length", "bytes", "complete"}` |
 

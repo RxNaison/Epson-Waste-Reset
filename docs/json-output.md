@@ -98,6 +98,7 @@ Both come from the first USB session of a run that ends with the printer silent,
 | `session.range_reads`, `session.single_reads` | `bytes`, `requests`: whether a long read went by ranges or byte by byte |
 | `session.alternate_key_retry` | `unchanged`: how many bytes kept their old value although every write was acknowledged. The writes go once more with the model's alternate keyword |
 | `maintenance.sending` | `route`: `factory`, `remote` or `factory_print`, `group`: `all`, `black` or `color` |
+| `maintenance.box_free` | `free`: the maintenance box's free space, 1 to 100, before a power cleaning is confirmed. Advice only: EWR does not know how much room a power cleaning needs, and an unknown or absent level sends no event. A box that reports 0, or none fitted, is a blocker instead (`MAINTENANCE BOX FULL`, `NO MAINTENANCE BOX`): it stops the cleaning unless the blocker callback, or `--force-yes`, lets it go on. Behind another objection it is asked on its own, and each one let through is in `overrides` |
 | `maintenance.started` | `state`: the printer's state when it was first seen at work |
 | `maintenance.expected` | `seconds`: how long the printer says the cleaning takes, from its status report. Not every printer says; EWR watches at least that long plus a margin |
 | `maintenance.silent` | `seconds`: when the printer first left a status query unanswered after print data, which it does while it works on the job |
@@ -197,6 +198,12 @@ limit on record.
 about has `"level": null` with its own `status` text, while an empty cartridge
 has `"level": 0`. Same for `maintenance_box`, which carries its condition in
 `maintenance_box_status` because a box can report one without a level.
+
+`maintenance_box` is the box's **free space** as the printer reports it, 0 to
+100: a new box is near 100, a full one 0 (#79). Its `maintenance_box_status` is
+`EMPTY` at 0, a name the box shares with the ink levels: for a box it means no
+space is left, the box is full. The values have always been the printer's own
+and are unchanged; only this description is new.
 
 `detected_model` is what the printer said it was, when the caller ran detection
 - `null` means nobody asked, not that nothing matched. `ewr --status` fills it;

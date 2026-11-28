@@ -89,6 +89,8 @@ namespace ewr {
     struct MaintenanceHandlers
     {
         std::function<void(const StateSnapshot&)> onPreflight;
+        // Asked for each objection. A power cleaning can ask twice: the
+        // printer's error or busy state, then a full or missing maintenance box.
         DecisionCallback onBlocker;
         // Asked once, after every gate, with the route about to be used.
         // False aborts; unset proceeds.

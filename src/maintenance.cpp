@@ -115,15 +115,6 @@ namespace ewr {
     {
         const bool printing = action == MaintenanceAction::NozzleCheck;
 
-        // A full or missing box is told even when another objection comes
-        // first: getting past that one must not mean getting past this unheard.
-        const Blocker box = (action == MaintenanceAction::PowerClean) ? BoxObjection(status) : Blocker();
-        auto withBox = [&box](Blocker found) {
-            if (!box.errorName.empty())
-                found.explanation += "\n    " + box.errorName + " as well: " + box.explanation;
-            return found;
-        };
-
         Blocker blocker;
         blocker.errorCode = status.hasError ? status.errorCode : -1;
 
@@ -152,21 +143,25 @@ namespace ewr {
             else
                 blocker.explanation = "Clear the error on the printer first, then run EWR again.";
 
-            return withBox(blocker);
+            return blocker;
         }
 
         if (status.stateCode != kStateIdle)
         {
             blocker.errorName = "PRINTER BUSY";
             blocker.explanation = "The printer is " + status.stateName + ". Wait until it is idle and run EWR again.";
-            return withBox(blocker);
+            return blocker;
         }
 
         // A power cleaning sends far more ink into the maintenance box than a
         // normal one, and Epson's own utility refuses one on a box short of
-        // space (#79).
-        if (!box.errorName.empty())
-            return box;
+        // space (#79). Behind another objection, Run asks about it on its own.
+        if (action == MaintenanceAction::PowerClean)
+        {
+            const Blocker box = BoxObjection(status);
+            if (!box.errorName.empty())
+                return box;
+        }
 
         return std::nullopt;
     }
@@ -295,7 +290,8 @@ namespace ewr {
             handlers.onPreflight(out.before);
 
         // ---- Gate: the same policy as a reset's - nobody to ask is a no.
-        if (const std::optional<Blocker> blocker = gates::EvaluateMaintenance(out.before.status, request.action))
+        const std::optional<Blocker> blocker = gates::EvaluateMaintenance(out.before.status, request.action);
+        if (blocker)
         {
             if (!(handlers.onBlocker && handlers.onBlocker(*blocker)))
             {
@@ -307,6 +303,27 @@ namespace ewr {
             }
 
             out.overrides.push_back({ "blocker", blocker->errorName, blocker->errorCode });
+        }
+
+        // A full or missing box behind another objection is its own question:
+        // going past the printer's error must not go past the box unasked. A
+        // printer that names the box in its own error was asked about it already.
+        if (blocker && request.action == MaintenanceAction::PowerClean)
+        {
+            const Blocker box = BoxObjection(out.before.status);
+            if (!box.errorName.empty() && box.errorName != blocker->errorName)
+            {
+                if (!(handlers.onBlocker && handlers.onBlocker(box)))
+                {
+                    m_reporter.Log(log::Level::Info, log::Stage::Read, "maintenance.aborted",
+                                   "[i] Stopped before sending anything. Nothing was changed.");
+                    out.phase = MaintenancePhase::Aborted;
+                    out.error = "Stopped on " + box.errorName + ".";
+                    return out;
+                }
+
+                out.overrides.push_back({ "blocker", box.errorName, box.errorCode });
+            }
         }
 
         // How much room the box has left, before the person is asked: the

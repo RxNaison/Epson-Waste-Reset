@@ -98,7 +98,7 @@ Both come from the first USB session of a run that ends with the printer silent,
 | `session.range_reads`, `session.single_reads` | `bytes`, `requests`: whether a long read went by ranges or byte by byte |
 | `session.alternate_key_retry` | `unchanged`: how many bytes kept their old value although every write was acknowledged. The writes go once more with the model's alternate keyword |
 | `maintenance.sending` | `route`: `factory`, `remote` or `factory_print`, `group`: `all`, `black` or `color` |
-| `maintenance.box_free` | `free`: the maintenance box's free space, 1 to 100, before a power cleaning is confirmed. A box that reports 0 or none fitted stops a power cleaning at the blocker gate (`MAINTENANCE BOX FULL`, `NO MAINTENANCE BOX`) |
+| `maintenance.box_free` | `free`: the maintenance box's free space, 1 to 100, before a power cleaning is confirmed. Advice only: EWR does not know how much room a power cleaning needs, and an unknown or absent level sends no event. A box that reports 0, or none fitted, is a blocker instead (`MAINTENANCE BOX FULL`, `NO MAINTENANCE BOX`): it stops the cleaning unless the blocker callback, or `--force-yes`, lets it go on. Behind another objection it is asked on its own, and each one let through is in `overrides` |
 | `maintenance.started` | `state`: the printer's state when it was first seen at work |
 | `maintenance.expected` | `seconds`: how long the printer says the cleaning takes, from its status report. Not every printer says; EWR watches at least that long plus a margin |
 | `maintenance.silent` | `seconds`: when the printer first left a status query unanswered after print data, which it does while it works on the job |

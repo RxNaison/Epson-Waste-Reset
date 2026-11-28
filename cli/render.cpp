@@ -96,8 +96,8 @@ namespace ewr::cli {
         if (st.maintenanceBoxLevel >= 0 || !st.maintenanceBoxText.empty())
         {
             // The printer reports the box's free space: 100 is a new box, 0 a
-            // full one (#79). The bar shows how full it is, like the pads above,
-            // so it turns red as the box fills.
+            // full one (#79). The bar is that free space, like the ink above it,
+            // and turns red as the box fills.
             const std::string condition = (st.maintenanceBoxText == "EMPTY") ? "FULL" : st.maintenanceBoxText;
             const std::string word = ewr::cli::Paint(condition, LevelWordColor(st.maintenanceBoxText));
             char line[192];
@@ -107,7 +107,7 @@ namespace ewr::cli {
                 char freeText[16];
                 snprintf(freeText, sizeof(freeText), "%3d%% free", st.maintenanceBoxLevel);
                 snprintf(line, sizeof(line), "    %-14.14s %s %s  %s", "Maint. box",
-                         GaugeBar(used, ewr::cli::RampColor(used)).c_str(),
+                         GaugeBar(st.maintenanceBoxLevel, ewr::cli::RampColor(used)).c_str(),
                          ewr::cli::Paint(freeText, ewr::cli::RampColor(used)).c_str(), word.c_str());
             }
             else

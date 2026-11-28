@@ -105,6 +105,24 @@ void test_maintenance_blocker_policy()
     CHECK(!ewr::gates::EvaluateMaintenance(fullBox, A::HeadClean).has_value());
     CHECK(!ewr::gates::EvaluateMaintenance(fullBox, A::NozzleCheck).has_value());
 
+    // A host that fills in the level alone is read the same way.
+    ewr::PrinterStatus zeroOnly = idle;
+    zeroOnly.maintenanceBoxLevel = 0;
+    const auto zero = ewr::gates::EvaluateMaintenance(zeroOnly, A::PowerClean);
+    CHECK(zero.has_value() && zero->errorName == "MAINTENANCE BOX FULL");
+
+    // Another objection first: the full box is still told, so going past the
+    // printer's error does not go past the box unheard.
+    ewr::PrinterStatus padsAndBox = fullBox;
+    padsAndBox.hasError = true;
+    padsAndBox.errorCode = 0x10;
+    padsAndBox.errorName = "SERVICE REQUEST";
+    const auto both = ewr::gates::EvaluateMaintenance(padsAndBox, A::PowerClean);
+    CHECK(both.has_value() && both->errorName == "SERVICE REQUEST" && both->errorCode == 0x10);
+    CHECK(both.has_value() && both->explanation.find("MAINTENANCE BOX FULL") != std::string::npos);
+    const auto padsOnly = ewr::gates::EvaluateMaintenance(padsAndBox, A::HeadClean);
+    CHECK(padsOnly.has_value() && padsOnly->explanation.find("MAINTENANCE BOX") == std::string::npos);
+
     ewr::PrinterStatus noBox = idle;
     noBox.maintenanceBoxText = "MISSING";
     const auto missing = ewr::gates::EvaluateMaintenance(noBox, A::PowerClean);
@@ -145,9 +163,18 @@ void test_maintenance_power_clean_and_the_maintenance_box()
         ewr::Maintenance maintenance(gw, &model, reporter);
         maintenance.pollIntervalMs = 0;
 
-        const ewr::MaintenanceOutcome out = maintenance.Run(charge);
+        // Told before the person decides, not after.
+        std::string seenAtConfirm;
+        ewr::MaintenanceHandlers handlers;
+        handlers.confirm = [&](const ewr::StateSnapshot&, const std::string&) {
+            seenAtConfirm = reported;
+            return true;
+        };
+
+        const ewr::MaintenanceOutcome out = maintenance.Run(charge, handlers);
         CHECK(out.phase == ewr::MaintenancePhase::Done);
         CHECK(reported == "43");
+        CHECK(seenAtConfirm == "43");
         CHECK(out.before.status.maintenanceBoxLevel == 43);
         CHECK(gw.jobs.size() == 1);
     }

@@ -23,6 +23,27 @@ namespace ewr {
         // Three silent polls in a row: the printer is gone, not busy.
         constexpr int kSilentPollsAllowed = 3;
 
+        // What stops a power cleaning in the maintenance box itself, whatever
+        // else the printer reports. The level is the box's free space (#79);
+        // how much a power cleaning needs is not published, so only a box with
+        // none left, or none fitted, counts. Empty when the box allows it.
+        Blocker BoxObjection(const PrinterStatus& status)
+        {
+            Blocker box;
+            if (status.maintenanceBoxLevel == 0 || status.maintenanceBoxText == "EMPTY")
+            {
+                box.errorName = "MAINTENANCE BOX FULL";
+                box.explanation = "The maintenance box reports no free space. A power cleaning would send its\n"
+                                  "    ink into a full box. Replace the maintenance box first.";
+            }
+            else if (status.maintenanceBoxText == "MISSING")
+            {
+                box.errorName = "NO MAINTENANCE BOX";
+                box.explanation = "The printer reports no maintenance box. Fit one before a power cleaning.";
+            }
+            return box;
+        }
+
         std::string ReplyText(const std::vector<unsigned char>& raw)
         {
             const std::vector<unsigned char> payload = d4::ExtractPayload(raw);
@@ -94,6 +115,15 @@ namespace ewr {
     {
         const bool printing = action == MaintenanceAction::NozzleCheck;
 
+        // A full or missing box is told even when another objection comes
+        // first: getting past that one must not mean getting past this unheard.
+        const Blocker box = (action == MaintenanceAction::PowerClean) ? BoxObjection(status) : Blocker();
+        auto withBox = [&box](Blocker found) {
+            if (!box.errorName.empty())
+                found.explanation += "\n    " + box.errorName + " as well: " + box.explanation;
+            return found;
+        };
+
         Blocker blocker;
         blocker.errorCode = status.hasError ? status.errorCode : -1;
 
@@ -122,37 +152,21 @@ namespace ewr {
             else
                 blocker.explanation = "Clear the error on the printer first, then run EWR again.";
 
-            return blocker;
+            return withBox(blocker);
         }
 
         if (status.stateCode != kStateIdle)
         {
             blocker.errorName = "PRINTER BUSY";
             blocker.explanation = "The printer is " + status.stateName + ". Wait until it is idle and run EWR again.";
-            return blocker;
+            return withBox(blocker);
         }
 
         // A power cleaning sends far more ink into the maintenance box than a
         // normal one, and Epson's own utility refuses one on a box short of
-        // space (#79). The level is the box's free space; how much a power
-        // cleaning needs is not published, so only a box with none left, or
-        // none fitted, stops it here.
-        if (action == MaintenanceAction::PowerClean)
-        {
-            if (status.maintenanceBoxText == "EMPTY")
-            {
-                blocker.errorName = "MAINTENANCE BOX FULL";
-                blocker.explanation = "The maintenance box reports no free space. A power cleaning would send its\n"
-                                      "    ink into a full box. Replace the maintenance box first.";
-                return blocker;
-            }
-            if (status.maintenanceBoxText == "MISSING")
-            {
-                blocker.errorName = "NO MAINTENANCE BOX";
-                blocker.explanation = "The printer reports no maintenance box. Fit one before a power cleaning.";
-                return blocker;
-            }
-        }
+        // space (#79).
+        if (!box.errorName.empty())
+            return box;
 
         return std::nullopt;
     }

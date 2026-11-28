@@ -29,7 +29,7 @@ namespace ewr {
         bool hasError = false;        // the printer reported an error entry
         int errorCode = -1;
         std::string errorName;        // "INK OUT", "PAPER JAM", ...
-        int maintenanceBoxLevel = -1; // 0..100, -1 when not readable
+        int maintenanceBoxLevel = -1; // free space, 0..100 (100 = new box), -1 when not readable
         std::string maintenanceBoxText;
         std::string serial;
         std::vector<InkReading> inks;

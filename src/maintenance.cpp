@@ -132,6 +132,28 @@ namespace ewr {
             return blocker;
         }
 
+        // A power cleaning sends far more ink into the maintenance box than a
+        // normal one, and Epson's own utility refuses one on a box short of
+        // space (#79). The level is the box's free space; how much a power
+        // cleaning needs is not published, so only a box with none left, or
+        // none fitted, stops it here.
+        if (action == MaintenanceAction::PowerClean)
+        {
+            if (status.maintenanceBoxText == "EMPTY")
+            {
+                blocker.errorName = "MAINTENANCE BOX FULL";
+                blocker.explanation = "The maintenance box reports no free space. A power cleaning would send its\n"
+                                      "    ink into a full box. Replace the maintenance box first.";
+                return blocker;
+            }
+            if (status.maintenanceBoxText == "MISSING")
+            {
+                blocker.errorName = "NO MAINTENANCE BOX";
+                blocker.explanation = "The printer reports no maintenance box. Fit one before a power cleaning.";
+                return blocker;
+            }
+        }
+
         return std::nullopt;
     }
 
@@ -271,6 +293,17 @@ namespace ewr {
             }
 
             out.overrides.push_back({ "blocker", blocker->errorName, blocker->errorCode });
+        }
+
+        // How much room the box has left, before the person is asked: the
+        // limit Epson's utility applies to a power cleaning is not known here.
+        if (request.action == MaintenanceAction::PowerClean && out.before.status.maintenanceBoxLevel > 0)
+        {
+            const std::string freePercent = std::to_string(out.before.status.maintenanceBoxLevel);
+            m_reporter.Log(log::Level::Info, log::Stage::Read, "maintenance.box_free",
+                           "[i] The maintenance box reports " + freePercent + "% free space. A power cleaning sends a\n"
+                           "    lot of ink into it. If Epson's utility asked for a new box, fit one first.",
+                           { { "free", freePercent } });
         }
 
         if (handlers.confirm && !handlers.confirm(out.before, out.route))
